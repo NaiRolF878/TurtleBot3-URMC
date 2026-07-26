@@ -8,7 +8,7 @@
 
 Der TurtleBot3 Burger hat vier Sensoren, die wir für den Wettbewerb nutzen.
 
-docs/images/turtlebot3_sensor_fields.png
+![Screenshot](docs/images/turtlebot3_sensor_fields.png)
 
 ### LiDAR (360°)
 
