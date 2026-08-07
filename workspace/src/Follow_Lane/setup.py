@@ -1,11 +1,11 @@
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 
 package_name = 'Follow_Lane'
 
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(exclude=['test']),
+    packages=find_namespace_packages(include=[package_name, package_name + '.*']),
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
