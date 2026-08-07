@@ -58,18 +58,7 @@ class detect_lane(Node):
         self.declare_parameter('min_lane_width', 80,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=0, to_value=300, step=1)]))
 
-        # Alle oben deklarierten Parameter als self.<name>-Attribute verfügbar machen
-        param_names = [
-            'hue_white_l', 'hue_white_h', 'saturation_white_l', 'saturation_white_h',
-            'lightness_white_l', 'lightness_white_h',
-            'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
-            'lightness_yellow_l', 'lightness_yellow_h',
-            'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
-            'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
-            'detection_row_factor', 'min_lane_width',
-        ]
-        for name in param_names:
-            setattr(self, name, self.get_parameter(name).value)
+        
 
         #Subscriber:    
         self.sub_raw_image = self.create_subscription(Image, '/camera/image_projected', self.cbGetRawImage ,10)
@@ -96,8 +85,21 @@ class detect_lane(Node):
     def cbFindLane(self, img):
         if self.is_running:
             return
-
         self.is_running = True
+        # Alle oben deklarierten Parameter als self.<name>-Attribute verfügbar machen
+        param_names = [
+            'hue_white_l', 'hue_white_h', 'saturation_white_l', 'saturation_white_h',
+            'lightness_white_l', 'lightness_white_h',
+            'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
+            'lightness_yellow_l', 'lightness_yellow_h',
+            'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
+            'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
+            'detection_row_factor', 'min_lane_width',
+        ]
+        for name in param_names:
+            setattr(self, name, self.get_parameter(name).value)
+
+       
         detection_row_factor = self.detection_row_factor
 
 
@@ -156,19 +158,25 @@ class detect_lane(Node):
             msg_error.data = lane_error
 
             self.pub_lane.publish(msg_error)
-            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error)
+            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, img)
 
         except Exception as e:
             self.get_logger().error(f"cbFindLane failed: {e}")
         finally:
             self.is_running = False
 
-    def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error):
+    def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, img):
         follow_lane_debug_info = FollowLaneDebug()
         follow_lane_debug_info.center_white_x = center_white_x
         follow_lane_debug_info.center_white_y = center_white_y
         follow_lane_debug_info.center_yellow_x = center_yellow_x
         follow_lane_debug_info.center_yellow_y = center_yellow_y
+        follow_lane_debug_info.lane_error = lane_error
+
+        success, encoded = cv2.imencode('.jpg', img)
+        if success:
+            follow_lane_debug_info.raw_image.format = 'jpeg'
+            follow_lane_debug_info.raw_image.data = encoded.tobytes()
 
         follow_lane_debug_info.top_left_x     = self.top_left_x
         follow_lane_debug_info.top_left_y     = self.top_left_y
