@@ -26,3 +26,14 @@ Thumbs.db
 # YOLO Modelle (zu groß für Git)
 *.pt
 *.onnx
+
+# Doku-Bilder (Screenshots, Mockups, generierte Debug-Previews)
+docs/images/
+
+# Lokale Test-/Preview-Skripte
+workspace/src/Follow_Lane/test/
+
+# Sonstiges
+*.log
+*.bag
+*.db3
