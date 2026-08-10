@@ -12,7 +12,7 @@ from follow_lane_msg.msg import FollowLaneDebug
 
 class detect_lane(Node):
     def __init__(self):
-        super.__init__('detect_lane')
+        super().__init__('detect_lane')
 
         # ---------------------------------
         # Parameter:
@@ -60,10 +60,10 @@ class detect_lane(Node):
 
         
 
-        #Subscriber:    
-        self.sub_raw_image = self.create_subscription(Image, '/camera/image_projected', self.cbGetRawImage ,10)
+        #--- Subscriber ---    
+        self.sub_raw_image = self.create_subscription(Image, '/lokal/raw_image', self.cbGetRawImage ,10)
 
-        #Publisher:
+        #--- Publisher ---
         self.pub_lane_error = self.create_publisher(Float64, '/detect/lane',1)
         self.pub_debug_image = self.create_publisher(FollowLaneDebug, '/detect/lane_debug', 1)
 
@@ -157,7 +157,7 @@ class detect_lane(Node):
             msg_error = Float64()
             msg_error.data = lane_error
 
-            self.pub_lane.publish(msg_error)
+            self.pub_lane_error.publish(msg_error)
             self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, img)
 
         except Exception as e:
@@ -235,7 +235,7 @@ class detect_lane(Node):
         except KeyboardInterrupt:
             pass
         finally:
-            node.shut_down()
+
             node.destroy_node()
             rclpy.shutdown()
 

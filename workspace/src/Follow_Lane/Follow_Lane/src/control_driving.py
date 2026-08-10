@@ -1,8 +1,9 @@
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, UInt8
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange
 from rclpy.node import Node
+from switch_control import ControlType
 
 import rclpy
 
@@ -31,19 +32,21 @@ class control_driving(Node):
 
         #Subscriber
         self.sub_lane_error = self.create_subscription(Float64, '/detect/lane','cbFollowLane' ,10)
+        self.sub_control_mode = self.create_subscription(UInt8,'/control/mode',1)
 
 
         #Publishers
         self.pub_cmd_vel = self.create_publisher(Twist,'/control/cmd_vel',1)
 
         #Andere Variablen
+        self.current_control_mode = ControlType
         self.lastError = 0
         self.integral = 0
         self.v = 0
         self.a = 0
 
     def cbFollowLane(self,error):
-        if self._control_mode != ControlType.Lane:
+        if self.current_control_mode != ControlType.Lane:
             return
 
         Current_error = error.data
@@ -66,6 +69,10 @@ class control_driving(Node):
         #von online turtlebot3_autorace
         #twist.angular.z = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
         self.pub_cmd_vel.publish(twist)
+
+    def cbGetControlMode(self,mode):
+        self.current_control_mode = mode
+
 
     def shut_down(self):
         self.get_logger().info('Shuting down control_driving Node')

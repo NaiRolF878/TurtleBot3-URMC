@@ -1,0 +1,39 @@
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image, LaserScan
+
+
+
+class ingress_node(Node):
+    def __init__(self):
+        super().__init__('ingress_node')
+
+        #--- Subscriber ---    
+        self.sub_raw_image = self.create_subscription(Image, '/camera/image_projected', self.cbPubLokalRawImage ,10)
+        self.sub_scan = self.create_subscription(LaserScan, '/scan', self.cbPubLokalLIDARScan,10)
+        #--- Publisher ---
+        self.pub_lokal_raw_image = self.create_publisher(Image, '/lokal/raw_image',1)
+        self.pub_lokal_scan = self.create_publisher(LaserScan, '/lokal/scan', 1)
+
+    def cbPubLokalRawImage(self, img):
+        self.pub_lokal_raw_image.publish(img)
+
+    def cbPubLokalLIDARScan(self, scan):
+        self.pub_lokal_scan.publish(scan)
+
+
+    def main(args=None):    
+        rclpy.init(args=args)
+        node = ingress_node()
+        try:
+            rclpy.spin(node)
+        except KeyboardInterrupt:
+            pass
+        finally:
+
+            node.destroy_node()
+            rclpy.shutdown()
+
+
+    if __name__ == '__main__':
+        main()
