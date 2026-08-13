@@ -33,6 +33,16 @@ docs/images/
 # Lokale Test-/Preview-Skripte
 workspace/src/Follow_Lane/test/
 
+# Claude-spezifisch (nur lokales Arbeitsgedaechtnis, gehoert nicht ins Repo).
+# Liegt im gemounteten Workspace und ueberlebt daher einen Container-Rebuild --
+# aber NICHT einen frischen Clone auf einem anderen Rechner.
+CLAUDE.md
+docs/MEMORY.md
+.claude/
+
+# Diagnose-Logs von scripts/tb/status_log.sh
+logs/
+
 # Sonstiges
 *.log
 *.bag

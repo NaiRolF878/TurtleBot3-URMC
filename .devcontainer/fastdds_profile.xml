@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Verhindert IP-Fragmentierung von DDS-Nachrichten.
+
+  Problem: Grosse Samples (Kamerabild 800x600x3 = 1.44 MB, aber auch schon ein
+  LaserScan mit ~3 KB) passen nicht in ein UDP-Datagramm. Ohne diese Einstellung
+  ueberlaesst FastDDS das Zerlegen dem IP-Layer. Geht dann EIN Fragment verloren,
+  ist das komplette Datagramm hin. Auf diesem WLAN scheitern dadurch ~98 % aller
+  Reassemblierungen (nachgemessen ueber /proc/net/snmp: ReasmFails vs ReasmOKs)
+  -> Bilder und Scans kommen praktisch nie an, waehrend kleine Nachrichten und
+  die Discovery problemlos durchgehen.
+
+  Loesung: maxMessageSize unter die MTU (1500) setzen. FastDDS fragmentiert dann
+  selbst auf RTPS-Ebene, jedes UDP-Datagramm passt in ein einzelnes IP-Paket,
+  und ein Verlust kostet nur dieses eine Stueck statt des ganzen Bildes.
+
+  Bewusst OHNE interfaceWhiteList: die vorherige Fassung hatte die WLAN-IP
+  hartkodiert und legte nach jedem Netzwechsel die komplette Kommunikation lahm.
+
+  Aktivieren (auf BEIDEN Seiten, Laptop und Bot):
+      export FASTRTPS_DEFAULT_PROFILES_FILE=/pfad/zu/fastdds_profile.xml
+  Entscheidend ist die Sender-Seite - fuer Kamera und LIDAR also der Bot.
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <transport_descriptors>
+            <!-- Lokaler Transport zwischen Nodes auf DEMSELBEN Rechner.
+                 Muss hier explizit stehen: useBuiltinTransports=false schaltet die
+                 eingebauten Transporte ab, und das sind UDPv4 UND Shared Memory.
+                 Ohne diesen Eintrag lief die komplette laptop-interne Kommunikation
+                 (ingress_node -> detect_lane -> debug_view -> rqt) ueber UDP-Loopback,
+                 in 1400-Byte-Haeppchen zerlegt -- genau der Pfad, den ingress_node
+                 eigentlich schnell halten soll. Nachgemessen: /dev/shm blieb leer.
+                 SHM kopiert stattdessen einmal in ein gemeinsames Speichersegment,
+                 ohne Fragmentierung und ohne Netzwerk-Stack. -->
+            <transport_descriptor>
+                <transport_id>shm_lokal</transport_id>
+                <type>SHM</type>
+            </transport_descriptor>
+
+            <transport_descriptor>
+                <transport_id>udp_ohne_ip_fragmentierung</transport_id>
+                <type>UDPv4</type>
+                <!-- < MTU 1500 abzueglich IP- (20) und UDP-Header (8) -->
+                <maxMessageSize>1400</maxMessageSize>
+                <sendBufferSize>1048576</sendBufferSize>
+                <!-- Socket-Puffer, KEIN dauerhafter RAM-Verbrauch: der Kernel haelt hier
+                     nur kurz Pakete, bis die Anwendung sie abholt. 4 MB von 4 GB = 0.1 %.
+                     Ist net.core.rmem_max kleiner, kappt der Kernel still auf diesen Wert
+                     -- dann laufen Bursts (ein Bild = viele Pakete auf einmal) ueber und
+                     die Pakete sind weg. Klein ist hier also NICHT sparsam, sondern
+                     verlustbehaftet. Auf dem Bot pruefen: sysctl net.core.rmem_max -->
+                <receiveBufferSize>4194304</receiveBufferSize>
+            </transport_descriptor>
+        </transport_descriptors>
+
+        <participant profile_name="default_participant" is_default_profile="true">
+            <rtps>
+                <!-- Reihenfolge = Praeferenz: lokal SHM, alles andere ueber UDP. -->
+                <userTransports>
+                    <transport_id>shm_lokal</transport_id>
+                    <transport_id>udp_ohne_ip_fragmentierung</transport_id>
+                </userTransports>
+                <useBuiltinTransports>false</useBuiltinTransports>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>

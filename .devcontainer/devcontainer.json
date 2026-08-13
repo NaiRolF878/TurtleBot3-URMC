@@ -18,9 +18,12 @@
         "Ranch-Hand-Robotics.rde-ros-2",
         "Ranch-Hand-Robotics.urdf-editor",
         "ms-vscode.cpptools",
-        "ms-python.python"
+        "ms-python.python",
+        "anthropic.claude-code",
+        "ms-azuretools.vscode-containers"
       ]
     }
   },
-  "postCreateCommand": "mkdir -p ~/turtlebot3_ws/src && cd ~/turtlebot3_ws/src && git clone -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git && cd ~/turtlebot3_ws && colcon build --symlink-install && echo 'source ~/turtlebot3_ws/install/setup.bash' >> ~/.bashrc"
+  "containerEnv": { "ROS_DOMAIN_ID": "33" },
+  "postCreateCommand": "mkdir -p ~/turtlebot3_ws/src && cd ~/turtlebot3_ws/src && git clone -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git && cd ~/turtlebot3_ws && colcon build --symlink-install && echo 'source ~/turtlebot3_ws/install/setup.bash' >> ~/.bashrc && echo '[ -f /workspaces/TurtleBot3-URMC/workspace/install/setup.bash ] && source /workspaces/TurtleBot3-URMC/workspace/install/setup.bash' >> ~/.bashrc && echo \"alias tb='bash /workspaces/TurtleBot3-URMC/scripts/tb/launch.sh'\" >> ~/.bashrc && echo \"alias botssh='bash /workspaces/TurtleBot3-URMC/scripts/tb/ssh-bot.sh'\" >> ~/.bashrc && echo \"alias botcheck='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-check.sh'\" >> ~/.bashrc"
 }

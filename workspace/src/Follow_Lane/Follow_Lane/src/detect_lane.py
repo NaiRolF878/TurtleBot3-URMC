@@ -6,6 +6,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64
 from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
 from follow_lane_msg.msg import FollowLaneDebug
 
@@ -13,6 +14,11 @@ from follow_lane_msg.msg import FollowLaneDebug
 class detect_lane(Node):
     def __init__(self):
         super().__init__('detect_lane')
+
+        self.get_logger().info('Started detect_lane Node.')
+
+        self.bridge = CvBridge()
+
 
         # ---------------------------------
         # Parameter:
@@ -60,8 +66,13 @@ class detect_lane(Node):
 
         
 
-        #--- Subscriber ---    
-        self.sub_raw_image = self.create_subscription(Image, '/lokal/raw_image', self.cbGetRawImage ,10)
+        #--- Subscriber ---
+        # Tiefe 1, NICHT 10: die Kamera liefert 30 Bilder/s, die Verarbeitung hier ist
+        # langsamer. Bei Tiefe 10 stapeln sich bis zu 10 Frames in der Queue und der
+        # Regler bekommt Bilder, die bis zu ~330 ms alt sind -- er lenkt dann nach einer
+        # Situation, die es nicht mehr gibt. Fuer einen Live-Regelkreis ist das neueste
+        # Bild immer besser als ein vollstaendiger, aber veralteter Verlauf.
+        self.sub_raw_image = self.create_subscription(Image, '/lokal/raw_image', self.cbGetRawImage ,1)
 
         #--- Publisher ---
         self.pub_lane_error = self.create_publisher(Float64, '/detect/lane',1)
@@ -86,26 +97,26 @@ class detect_lane(Node):
         if self.is_running:
             return
         self.is_running = True
-        # Alle oben deklarierten Parameter als self.<name>-Attribute verfügbar machen
-        param_names = [
-            'hue_white_l', 'hue_white_h', 'saturation_white_l', 'saturation_white_h',
-            'lightness_white_l', 'lightness_white_h',
-            'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
-            'lightness_yellow_l', 'lightness_yellow_h',
-            'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
-            'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
-            'detection_row_factor', 'min_lane_width',
-        ]
-        for name in param_names:
-            setattr(self, name, self.get_parameter(name).value)
-
-       
-        detection_row_factor = self.detection_row_factor
-
-
+        # Alles ab hier im try: sonst wuerde eine Exception vor dem try das Flag
+        # dauerhaft auf True lassen (finally liefe nie) und der Node verarbeitet
+        # still keine Bilder mehr.
         try:
-            np_arr = np.frombuffer(img.data, np.uint8)
-            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            # Alle oben deklarierten Parameter als self.<name>-Attribute verfügbar machen
+            param_names = [
+                'hue_white_l', 'hue_white_h', 'saturation_white_l', 'saturation_white_h',
+                'lightness_white_l', 'lightness_white_h',
+                'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
+                'lightness_yellow_l', 'lightness_yellow_h',
+                'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
+                'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
+                'detection_row_factor', 'min_lane_width',
+            ]
+            for name in param_names:
+                setattr(self, name, self.get_parameter(name).value)
+
+            detection_row_factor = self.detection_row_factor
+
+            cv_image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
             self.raw_img = cv_image
             img = self.crop_img(cv_image)
 
@@ -152,13 +163,21 @@ class detect_lane(Node):
                     center_white_x = white_alternative
 
             lane_center = (center_white_x + center_yellow_x) / 2
-            lane_error = 1-(lane_center / len(img) * 2)
+            # lane_center ist eine x-Koordinate -> auf die Bildbreite normieren.
+            # Vorher stand hier len(img) (= Hoehe); das faellt nur nicht auf, solange
+            # der Crop quadratisch ist, und wuerde die Lenkung bei anderem Zuschnitt verfaelschen.
+            lane_error = 1-(lane_center / len(img[0]) * 2)
 
             msg_error = Float64()
             msg_error.data = lane_error
 
             self.pub_lane_error.publish(msg_error)
-            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, img)
+            # Bewusst cv_image (das volle Kamerabild) statt img (der entzerrte Ausschnitt):
+            # Die RoI-Eckpunkte sind in Original-Koordinaten angegeben. Auf dem Ausschnitt
+            # gezeichnet landen sie irgendwo im Nichts; auf dem Originalbild zeigen sie,
+            # welchen Bereich crop_img tatsaechlich herausschneidet -- genau das, was man
+            # zum Einstellen der Perspektiv-Punkte sehen muss.
+            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, cv_image)
 
         except Exception as e:
             self.get_logger().error(f"cbFindLane failed: {e}")
@@ -221,27 +240,27 @@ class detect_lane(Node):
                     a.append(np.where(th1[row] == 255)[0][0])
 
         if len(a) > 10:
-            return np.median(a)
+            return int(np.median(a))
         else:
             return no_lane_value
 
     
     #NOCHMAL Überarbeiten
-    def main(args=None):    
-        rclpy.init(args=args)
-        node = detect_lane()
-        try:
-            rclpy.spin(node)
-        except KeyboardInterrupt:
-            pass
-        finally:
+def main(args=None):    
+    rclpy.init(args=args)
+    node = detect_lane()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
 
-            node.destroy_node()
-            rclpy.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-    if __name__ == '__main__':
-        main()
+if __name__ == '__main__':
+    main()
 
     
 

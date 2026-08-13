@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y \
     git \
     wget \
     nano \
+    iproute2 \
+    iputils-ping \
+    nmap \
     && rm -rf /var/lib/apt/lists/*
 
 # TurtleBot3-relevante ROS-Pakete (wie in der ROBOTIS Doku)

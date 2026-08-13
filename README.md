@@ -13,8 +13,8 @@ Bei der URMC programmieren Teams standardisierte TurtleBot3 Burger Roboter, die 
 ## Tech-Stack
 
 - **Roboter:** TurtleBot3 Burger (LiDAR, 2D-Kamera, IMU, Rad-Encoder)
-- **Software:** ROS2 Jazzy, Gazebo Harmonic, OpenCV
-- **Betriebssystem:** Ubuntu 24.04 (im Docker-Container)
+- **Software:** ROS2 Humble, Gazebo Classic, OpenCV
+- **Betriebssystem:** Ubuntu 22.04 (im Docker-Container)
 - **Sprache:** Python 3
 
 ## Projekt starten

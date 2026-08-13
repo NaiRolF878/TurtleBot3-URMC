@@ -3,14 +3,19 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import Float64, UInt8
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange
 from rclpy.node import Node
-from switch_control import ControlType
+from Follow_Lane.src.switch_control import ControlType
+
+import signal
+import time
 
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 
 class control_driving(Node):
     def __init__(self):
-        super.__init__('control_driving')
+        super().__init__('control_driving')
 
+        self.get_logger().info('Started control_driving Node.')
 
         # ---------------------------------
         # Parameter:
@@ -29,17 +34,23 @@ class control_driving(Node):
         self.declare_parameter('speed_curve_factor', 1.0,  frange(0.0, 5.0,  0.01))
         self.declare_parameter('min_speed_factor',   0.5,  frange(0.0, 1.0,  0.01))
 
+        self._param_names = [
+            'kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor',
+        ]
+
 
         #Subscriber
-        self.sub_lane_error = self.create_subscription(Float64, '/detect/lane','cbFollowLane' ,10)
-        self.sub_control_mode = self.create_subscription(UInt8,'/control/mode',1)
+        self.sub_lane_error = self.create_subscription(Float64, '/detect/lane',self.cbFollowLane ,10)
+        self.sub_control_mode = self.create_subscription(UInt8,'/control/mode',self.cbGetControlMode,1)
 
 
         #Publishers
         self.pub_cmd_vel = self.create_publisher(Twist,'/control/cmd_vel',1)
 
         #Andere Variablen
-        self.current_control_mode = ControlType
+        # Default passend zum Default von switch_control, damit schon vor der ersten
+        # /control/mode-Nachricht gefahren wird.
+        self.current_control_mode = ControlType.Lane
         self.lastError = 0
         self.integral = 0
         self.v = 0
@@ -48,6 +59,11 @@ class control_driving(Node):
     def cbFollowLane(self,error):
         if self.current_control_mode != ControlType.Lane:
             return
+
+        # declare_parameter legt keine self.<name>-Attribute an -> hier einlesen.
+        # Gleichzeitig wirken so zur Laufzeit geaenderte Parameter sofort.
+        for name in self._param_names:
+            setattr(self, name, self.get_parameter(name).value)
 
         Current_error = error.data
 
@@ -59,38 +75,53 @@ class control_driving(Node):
         d = self.kd * ((Current_error - self.lastError)/0.1) #soll wert gewichtung des D-Teils erhöhen, da die Funktion 10 mal pro Sekunde aufgerufen wird
         self.lastError = Current_error
 
-        self.v = self.MAX_VEL * max(self.min_speed_factor, 1 - abs(error) * self.speed_curve_factor)
+        self.v = self.MAX_VEL * max(self.min_speed_factor, 1 - abs(Current_error) * self.speed_curve_factor)
         self.a = p + i + d
 
         #v und Omega werte in Twist publishen
         twist = Twist()
-        twist.linear.x = self.v
-        twist.angular.z =  self.a
-        #von online turtlebot3_autorace
-        #twist.angular.z = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
+        twist.linear.x = float(self.v)
+        # Ungebremste PID-Ausgabe auf echter Hardware begrenzen.
+        twist.angular.z = float(max(-2.0, min(2.0, self.a)))
         self.pub_cmd_vel.publish(twist)
 
     def cbGetControlMode(self,mode):
-        self.current_control_mode = mode
+        # mode ist eine UInt8-Message; fuer den Vergleich mit ControlType.Lane
+        # muss daraus das Enum-Member werden.
+        try:
+            self.current_control_mode = ControlType(mode.data)
+        except ValueError:
+            self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {mode.data}')
 
 
     def shut_down(self):
         self.get_logger().info('Shuting down control_driving Node')
         twist = Twist()
-        self.pub_cmd_vel.publish(twist)
+        for _ in range(10):
+            self.pub_cmd_vel.publish(twist)
+            time.sleep(0.02)
 
 def main(args= None):
-    rclpy.Rate(1).sleep(5)
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = control_driving()
+
+    stop = False
+
+    def on_signal(signum, frame):
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
     try:
-        None
-    except KeyboardInterrupt:
-        pass
+        while rclpy.ok() and not stop:
+            rclpy.spin_once(node, timeout_sec=0.1)
     finally:
         node.shut_down()
         node.destroy_node()
-        rclpy.shutdown
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
