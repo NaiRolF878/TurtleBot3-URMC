@@ -1,5 +1,7 @@
 /detect_lane:
   ros__parameters:
+    clahe_clip_limit: 2.0
+    clahe_tile_grid_size: 8
     bottom_left_x: -197
     bottom_left_y: 599
     bottom_right_x: 1191

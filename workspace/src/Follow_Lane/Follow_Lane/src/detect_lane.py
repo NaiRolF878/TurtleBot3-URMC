@@ -66,7 +66,16 @@ class detect_lane(Node):
         self.declare_parameter('min_lane_width', 80,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=0, to_value=300, step=1)]))
 
-        
+        # --- CLAHE-Parameter ---
+        # Gleicht ueber-/unterbelichtete Bildbereiche vor der HSV-Filterung an, damit
+        # wechselnde Lichtverhaeltnisse die festen HSV-Schwellwerte nicht verfaelschen.
+        self.declare_parameter('clahe_clip_limit', 2.0,
+            ParameterDescriptor(floating_point_range=[
+                FloatingPointRange(from_value=0.1, to_value=40.0, step=0.0)]))
+        self.declare_parameter('clahe_tile_grid_size', 8,
+            ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=64, step=1)]))
+
+
 
         #--- Subscriber ---
         # Tiefe 1, NICHT 10: die Kamera liefert 30 Bilder/s, die Verarbeitung hier ist
@@ -114,6 +123,7 @@ class detect_lane(Node):
                 'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
                 'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
                 'detection_row_factor', 'min_lane_width',
+                'clahe_clip_limit', 'clahe_tile_grid_size',
             ]
             for name in param_names:
                 setattr(self, name, self.get_parameter(name).value)
@@ -122,7 +132,8 @@ class detect_lane(Node):
 
             cv_image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
             self.raw_img = cv_image
-            img = self.crop_img(cv_image)
+            img = self.apply_clahe(cv_image)
+            img = self.crop_img(img)
 
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
@@ -235,6 +246,18 @@ class detect_lane(Node):
         follow_lane_debug_info.bottom_right_y = self.bottom_right_y
 
         self.pub_debug_image.publish(follow_lane_debug_info)
+
+    def apply_clahe(self, img):
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+
+        tile_size = max(1, int(self.clahe_tile_grid_size))
+        clahe = cv2.createCLAHE(clipLimit=float(self.clahe_clip_limit),
+                                 tileGridSize=(tile_size, tile_size))
+        l_channel = clahe.apply(l_channel)
+
+        lab = cv2.merge((l_channel, a_channel, b_channel))
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     def crop_img(self,img):
         
