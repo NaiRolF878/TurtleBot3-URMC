@@ -15,3 +15,7 @@ int32 center_yellow_x
 int32 center_yellow_y
 int32 center_white_x
 int32 center_white_y
+
+int32 lane_center
+
+int32 crop_im_size

@@ -1,0 +1,8 @@
+/control_driving:
+  ros__parameters:
+    kp: 3.6
+    ki: 0.15
+    kd: 1.7
+    MAX_VEL: 0.34
+    speed_curve_factor: 0.65
+    min_speed_factor: 0.5

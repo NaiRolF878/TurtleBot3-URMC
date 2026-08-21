@@ -70,8 +70,15 @@ class debug_view(Node):
         ratio = (state.voltage - BATT_EMPTY_V) / (BATT_FULL_V - BATT_EMPTY_V)
         return int(round(max(0.0, min(1.0, ratio)) * 100))
 
+    
 
     def build_debug_image(self):
+
+        def proj(x, y):
+            p = np.array([[[float(x), float(y)]]], dtype=np.float32)
+            r = cv2.perspectiveTransform(p, M_inv)
+            return (int(r[0][0][0]), int(r[0][0][1]))
+
         if self.follow_lane_debug is None:
             return
 
@@ -97,6 +104,18 @@ class debug_view(Node):
 
         cv2.polylines(raw,[follow_lane_RoI],isClosed=True, color=(0, 255, 255), thickness=2, lineType=cv2.LINE_AA)
 
+        # center_*_x/y kommen aus detect_lane vom entzerrten Ausschnitt (crop_img()),
+        # nicht vom raw_image -- ohne Ruecktransformation ueber M_inv landen die
+        # Punkte an der falschen Stelle (falscher Massstab + falsche Perspektive).
+        size = self.follow_lane_debug.crop_im_size
+        pts_warped = np.float32([[0, 0], [size, 0], [size, size], [0, size]])
+        M_inv = cv2.getPerspectiveTransform(pts_warped, follow_lane_RoI.astype(np.float32))
+
+        cv2.circle(raw, proj(self.follow_lane_debug.center_yellow_x, self.follow_lane_debug.center_yellow_y), 6, (0, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(raw, proj(self.follow_lane_debug.center_white_x, self.follow_lane_debug.center_white_y), 6, (255, 255, 255), -1, cv2.LINE_AA)
+        lane_center_y = (self.follow_lane_debug.center_yellow_y + self.follow_lane_debug.center_white_y) / 2
+        cv2.circle(raw, proj(self.follow_lane_debug.lane_center, lane_center_y), 6, (255, 255, 255), -1, cv2.LINE_AA)
+
         panel_w = 230
 
         panelGeneric = np.zeros((raw_h, panel_w, 3), dtype=np.uint8)
@@ -107,6 +126,7 @@ class debug_view(Node):
         cv2.putText(panelGeneric,f"{self.target_v} m/s"    ,(8,155) ,cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(135, 250, 159)    ,2  ,cv2.LINE_AA)
         cv2.putText(panelGeneric,'Actual:'    ,(8,195) ,cv2.FONT_HERSHEY_SIMPLEX   ,0.55    ,(200, 200, 200)    ,1  ,cv2.LINE_AA)
         cv2.putText(panelGeneric,f"{self.actual_v} m/s"    ,(8,230) ,cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(250, 135, 223)    ,2  ,cv2.LINE_AA)
+        
 
         panelMode = np.zeros((raw_h, panel_w, 3), dtype=np.uint8)
 
@@ -142,9 +162,6 @@ class debug_view(Node):
         if x < 0 or y < 0 or icon_h > head_panel.shape[0]:
             return
 
-        # Bewusst per numpy statt cv2.copyTo: dessen Ziel waere hier ein nicht
-        # zusammenhaengender Teilausschnitt, in den OpenCV je nach Version nicht
-        # zurueckschreibt -- das Icon fehlt dann kommentarlos.
         if icon.shape[2] == 4:
             alpha = icon[:, :, 3:4].astype(np.float32) / 255.0
             head_panel[y:y+icon_h, x:x+icon_w] = (
@@ -155,9 +172,7 @@ class debug_view(Node):
             head_panel[y:y+icon_h, x:x+icon_w] = icon[:, :, :3]
 
     def show_battery_level(self):
-        # None -> kein Icon. Ohne diese Zeile wuerde der Vergleich unten mit
-        # "'>=' not supported between NoneType and int" fliegen, bevor die erste
-        # Batterie-Nachricht da ist -- und damit das ganze Debug-Bild verhindern.
+
         if self.battery_level is None:
             return None
         if   self.battery_level >= 75: return self.battery_icons[3]

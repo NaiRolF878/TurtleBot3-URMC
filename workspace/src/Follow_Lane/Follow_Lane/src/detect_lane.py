@@ -5,7 +5,7 @@ import cv2
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from cv_bridge import CvBridge
 
 from follow_lane_msg.msg import FollowLaneDebug
@@ -26,7 +26,8 @@ class detect_lane(Node):
 
         # --- Wiederverwendbare Ranges ---
         hsv  = ParameterDescriptor(integer_range=[IntegerRange(from_value=0,    to_value=255,  step=1)])
-        crop = ParameterDescriptor(integer_range=[IntegerRange(from_value=-100, to_value=1000, step=1)])
+        # Obergrenze deckt 1920x1080 ab, negativ weil RoI-Ecken ausserhalb des Bildes liegen duerfen
+        crop = ParameterDescriptor(integer_range=[IntegerRange(from_value=-500, to_value=2200, step=1)])
 
         # --- HSV-Parameter ---
         # --- White ---
@@ -58,9 +59,10 @@ class detect_lane(Node):
         self.declare_parameter('bottom_right_y', 382, crop)
 
         # --- Sonstige ---
+        # step=0.0: rclpy prueft sonst (wert-from) % step == 0, was mit Fliesskomma zufaellig fehlschlaegt
         self.declare_parameter('detection_row_factor', 0.75,
             ParameterDescriptor(floating_point_range=[
-                FloatingPointRange(from_value=0.5, to_value=0.95, step=0.01)]))
+                FloatingPointRange(from_value=0.5, to_value=0.95, step=0.0)]))
         self.declare_parameter('min_lane_width', 80,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=0, to_value=300, step=1)]))
 
@@ -77,6 +79,8 @@ class detect_lane(Node):
         #--- Publisher ---
         self.pub_lane_error = self.create_publisher(Float64, '/detect/lane',1)
         self.pub_debug_image = self.create_publisher(FollowLaneDebug, '/detect/lane_debug', 1)
+        # Muss auf /compressed enden: image_transport deutet das letzte Namenssegment als Transport
+        self.pub_mask_debug = self.create_publisher(CompressedImage, '/detect/mask_debug/compressed', 1)
 
         #Andere Variablen:
 
@@ -163,34 +167,58 @@ class detect_lane(Node):
                     center_white_x = white_alternative
 
             lane_center = (center_white_x + center_yellow_x) / 2
-            # lane_center ist eine x-Koordinate -> auf die Bildbreite normieren.
-            # Vorher stand hier len(img) (= Hoehe); das faellt nur nicht auf, solange
-            # der Crop quadratisch ist, und wuerde die Lenkung bei anderem Zuschnitt verfaelschen.
             lane_error = 1-(lane_center / len(img[0]) * 2)
 
             msg_error = Float64()
             msg_error.data = lane_error
 
             self.pub_lane_error.publish(msg_error)
-            # Bewusst cv_image (das volle Kamerabild) statt img (der entzerrte Ausschnitt):
-            # Die RoI-Eckpunkte sind in Original-Koordinaten angegeben. Auf dem Ausschnitt
-            # gezeichnet landen sie irgendwo im Nichts; auf dem Originalbild zeigen sie,
-            # welchen Bereich crop_img tatsaechlich herausschneidet -- genau das, was man
-            # zum Einstellen der Perspektiv-Punkte sehen muss.
-            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, cv_image)
+            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image)
+            self.publish_mask_debug(mask_yellow, mask_white,
+                                    center_yellow_x, center_yellow_y, center_white_x, center_white_y)
 
         except Exception as e:
             self.get_logger().error(f"cbFindLane failed: {e}")
         finally:
             self.is_running = False
 
-    def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, img):
+    def publish_mask_debug(self, mask_yellow, mask_white,
+                           center_yellow_x, center_yellow_y, center_white_x, center_white_y):
+        # Nur encodieren, wenn jemand zuschaut -- das JPEG kostet sonst pro Frame Rechenzeit
+        if self.pub_mask_debug.get_subscription_count() == 0:
+            return
+
+        overlay = np.zeros((mask_yellow.shape[0], mask_yellow.shape[1], 3), np.uint8)
+        both = (mask_yellow > 0) & (mask_white > 0)
+        overlay[mask_white > 0]  = (255, 255, 255)
+        overlay[mask_yellow > 0] = (0, 255, 255)
+        # Rot = beide Masken treffen dasselbe Pixel, also ueberlappende HSV-Bereiche
+        overlay[both] = (0, 0, 255)
+
+        # Gruen/Magenta, weil Gelb, Weiss und Rot hier schon belegt sind.
+        # Keine Ruecktransformation noetig: die center_* liegen bereits im entzerrten Bild.
+        cv2.circle(overlay, (center_yellow_x, center_yellow_y), 6, (0, 255, 0),   -1, cv2.LINE_AA)
+        cv2.circle(overlay, (center_white_x,  center_white_y),  6, (255, 0, 255), -1, cv2.LINE_AA)
+
+        success, encoded = cv2.imencode('.jpg', overlay)
+        if not success:
+            return
+
+        msg = CompressedImage()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.format = 'jpeg'
+        msg.data = encoded.tobytes()
+        self.pub_mask_debug.publish(msg)
+
+    def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, lane_center, img):
         follow_lane_debug_info = FollowLaneDebug()
         follow_lane_debug_info.center_white_x = center_white_x
         follow_lane_debug_info.center_white_y = center_white_y
         follow_lane_debug_info.center_yellow_x = center_yellow_x
         follow_lane_debug_info.center_yellow_y = center_yellow_y
+        follow_lane_debug_info.lane_center = lane_center
         follow_lane_debug_info.lane_error = lane_error
+        follow_lane_debug_info.crop_im_size = self._crop_im_size
 
         success, encoded = cv2.imencode('.jpg', img)
         if success:
@@ -224,10 +252,10 @@ class detect_lane(Node):
 
     def get_x_for_driving(self, mask, distance, no_lane_value, left_line):
         grad = cv2.Sobel(mask, cv2.CV_16S, 1, 0, ksize=3, scale=1, delta=0, borderType=cv2.BORDER_DEFAULT)
-        abs_grad = np.absolute(grad)
-        uint8_grad = np.uint8(abs_grad)
+        # Betrag, sonst enthaelt th1 nur linke Kanten (rechte sind negativ) und [-1]/[0] liefern dasselbe
+        abs_grad = cv2.convertScaleAbs(grad)
 
-        _,th1 = cv2.threshold(grad,127,255,cv2.THRESH_BINARY)
+        _,th1 = cv2.threshold(abs_grad,127,255,cv2.THRESH_BINARY)
 
         a = []
         for row in range(max(0, distance-50), min(len(mask), distance+50)):

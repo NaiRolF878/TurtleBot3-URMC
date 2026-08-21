@@ -22,17 +22,18 @@ class control_driving(Node):
         # ---------------------------------
 
         # --- Wiederverwendbare Ranges ---
-        def frange(lo, hi, step):
+        # step=0.0: rclpy prueft sonst (wert-from) % step == 0, was mit Fliesskomma zufaellig fehlschlaegt
+        def frange(lo, hi):
             return ParameterDescriptor(floating_point_range=[
-                FloatingPointRange(from_value=lo, to_value=hi, step=step)])
+                FloatingPointRange(from_value=lo, to_value=hi, step=0.0)])
 
         # --- PID / Speed ---
-        self.declare_parameter('kp',                 5.5,  frange(0.0, 10.0, 0.01))
-        self.declare_parameter('ki',                 0.15, frange(0.0, 10.0, 0.01))
-        self.declare_parameter('kd',                 2.75, frange(0.0, 10.0, 0.01))
-        self.declare_parameter('MAX_VEL',            0.34, frange(0.0, 10.0, 0.01))
-        self.declare_parameter('speed_curve_factor', 1.0,  frange(0.0, 5.0,  0.01))
-        self.declare_parameter('min_speed_factor',   0.5,  frange(0.0, 1.0,  0.01))
+        self.declare_parameter('kp',                 5.5,  frange(0.0, 10.0))
+        self.declare_parameter('ki',                 0.15, frange(0.0, 10.0))
+        self.declare_parameter('kd',                 2.75, frange(0.0, 10.0))
+        self.declare_parameter('MAX_VEL',            0.34, frange(0.0, 10.0))
+        self.declare_parameter('speed_curve_factor', 1.0,  frange(0.0, 5.0))
+        self.declare_parameter('min_speed_factor',   0.5,  frange(0.0, 1.0))
 
         self._param_names = [
             'kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor',
@@ -99,7 +100,7 @@ class control_driving(Node):
         twist = Twist()
         for _ in range(10):
             self.pub_cmd_vel.publish(twist)
-            time.sleep(0.02)
+            time.sleep(0.05)
 
 def main(args= None):
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)

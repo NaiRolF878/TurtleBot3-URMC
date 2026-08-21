@@ -18,6 +18,8 @@ setup(
             glob(package_name + '/media/Battery/*.png')),
         (os.path.join('share', package_name, 'launch'),
             glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'Parameter'),
+            glob(package_name + '/Parameter/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

@@ -13,10 +13,11 @@ class safety_stop(Node):
 
         self.get_logger().info('Started safety_stop Node.')
 
+        # step=0.0: rclpy prueft sonst (wert-from) % step == 0, was mit Fliesskomma zufaellig fehlschlaegt
         self.declare_parameter(
             'timeout', 0.5,
             ParameterDescriptor(floating_point_range=[
-                FloatingPointRange(from_value=0.1, to_value=5.0, step=0.05)]))
+                FloatingPointRange(from_value=0.1, to_value=5.0, step=0.0)]))
 
         self.sub_cmd_vel = self.create_subscription(Twist, '/cmd_vel', self.cbCmdVel, 10)
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 1)
