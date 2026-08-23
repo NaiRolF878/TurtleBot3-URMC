@@ -1,0 +1,20 @@
+/lane_costmap_node:
+  ros__parameters:
+    # Kalibrierung Bird's-Eye-Pixel -> Meter, siehe Docstring in lane_costmap_node.py.
+    # Muss am Wettbewerbstag mit Massband gegen die tatsaechliche Kameramontage
+    # kalibriert werden -- die Werte hier sind nur Platzhalter.
+    x_near: 0.15
+    x_far: 0.60
+    y_left: 0.35
+    y_right: -0.35
+
+    frame_id: base_footprint
+    output_topic: /detect/lane_obstacles
+    pixel_stride: 2
+
+/nav2_goal_publisher:
+  ros__parameters:
+    goal_distance: 1.0
+    goal_frame_id: base_footprint
+    num_waypoints: 5
+    watchdog_rate: 1.0
