@@ -1,0 +1,12 @@
+/switch_control:
+  ros__parameters:
+    # --- Obstacle-Erkennung (Lane <-> Obstacle) ---
+    obstacle_check_angle_deg: 30.0
+    obstacle_trigger_distance: 0.4
+    obstacle_clear_debounce: 1.0
+
+    # --- Tunnel-Austritt (Tunnel -> vorheriger Modus) ---
+    tunnel_exit_open_distance: 1.5
+    tunnel_exit_open_ratio: 0.8
+    tunnel_exit_min_lane_pixels: 20
+    tunnel_exit_debounce: 1.0

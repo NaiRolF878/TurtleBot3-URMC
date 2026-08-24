@@ -18,3 +18,12 @@
     goal_frame_id: base_footprint
     num_waypoints: 5
     watchdog_rate: 1.0
+
+/keepout_zone_node:
+  ros__parameters:
+    frame_id: odom
+    robot_frame: base_footprint
+    output_topic: /detect/tunnel_entrance_obstacle
+    entrance_wall_width: 0.6
+    entrance_wall_points: 9
+    publish_rate: 5.0

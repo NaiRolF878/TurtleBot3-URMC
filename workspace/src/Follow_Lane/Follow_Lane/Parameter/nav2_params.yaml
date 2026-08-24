@@ -138,7 +138,7 @@ local_costmap:
       resolution: 0.05
       robot_radius: 0.105
       always_send_full_costmap: true
-      plugins: ["obstacle_layer", "lane_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "lane_layer", "entrance_layer", "inflation_layer"]
 
       # Layer 1: echte Hindernisse vom 360 Grad LiDAR.
       obstacle_layer:
@@ -176,6 +176,31 @@ local_costmap:
           obstacle_max_range: 2.0
           obstacle_min_range: 0.0
           raytrace_max_range: 2.0
+          raytrace_min_range: 0.0
+
+      # Layer 3: die einmalig gemerkte Tunnel-Eingangs-Sperrzone von
+      # keepout_zone_node ueber /detect/tunnel_entrance_obstacle (PointCloud2,
+      # im odom-Frame, deshalb ortsfest statt roboter-relativ). clearing:false
+      # ist hier bewusst -- es gibt keinen echten Sensor-Ursprung fuer diese
+      # virtuellen Punkte, ein Raytrace-Clearing wuerde entlang einer
+      # willkuerlichen Linie im odom-Frame echte Hindernisse mit-loeschen.
+      # Ausserhalb des Tunnel-Modus veroeffentlicht keepout_zone_node nichts,
+      # der Layer bleibt dann einfach leer.
+      entrance_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: "entrance_cloud"
+        entrance_cloud:
+          topic: /detect/tunnel_entrance_obstacle
+          sensor_frame: ""
+          data_type: "PointCloud2"
+          clearing: false
+          marking: true
+          max_obstacle_height: 2.0
+          min_obstacle_height: -1.0
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
           raytrace_min_range: 0.0
 
       # Nicht explizit angefordert, aber ohne Inflation haette jede Zelle neben

@@ -17,6 +17,8 @@ def generate_launch_description():
             default_value=os.path.join(param_dir, 'Follow_Lane_ROI_PI_CAM2.yaml')),
         DeclareLaunchArgument('control_params',
             default_value=os.path.join(param_dir, 'Control_driving_PID.yaml')),
+        DeclareLaunchArgument('switch_control_params',
+            default_value=os.path.join(param_dir, 'Switch_Control.yaml')),
 
         Node(package='Follow_Lane', executable='ingress_node',    name='ingress_node'),
         Node(
@@ -36,7 +38,10 @@ def generate_launch_description():
             # in Gazebo oder hinter einem Mux, der mehrere Regler arbitriert).
             remappings=[('/control/cmd_vel', '/cmd_vel')],
         ),
-        Node(package='Follow_Lane', executable='switch_control',  name='switch_control'),
+        Node(
+            package='Follow_Lane', executable='switch_control', name='switch_control',
+            parameters=[LaunchConfiguration('switch_control_params')],
+        ),
         Node(package='Follow_Lane', executable='debug_view',      name='debug_view'),
         # safety_stop bewusst NICHT gestartet (17.08.2026): loeste beim Testen des
         # Farbfehlers/detect_lane wegen der 0.5s-Timeout-Schwelle staendig unnoetig aus.

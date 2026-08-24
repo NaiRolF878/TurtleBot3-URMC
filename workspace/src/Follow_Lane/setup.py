@@ -34,14 +34,15 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'control_driving    = Follow_Lane.src.control_driving:main',
-            'debug_view         = Follow_Lane.src.debug_view:main',
-            'detect_lane        = Follow_Lane.src.detect_lane:main',
-            'ingress_node       = Follow_Lane.src.ingress_node:main',
-            'lane_costmap_node  = Follow_Lane.src.lane_costmap_node:main',
+            'control_driving     = Follow_Lane.src.control_driving:main',
+            'debug_view          = Follow_Lane.src.debug_view:main',
+            'detect_lane         = Follow_Lane.src.detect_lane:main',
+            'ingress_node        = Follow_Lane.src.ingress_node:main',
+            'keepout_zone_node   = Follow_Lane.src.keepout_zone_node:main',
+            'lane_costmap_node   = Follow_Lane.src.lane_costmap_node:main',
             'nav2_goal_publisher = Follow_Lane.src.nav2_goal_publisher:main',
-            'safety_stop        = Follow_Lane.src.safety_stop:main',
-            'switch_control     = Follow_Lane.src.switch_control:main',
+            'safety_stop         = Follow_Lane.src.safety_stop:main',
+            'switch_control      = Follow_Lane.src.switch_control:main',
         ],
     },
 )

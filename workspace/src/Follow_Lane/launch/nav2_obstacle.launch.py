@@ -31,6 +31,10 @@ def generate_launch_description():
             package='Follow_Lane', executable='nav2_goal_publisher', name='nav2_goal_publisher',
             parameters=[LaunchConfiguration('lane_costmap_params')],
         ),
+        Node(
+            package='Follow_Lane', executable='keepout_zone_node', name='keepout_zone_node',
+            parameters=[LaunchConfiguration('lane_costmap_params')],
+        ),
 
         # Nur Local Costmap + Local Controller (im controller_server-Prozess
         # zusammengefasst) -- kein Global Planner, kein Global Costmap, kein
