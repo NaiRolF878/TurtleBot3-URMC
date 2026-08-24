@@ -6,8 +6,10 @@ from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerR
 from std_msgs.msg import UInt8, Header
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
+from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+from nav2_msgs.srv import ClearEntireCostmap
 
 from Follow_Lane.src.switch_control import ControlType
 
@@ -33,6 +35,13 @@ class keepout_zone_node(Node):
     sie ueberschrieben -- die alte Wand verschwindet dadurch automatisch aus
     zukuenftigen Veroeffentlichungen. Beim Verlassen des Tunnel-Modus wird
     gar nichts mehr veroeffentlicht.
+
+    Zusaetzlich veroeffentlicht dieser Node dieselbe Pose als PoseStamped
+    (fuer tunnel_explorer_node, der daraus die "weit weg vom Eingang"-
+    Bewertung der Frontier-Kandidaten berechnet) und stoesst bei jedem
+    Tunnel-Eintritt das Leeren von global_costmap (dem Kartenspeicher fuer
+    die Tunnel-Exploration, siehe tunnel_explorer_node) an -- sonst wuerden
+    sich Kartendaten eines vorherigen Tunnels mit dem aktuellen vermischen.
     """
 
     def __init__(self):
@@ -67,6 +76,13 @@ class keepout_zone_node(Node):
         #--- Publisher ---
         output_topic = self.get_parameter('output_topic').value
         self.pub_entrance = self.create_publisher(PointCloud2, output_topic, 1)
+        self.pub_entrance_pose = self.create_publisher(PoseStamped, '/tunnel/entrance_pose', 1)
+
+        #--- Service-Client ---
+        # Leert die Tunnel-Explorationskarte (global_costmap) bei jedem neuen
+        # Tunnel-Eintritt -- Standard-Nav2-Service, kein eigener Code noetig.
+        self.clear_global_costmap = self.create_client(
+            ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
 
         #--- Zustand ---
         self.current_control_mode = ControlType.Lane
@@ -92,8 +108,18 @@ class keepout_zone_node(Node):
         if entering_tunnel:
             # Ueberschreibt eine evtl. noch gemerkte Pose eines frueheren Tunnels.
             self.entrance_pose = None
+            self._clear_global_costmap()
         elif leaving_tunnel:
             self.entrance_pose = None
+
+    def _clear_global_costmap(self):
+        if not self.clear_global_costmap.service_is_ready():
+            self.get_logger().warn(
+                'global_costmap-Clear-Service nicht erreichbar -- laeuft planner_server?',
+                throttle_duration_sec=5.0)
+            return
+        # Async, nicht blockierend -- das Ergebnis interessiert hier nicht weiter.
+        self.clear_global_costmap.call_async(ClearEntireCostmap.Request())
 
     def cbPublish(self):
         if self.current_control_mode != ControlType.Tunnel:
@@ -113,6 +139,19 @@ class keepout_zone_node(Node):
 
         cloud = point_cloud2.create_cloud_xyz32(header, self._wall_points())
         self.pub_entrance.publish(cloud)
+
+        self._publish_entrance_pose(header)
+
+    def _publish_entrance_pose(self, header):
+        x, y, yaw = self.entrance_pose
+
+        pose = PoseStamped()
+        pose.header = header
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        self.pub_entrance_pose.publish(pose)
 
     def _capture_entrance_pose(self):
         try:

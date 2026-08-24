@@ -27,3 +27,17 @@
     entrance_wall_width: 0.6
     entrance_wall_points: 9
     publish_rate: 5.0
+
+/tunnel_explorer_node:
+  ros__parameters:
+    recompute_rate: 1.0
+    arrival_radius: 0.3
+    stall_timeout: 10.0
+    free_cost_threshold: 50
+    min_frontier_cluster_cells: 6
+    entrance_weight: 1.0
+    robot_distance_weight: 0.3
+    frame_id: odom
+    robot_frame: base_footprint
+    costmap_topic: /global_costmap/costmap
+    output_path_topic: /tunnel/explore_path

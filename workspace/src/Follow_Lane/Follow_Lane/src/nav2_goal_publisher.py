@@ -10,6 +10,9 @@ from action_msgs.msg import GoalStatus
 
 from Follow_Lane.src.switch_control import ControlType
 
+# Modes, in denen dieser Node ueberhaupt FollowPath-Ziele senden soll.
+_ACTIVE_MODES = (ControlType.Obstacle, ControlType.Tunnel)
+
 # Klartext fuer die Statuscodes aus action_msgs/GoalStatus, nur fuer die Logausgabe.
 _GOAL_STATUS_TEXT = {
     GoalStatus.STATUS_SUCCEEDED: 'erreicht',
@@ -22,16 +25,23 @@ _GOAL_STATUS_TEXT = {
 
 class nav2_goal_publisher(Node):
     """
-    Ersetzt den fehlenden globalen Planer: wir haben kein festes Navigationsziel,
-    also gibt dieser Node dem Nav2 controller_server per FollowPath-Action
-    staendig ein kurzes "fahr geradeaus"-Ziel relativ zum Roboter vor. Der
-    Local Controller (MPPI) weicht davon dann anhand der Local Costmap
-    (LiDAR + virtuelle Spurlinien-Waende) ab, so entsteht effektiv reaktives
-    Fahren im freien Korridor.
+    Einziger FollowPath-Action-Client fuers Projekt -- die Pfad-Quelle haengt
+    vom Control-Mode ab:
 
-    Aktiv nur im Control-Mode ControlType.Obstacle. Beim Verlassen dieses
-    Modes wird ein evtl. laufendes Goal abgebrochen, damit controller_server
-    keine veralteten Fahrbefehle mehr sendet.
+    - Obstacle: kein globaler Planer vorhanden, also gibt dieser Node dem
+      controller_server staendig ein kurzes "fahr geradeaus"-Ziel relativ zum
+      Roboter vor. Der Local Controller (MPPI) weicht davon anhand der Local
+      Costmap (LiDAR + virtuelle Spurlinien-Waende) ab -> reaktives Fahren im
+      freien Korridor.
+    - Tunnel: der Pfad kommt stattdessen von tunnel_explorer_node ueber
+      /tunnel/explore_path (echte Planung durch bereits bekanntes Gebiet,
+      siehe dortiger Docstring). Dieser Node schickt hier nur den jeweils
+      zuletzt empfangenen Pfad als FollowPath-Ziel; ist noch keiner da, wird
+      gewartet, statt selbst einen Pfad zu erfinden.
+
+    Aktiv in beiden Faellen nur im jeweiligen Control-Mode. Beim Verlassen
+    wird ein evtl. laufendes Goal abgebrochen, damit controller_server keine
+    veralteten Fahrbefehle mehr sendet.
     """
 
     def __init__(self):
@@ -55,10 +65,13 @@ class nav2_goal_publisher(Node):
 
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cbGetControlMode, 1)
+        self.sub_explore_path = self.create_subscription(
+            Path, '/tunnel/explore_path', self.cbExplorePath, 1)
 
         self._action_client = ActionClient(self, FollowPath, 'follow_path')
         self._goal_handle = None
         self._goal_active = False
+        self._latest_explore_path = None
 
         # Sicherer Default, passend zum Default von switch_control: erst nach
         # einer expliziten Obstacle-Mode-Nachricht wird ueberhaupt ein Ziel gesendet.
@@ -74,19 +87,21 @@ class nav2_goal_publisher(Node):
             self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {msg.data}')
             return
 
-        became_active = (new_mode == ControlType.Obstacle
-                          and self.current_control_mode != ControlType.Obstacle)
-        became_inactive = (new_mode != ControlType.Obstacle
-                            and self.current_control_mode == ControlType.Obstacle)
+        was_active = self.current_control_mode in _ACTIVE_MODES
+        is_active = new_mode in _ACTIVE_MODES
         self.current_control_mode = new_mode
 
-        if became_inactive:
+        if was_active and not is_active:
             self.cancel_goal()
-        elif became_active and not self._goal_active:
+            self._latest_explore_path = None
+        elif is_active and not was_active and not self._goal_active:
             self.try_start_chain()
 
+    def cbExplorePath(self, path):
+        self._latest_explore_path = path
+
     def cbWatchdog(self):
-        if self.current_control_mode == ControlType.Obstacle and not self._goal_active:
+        if self.current_control_mode in _ACTIVE_MODES and not self._goal_active:
             self.try_start_chain()
 
     def try_start_chain(self):
@@ -95,9 +110,19 @@ class nav2_goal_publisher(Node):
                 'follow_path Action-Server nicht erreichbar -- laeuft/aktiviert '
                 'der Nav2 controller_server?', throttle_duration_sec=5.0)
             return
-        self.send_rolling_goal()
+
+        path = self.build_path()
+        if path is None:
+            # Tunnel-Modus, aber tunnel_explorer_node hat noch keinen Pfad
+            # geliefert -- warten statt selbst einen zu erfinden.
+            return
+
+        self.send_rolling_goal(path)
 
     def build_path(self):
+        if self.current_control_mode == ControlType.Tunnel:
+            return self._latest_explore_path
+
         goal_distance = self.get_parameter('goal_distance').value
         frame_id = self.get_parameter('goal_frame_id').value
         num_waypoints = self.get_parameter('num_waypoints').value
@@ -115,9 +140,9 @@ class nav2_goal_publisher(Node):
 
         return path
 
-    def send_rolling_goal(self):
+    def send_rolling_goal(self, path):
         goal_msg = FollowPath.Goal()
-        goal_msg.path = self.build_path()
+        goal_msg.path = path
 
         self._goal_active = True
         send_future = self._action_client.send_goal_async(goal_msg)
@@ -150,9 +175,12 @@ class nav2_goal_publisher(Node):
             self.get_logger().warn(
                 f'Rolling-Goal beendet: {status_text}.', throttle_duration_sec=2.0)
 
-        # Sofort das naechste Teilstueck nachschieben, solange der Obstacle-Modus
-        # noch aktiv ist -- dadurch entsteht die "rollende" Zielverfolgung.
-        if self.current_control_mode == ControlType.Obstacle:
+        # Sofort das naechste Teilstueck nachschieben, solange der Modus noch
+        # aktiv ist -- dadurch entsteht die "rollende" Zielverfolgung. Im
+        # Tunnel-Modus liefert build_path() dabei entweder den naechsten,
+        # zwischenzeitlich neu eingetroffenen Explorations-Pfad, oder (falls
+        # noch keiner da ist) None -- try_start_chain() wartet dann einfach.
+        if self.current_control_mode in _ACTIVE_MODES:
             self.try_start_chain()
 
     def cancel_goal(self):
