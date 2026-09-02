@@ -22,6 +22,8 @@ setup(
             glob(package_name + '/Parameter/*.yaml')),
         (os.path.join('share', package_name, 'Parameter', 'camera_info'),
             glob(package_name + '/Parameter/camera_info/*.yaml')),
+        (os.path.join('share', package_name, 'rviz'),
+            glob('rviz/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

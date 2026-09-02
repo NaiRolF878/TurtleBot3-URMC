@@ -32,7 +32,9 @@
 controller_server:
   ros__parameters:
     use_sim_time: false
-    controller_frequency: 10.0
+    # 20 Hz = Periode 0.05 s = model_dt des MPPI weiter unten. MPPI lehnt configure sonst
+    # ab ("Controller period more then model dt") und der ganze Nav2-Zweig bleibt inaktiv.
+    controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -113,7 +115,10 @@ controller_server:
         cost_power: 1
         cost_weight: 3.81
         critical_cost: 300.0
-        consider_footprint: true
+        # false, weil die Costmaps robot_radius statt eines footprint-Polygons setzen --
+        # mit true lehnt MPPI configure ab ("no robot footprint provided in the costmap").
+        # Der Burger ist ohnehin nahezu kreisrund, der Radius beschreibt ihn gut genug.
+        consider_footprint: false
         collision_cost: 1000000.0
         near_goal_distance: 1.0
       PathAlignCritic:
