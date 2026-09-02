@@ -18,26 +18,15 @@ from Follow_Lane.src.switch_control import ControlType
 
 
 class tunnel_explorer_node(Node):
-    """
-    Waehlt im Tunnel-Modus laufend ein Nahziel fuer die Exploration: sucht auf
-    der (nicht-mitfahrenden, seit Tunnel-Beginn akkumulierenden) global_costmap
-    Frontier-Zellen -- freie Zellen direkt neben unbekanntem Gebiet -- und
-    waehlt darunter die, die am weitesten vom gemerkten Tunnel-Eingang entfernt
-    liegt (mit Bonus fuer "nah am Roboter, also schnell erreichbar"). Fuer den
-    gewaehlten Punkt wird per Nav2s planner_server (ComputePathToPose) ein
-    echter Pfad durch das bereits bekannte, freie Gebiet berechnet und auf
-    /tunnel/explore_path veroeffentlicht -- nav2_goal_publisher nutzt diesen
-    Pfad im Tunnel-Modus dann anstelle des festen "geradeaus"-Ziels.
+    """Sucht im Tunnel den Ausgang: Frontier-Zellen auf der global_costmap
+    (frei, direkt neben Unbekanntem), bewertet nach "weit weg vom Eingang" und
+    "schnell erreichbar". Zum besten Punkt laesst der planner_server einen Pfad
+    rechnen, der auf /tunnel/explore_path geht.
 
-    Wichtig: der Planer plant NUR durch bereits bekanntes freies Gebiet
-    (allow_unknown: false in nav2_params.yaml) -- ein Frontier-Punkt liegt per
-    Definition am Rand des Bekannten, nie dahinter. Es wird also nie durch
-    unerkundetes Gebiet geplant.
+    Geplant wird nur durch bereits bekanntes Gebiet (allow_unknown: false) --
+    ein Frontier-Punkt liegt per Definition am Rand des Bekannten.
 
-    Neu bewertet wird, sobald der Roboter das aktuelle Nahziel erreicht hat
-    oder seit stall_timeout Sekunden kein neues Nahziel mehr gesetzt wurde
-    (typischerweise weil der progress_checker in controller_server einen
-    Stillstand erkannt und das FollowPath-Ziel abgebrochen hat).
+    Neu bewertet bei Ankunft oder nach stall_timeout ohne Fortschritt.
     """
 
     def __init__(self):
@@ -45,9 +34,6 @@ class tunnel_explorer_node(Node):
 
         self.get_logger().info('Started tunnel_explorer_node Node.')
 
-        # ---------------------------------
-        # Parameter:
-        # ---------------------------------
         def frange(lo, hi):
             return ParameterDescriptor(floating_point_range=[
                 FloatingPointRange(from_value=lo, to_value=hi, step=0.0)])
@@ -75,7 +61,6 @@ class tunnel_explorer_node(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        #--- Subscriber ---
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cbGetControlMode, 1)
         self.sub_entrance_pose = self.create_subscription(
@@ -84,14 +69,11 @@ class tunnel_explorer_node(Node):
         self.sub_costmap = self.create_subscription(
             OccupancyGrid, costmap_topic, self.cbCostmap, 1)
 
-        #--- Publisher ---
         output_path_topic = self.get_parameter('output_path_topic').value
         self.pub_explore_path = self.create_publisher(Path, output_path_topic, 1)
 
-        #--- Action-Client ---
         self._plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
 
-        #--- Zustand ---
         self.current_control_mode = ControlType.Lane
         self.entrance_pose = None       # (x, y) im odom-Frame
         self.latest_costmap = None      # nav_msgs/OccupancyGrid
@@ -243,8 +225,7 @@ class tunnel_explorer_node(Node):
     def _cb_plan_result(self, future):
         self.planning_in_progress = False
 
-        # Waehrend der Planung kann der Modus gewechselt haben -- ein dann noch
-        # eintreffender Pfad gehoert nicht mehr veroeffentlicht.
+        # Modus kann waehrend der Planung gewechselt haben
         if self.current_control_mode != ControlType.Tunnel or self._pending_target is None:
             return
 
@@ -272,7 +253,9 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy raeumt den Context im eigenen SIGINT-Handler ab
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

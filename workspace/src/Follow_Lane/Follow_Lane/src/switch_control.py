@@ -23,25 +23,16 @@ class ControlType(Enum):
 
 
 class switch_control(Node):
-    """
-    Zentrale Zustandsmaschine fuer /control/mode. Zwei automatische Uebergaenge:
+    """Zustandsmaschine fuer /control/mode -- einziger Publisher dieses Topics.
 
-    Lane <-> Obstacle: rein LiDAR-basiert (/scan). Sobald etwas in einem
-    Pruefkegel vor dem Roboter naeher als obstacle_trigger_distance liegt,
-    wird von Lane zu Obstacle gewechselt; erst wenn dieser Kegel fuer
-    obstacle_clear_debounce Sekunden durchgehend frei ist, geht es zurueck.
-    Nur relevant, solange NICHT Tunnel aktiv ist -- der Tunnel-Modus weicht
-    ueber dieselbe Local Costmap ohnehin die ganze Zeit aus.
+    Lane <-> Obstacle: per LiDAR, sobald etwas im Pruefkegel naeher als
+    obstacle_trigger_distance liegt (mit Entprellung zurueck).
 
-    -> Tunnel -> zurueck: Eintritt per Schild-Erkennung auf /detect/sign
-    (Publisher dafuer existiert aktuell noch nicht -- die Schild-Detektor-
-    Node wird erst gebaut, sobald klar ist, wie die Schilder aussehen; bis
-    dahin manuell testbar per
+    -> Tunnel: per Schild auf /detect/sign. Der Detektor dafuer fehlt noch,
+    manuell testbar mit
       ros2 topic pub /detect/sign std_msgs/msg/UInt8 "{data: 6}"
-    ). Austritt erst, wenn LiDAR wieder "offenen Raum" sieht UND die Kamera
-    wieder Spurpixel liefert (/detect/lane_mask), beides gleichzeitig fuer
-    tunnel_exit_debounce Sekunden durchgehend. Beim Eintritt wird der vorherige
-    Modus gemerkt und beim Austritt wiederhergestellt (nicht hart auf Lane).
+    Zurueck erst, wenn LiDAR freien Raum sieht UND die Kamera wieder Spurpixel
+    liefert; wiederhergestellt wird der Modus von vor dem Tunnel.
     """
 
     def __init__(self):
@@ -49,9 +40,6 @@ class switch_control(Node):
 
         self.get_logger().info('Started switch_control Node.')
 
-        # ---------------------------------
-        # Parameter:
-        # ---------------------------------
         def frange(lo, hi):
             return ParameterDescriptor(floating_point_range=[
                 FloatingPointRange(from_value=lo, to_value=hi, step=0.0)])
@@ -74,23 +62,18 @@ class switch_control(Node):
             'tunnel_exit_min_lane_pixels', 'tunnel_exit_debounce',
         ]
 
-        #--- Subscriber ---
         self.sub_scan = self.create_subscription(
             LaserScan, '/scan', self.cbScan, qos_profile_sensor_data)
         self.sub_lane_mask = self.create_subscription(
             LaneMask, '/detect/lane_mask', self.cbLaneMask, 1)
-        # Noch ohne Publisher (siehe Docstring) -- Interface steht schon, damit die
-        # kuenftige Schild-Detektor-Node nur noch andocken muss.
+        # Publisher folgt mit der Schild-Detektor-Node
         self.sub_sign = self.create_subscription(UInt8, '/detect/sign', self.cbSign, 1)
 
-        #--- Publisher ---
         self.pub_control = self.create_publisher(UInt8, '/control/mode', 1)
 
-        # Ohne Timer wurde der Mode nie gesendet -> control_driving hat nie einen
-        # Mode empfangen. Zyklisch senden, damit auch spaeter startende Nodes ihn bekommen.
+        # Zyklisch senden, damit auch spaeter startende Nodes den Mode bekommen.
         self.timer = self.create_timer(0.5, self.cbPubControlMode)
 
-        #--- Zustand ---
         self.current_control_mode = ControlType.Lane
         self._mode_before_tunnel = None
         self._obstacle_clear_since = None
@@ -160,8 +143,7 @@ class switch_control(Node):
             return False
 
         angles = scan.angle_min + np.arange(ranges.size) * scan.angle_increment
-        # Auf [-pi, pi] normalisieren, damit "geradeaus" (0 rad) unabhaengig von
-        # Start-/Endwinkel des Scans korrekt geprueft wird.
+        # Auf [-pi, pi] normalisieren, damit 0 rad wirklich geradeaus ist
         angles = np.arctan2(np.sin(angles), np.cos(angles))
 
         # Halbwinkel: der Kegel ist doppelt so breit wie der Parameterwert.
@@ -189,12 +171,11 @@ class switch_control(Node):
         if ranges.size == 0:
             return False
 
-        # inf/nan = kein Echo = nichts in Reichweite = frei. Diese Strahlen duerfen
-        # NICHT als ungueltig verworfen werden, sonst bleiben nur die kurzen uebrig
-        # und der Tunnel-Modus liesse sich nie verlassen.
+        # inf = kein Echo = frei. Nicht als ungueltig verwerfen, sonst bleiben nur
+        # die kurzen Messwerte uebrig und der Tunnel liesse sich nie verlassen.
         no_echo = ~np.isfinite(ranges)
         far = np.isfinite(ranges) & (ranges > self.tunnel_exit_open_distance)
-        # Zu kurze Messwerte sind Sensorartefakte, nicht "frei" -- die zaehlen als belegt.
+        # Zu kurze Werte sind Artefakte, nicht "frei"
         too_close = np.isfinite(ranges) & (ranges <= scan.range_min)
 
         open_ratio = np.count_nonzero(no_echo | far) / ranges.size

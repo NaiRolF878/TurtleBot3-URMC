@@ -12,24 +12,12 @@ from Follow_Lane.src.switch_control import ControlType
 
 
 class lane_costmap_node(Node):
-    """
-    Rechnet die von detect_lane auf /detect/lane_mask veroeffentlichten
-    Bird's-Eye-Pixelkoordinaten der Spurlinien in Meter-Koordinaten um und
-    veroeffentlicht sie als PointCloud2, damit Nav2s obstacle_layer sie als
-    virtuelle Waende in die Local Costmap eintragen kann.
+    """Spurlinien-Pixel von /detect/lane_mask als PointCloud2 fuer Nav2s
+    obstacle_layer -- virtuelle Waende in der Local Costmap. Nur im
+    Obstacle-Modus aktiv.
 
-    Aktiv nur im Control-Mode ControlType.Obstacle -- im PID-Modus (Lane)
-    bleibt der Node still, damit beide Ansaetze konfliktfrei nebeneinander
-    existieren koennen.
-
-    Kalibrierung (siehe Parameter-YAML):
-    Die Bird's-Eye-Ansicht von detect_lane ist ein quadratisches Bild, dessen
-    vier Ecken einer Trapezflaeche auf dem Boden vor dem Roboter entsprechen
-    (definiert durch dessen top_left_*/bottom_right_*-Parameter). x_near/x_far
-    und y_left/y_right beschreiben, wo die vier Bildkanten dieses Quadrats
-    real (in Metern, in frame_id) liegen. Kalibrierung z.B. per Massband:
-    Marken auf dem Boden anbringen, /detect/mask_debug/compressed anschauen,
-    Pixelposition der Marken ablesen und mit der gemessenen Distanz abgleichen.
+    x_near/x_far/y_left/y_right sagen, wo die vier Kanten des Bird's-Eye-Bildes
+    real liegen (Meter, in frame_id). Per Massband kalibrieren.
     """
 
     def __init__(self):
@@ -37,28 +25,19 @@ class lane_costmap_node(Node):
 
         self.get_logger().info('Started lane_costmap_node Node.')
 
-        # ---------------------------------
-        # Parameter:
-        # ---------------------------------
         def frange(lo, hi):
             return ParameterDescriptor(floating_point_range=[
                 FloatingPointRange(from_value=lo, to_value=hi, step=0.0)])
 
-        # --- Kalibrierung Pixel -> Meter ---
-        # Vorwaertsdistanz (m) der unteren (nahen) bzw. oberen (fernen) Bildkante
-        # des Bird's-Eye-Bildes, gemessen ab frame_id.
+        # Vorwaertsdistanz der nahen/fernen Bildkante
         self.declare_parameter('x_near', 0.15, frange(-1.0, 5.0))
         self.declare_parameter('x_far',  0.60, frange(-1.0, 5.0))
-        # Laterale Position (m) der linken bzw. rechten Bildkante, gemessen ab
-        # frame_id. Positiv = links (REP103), z.B. y_left=0.35, y_right=-0.35.
+        # Laterale Lage der linken/rechten Bildkante, positiv = links (REP103)
         self.declare_parameter('y_left',  0.35, frange(-5.0, 5.0))
         self.declare_parameter('y_right', -0.35, frange(-5.0, 5.0))
 
-        # --- Sonstige ---
         self.declare_parameter('frame_id', 'base_footprint')
         self.declare_parameter('output_topic', '/detect/lane_obstacles')
-        # Rasterweite beim Ausduennen der Maskenpunkte (1 = jeder Punkt, 2 = jeder
-        # zweite in x/y usw.) -- begrenzt Punktzahl und CPU-Last der Costmap.
         self.declare_parameter('pixel_stride', 2,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=20, step=1)]))
 
@@ -66,13 +45,11 @@ class lane_costmap_node(Node):
             'x_near', 'x_far', 'y_left', 'y_right', 'frame_id', 'pixel_stride',
         ]
 
-        #--- Subscriber ---
         self.sub_lane_mask = self.create_subscription(
             LaneMask, '/detect/lane_mask', self.cbLaneMask, 1)
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cbGetControlMode, 1)
 
-        #--- Publisher ---
         output_topic = self.get_parameter('output_topic').value
         self.pub_lane_obstacles = self.create_publisher(PointCloud2, output_topic, 1)
 
@@ -117,17 +94,14 @@ class lane_costmap_node(Node):
         xs = np.asarray(xs)
         ys = np.asarray(ys)
 
-        # Grobes, aber schnelles Ausduennen: nur Punkte auf einem stride x
-        # stride - Raster behalten, statt jedes Maskenpixel zu verwenden.
         keep = (xs % stride == 0) & (ys % stride == 0)
         xs = xs[keep]
         ys = ys[keep]
         if xs.size == 0:
             return []
 
-        # row=0 (oben, fern) -> x_far, row=size-1 (unten, nah) -> x_near
+        # Zeile 0 = fern, letzte Zeile = nah; Spalte 0 = links
         forward = self.x_far + (ys.astype(np.float64) / (size - 1)) * (self.x_near - self.x_far)
-        # col=0 (links) -> y_left, col=size-1 (rechts) -> y_right
         lateral = self.y_left + (xs.astype(np.float64) / (size - 1)) * (self.y_right - self.y_left)
         elevation = np.zeros_like(forward)
 
@@ -143,7 +117,9 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy raeumt den Context im eigenen SIGINT-Handler ab
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

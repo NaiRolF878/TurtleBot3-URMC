@@ -15,33 +15,15 @@ from Follow_Lane.src.switch_control import ControlType
 
 
 class keepout_zone_node(Node):
-    """
-    Merkt sich die Roboterpose im odom-Frame in dem Moment, in dem der
-    Tunnel-Modus beginnt ("wo bin ich gerade in die Sackgasse reingefahren"),
-    und veroeffentlicht ab da laufend eine kurze virtuelle Wand an genau
-    dieser Weltposition -- quer zur damaligen Blickrichtung, als PointCloud2,
-    nach demselben Muster wie lane_costmap_node fuer die Spurlinien.
+    """Sperrt den Tunnel-Eingang, damit der Bot nicht dort wieder rausfaehrt.
 
-    Wichtig: die Wand wird bewusst im odom-Frame (nicht relativ zum Roboter)
-    veroeffentlicht, weil sie an einer festen Stelle der Welt bleiben muss,
-    unabhaengig davon, wohin sich der Roboter danach bewegt. Die Local
-    Costmap ist zwar nur ein mitfahrendes Fenster, aber sobald der Roboter
-    sich der gemerkten Position wieder naehert (z.B. Versuch, durch den
-    Eingang wieder rauszufahren), rutscht die Wand automatisch wieder ins
-    Fenster und wird wie ein normales Hindernis behandelt.
+    Merkt sich beim Wechsel in den Tunnel-Modus einmalig die Roboterpose und
+    veroeffentlicht dort laufend eine kurze virtuelle Wand als PointCloud2 --
+    im odom-Frame, damit sie ortsfest bleibt und wieder in die mitfahrende
+    Costmap rutscht, sobald sich der Bot dem Eingang naehert.
 
-    Es wird immer nur EINE Pose gespeichert. Bei jedem erneuten Eintritt in
-    den Tunnel-Modus (z.B. ein zweiter Tunnel weiter auf der Strecke) wird
-    sie ueberschrieben -- die alte Wand verschwindet dadurch automatisch aus
-    zukuenftigen Veroeffentlichungen. Beim Verlassen des Tunnel-Modus wird
-    gar nichts mehr veroeffentlicht.
-
-    Zusaetzlich veroeffentlicht dieser Node dieselbe Pose als PoseStamped
-    (fuer tunnel_explorer_node, der daraus die "weit weg vom Eingang"-
-    Bewertung der Frontier-Kandidaten berechnet) und stoesst bei jedem
-    Tunnel-Eintritt das Leeren von global_costmap (dem Kartenspeicher fuer
-    die Tunnel-Exploration, siehe tunnel_explorer_node) an -- sonst wuerden
-    sich Kartendaten eines vorherigen Tunnels mit dem aktuellen vermischen.
+    Bei jedem neuen Tunnel wird die Pose ueberschrieben und global_costmap
+    geleert. Ausserhalb des Tunnel-Modus passiert nichts.
     """
 
     def __init__(self):
@@ -49,9 +31,6 @@ class keepout_zone_node(Node):
 
         self.get_logger().info('Started keepout_zone_node Node.')
 
-        # ---------------------------------
-        # Parameter:
-        # ---------------------------------
         self.declare_parameter('frame_id', 'odom')
         self.declare_parameter('robot_frame', 'base_footprint')
         self.declare_parameter('output_topic', '/detect/tunnel_entrance_obstacle')
@@ -69,22 +48,17 @@ class keepout_zone_node(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        #--- Subscriber ---
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cbGetControlMode, 1)
 
-        #--- Publisher ---
         output_topic = self.get_parameter('output_topic').value
         self.pub_entrance = self.create_publisher(PointCloud2, output_topic, 1)
         self.pub_entrance_pose = self.create_publisher(PoseStamped, '/tunnel/entrance_pose', 1)
 
-        #--- Service-Client ---
-        # Leert die Tunnel-Explorationskarte (global_costmap) bei jedem neuen
-        # Tunnel-Eintritt -- Standard-Nav2-Service, kein eigener Code noetig.
+        # Standard-Nav2-Service, leert die Tunnelkarte bei jedem neuen Tunnel.
         self.clear_global_costmap = self.create_client(
             ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
 
-        #--- Zustand ---
         self.current_control_mode = ControlType.Lane
         self.entrance_pose = None  # (x, y, yaw) im odom-Frame, oder None
 
@@ -106,7 +80,6 @@ class keepout_zone_node(Node):
         self.current_control_mode = new_mode
 
         if entering_tunnel:
-            # Ueberschreibt eine evtl. noch gemerkte Pose eines frueheren Tunnels.
             self.entrance_pose = None
             self._clear_global_costmap()
         elif leaving_tunnel:
@@ -118,7 +91,6 @@ class keepout_zone_node(Node):
                 'global_costmap-Clear-Service nicht erreichbar -- laeuft planner_server?',
                 throttle_duration_sec=5.0)
             return
-        # Async, nicht blockierend -- das Ergebnis interessiert hier nicht weiter.
         self.clear_global_costmap.call_async(ClearEntireCostmap.Request())
 
     def cbPublish(self):
@@ -172,7 +144,7 @@ class keepout_zone_node(Node):
 
     def _wall_points(self):
         x, y, yaw = self.entrance_pose
-        # Wand quer zur Blickrichtung beim Einfahren -> Richtungsvektor um 90 Grad gedreht.
+        # Wand quer zur Einfahrtrichtung
         perp = yaw + math.pi / 2.0
         dx, dy = math.cos(perp), math.sin(perp)
 
@@ -195,7 +167,9 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy raeumt den Context im eigenen SIGINT-Handler ab
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

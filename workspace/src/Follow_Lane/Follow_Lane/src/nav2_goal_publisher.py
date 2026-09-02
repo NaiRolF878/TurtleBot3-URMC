@@ -24,24 +24,13 @@ _GOAL_STATUS_TEXT = {
 
 
 class nav2_goal_publisher(Node):
-    """
-    Einziger FollowPath-Action-Client fuers Projekt -- die Pfad-Quelle haengt
-    vom Control-Mode ab:
+    """Einziger FollowPath-Action-Client. Pfadquelle je nach Modus:
 
-    - Obstacle: kein globaler Planer vorhanden, also gibt dieser Node dem
-      controller_server staendig ein kurzes "fahr geradeaus"-Ziel relativ zum
-      Roboter vor. Der Local Controller (MPPI) weicht davon anhand der Local
-      Costmap (LiDAR + virtuelle Spurlinien-Waende) ab -> reaktives Fahren im
-      freien Korridor.
-    - Tunnel: der Pfad kommt stattdessen von tunnel_explorer_node ueber
-      /tunnel/explore_path (echte Planung durch bereits bekanntes Gebiet,
-      siehe dortiger Docstring). Dieser Node schickt hier nur den jeweils
-      zuletzt empfangenen Pfad als FollowPath-Ziel; ist noch keiner da, wird
-      gewartet, statt selbst einen Pfad zu erfinden.
+    - Obstacle: selbst gebaute Gerade "goal_distance geradeaus", MPPI weicht
+      anhand der Local Costmap davon ab.
+    - Tunnel: Pfad von tunnel_explorer_node auf /tunnel/explore_path.
 
-    Aktiv in beiden Faellen nur im jeweiligen Control-Mode. Beim Verlassen
-    wird ein evtl. laufendes Goal abgebrochen, damit controller_server keine
-    veralteten Fahrbefehle mehr sendet.
+    Jeder Moduswechsel bricht ein laufendes Ziel ab.
     """
 
     def __init__(self):
@@ -55,10 +44,7 @@ class nav2_goal_publisher(Node):
         self.declare_parameter('goal_frame_id', 'base_footprint')
         self.declare_parameter('num_waypoints', 5,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=2, to_value=50, step=1)]))
-        # Niedrige Frequenz: dient nur als Wiederanlauf-Pruefung, falls z.B. beim
-        # Umschalten in den Obstacle-Modus der Action-Server noch nicht bereit war.
-        # Das eigentliche "Nachschieben" neuer Ziele passiert ereignisgetrieben in
-        # cb_goal_result, sobald das vorherige Ziel erreicht/beendet wurde.
+        # Nur Wiederanlauf-Pruefung; neue Ziele kommen ereignisgetrieben aus cb_goal_result.
         self.declare_parameter('watchdog_rate', 1.0,
             ParameterDescriptor(floating_point_range=[
                 FloatingPointRange(from_value=0.2, to_value=10.0, step=0.0)]))
@@ -73,8 +59,6 @@ class nav2_goal_publisher(Node):
         self._goal_active = False
         self._latest_explore_path = None
 
-        # Sicherer Default, passend zum Default von switch_control: erst nach
-        # einer expliziten Obstacle-Mode-Nachricht wird ueberhaupt ein Ziel gesendet.
         self.current_control_mode = ControlType.Lane
 
         watchdog_rate = self.get_parameter('watchdog_rate').value
@@ -94,8 +78,7 @@ class nav2_goal_publisher(Node):
         is_active = new_mode in _ACTIVE_MODES
         self.current_control_mode = new_mode
 
-        # Jeder Moduswechsel bricht ein laufendes Ziel ab -- auch Obstacle <-> Tunnel,
-        # sonst laeuft die Geradeaus-Fahrt im Tunnel einfach weiter.
+        # Auch Obstacle <-> Tunnel abbrechen, sonst laeuft die alte Fahrt weiter.
         if was_active:
             self.cancel_goal()
             self._latest_explore_path = None
@@ -119,8 +102,7 @@ class nav2_goal_publisher(Node):
 
         path = self.build_path()
         if path is None:
-            # Tunnel-Modus, aber tunnel_explorer_node hat noch keinen Pfad
-            # geliefert -- warten statt selbst einen zu erfinden.
+            # Tunnel-Modus ohne Pfad vom Explorer -- warten
             return
 
         self.send_rolling_goal(path)
@@ -176,16 +158,11 @@ class nav2_goal_publisher(Node):
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().debug(f'Rolling-Goal {status_text}.')
         else:
-            # ABORTED/CANCELED etc. sind im Dauerbetrieb (rollierendes Ziel) normal,
-            # z.B. beim Umschalten des Control-Mode -- daher warn() statt error().
+            # Abbrueche sind beim rollierenden Ziel normal, daher nur warn()
             self.get_logger().warn(
                 f'Rolling-Goal beendet: {status_text}.', throttle_duration_sec=2.0)
 
-        # Sofort das naechste Teilstueck nachschieben, solange der Modus noch
-        # aktiv ist -- dadurch entsteht die "rollende" Zielverfolgung. Im
-        # Tunnel-Modus liefert build_path() dabei entweder den naechsten,
-        # zwischenzeitlich neu eingetroffenen Explorations-Pfad, oder (falls
-        # noch keiner da ist) None -- try_start_chain() wartet dann einfach.
+        # Naechstes Teilstueck nachschieben -- so entsteht das rollierende Ziel.
         if self.current_control_mode in _ACTIVE_MODES:
             self.try_start_chain()
 
@@ -204,7 +181,9 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy raeumt den Context im eigenen SIGINT-Handler ab
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
