@@ -2,7 +2,10 @@
   ros__parameters:
     # --- Obstacle-Erkennung (Lane <-> Obstacle) ---
     obstacle_check_angle_deg: 30.0
-    obstacle_trigger_distance: 0.4
+    # 1.0 statt 0.4 m: der PID ignoriert Hindernisse komplett, bei 0.34 m/s
+    # blieben Nav2 sonst nur ~1,2 s zum Ausweichen (Test 02.09.: Hindernis
+    # wurde geschoben statt umfahren). 1.0 m passt zu 2,8 s Vorausschau.
+    obstacle_trigger_distance: 1.0
     obstacle_clear_debounce: 1.0
 
     # --- Tunnel-Austritt (Tunnel -> vorheriger Modus) ---

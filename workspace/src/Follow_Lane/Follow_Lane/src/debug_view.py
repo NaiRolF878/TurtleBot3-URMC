@@ -12,12 +12,33 @@ from rclpy.qos import qos_profile_sensor_data
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from follow_lane_msg.msg import FollowLaneDebug
-from sensor_msgs.msg import Image, BatteryState
+from sensor_msgs.msg import Image, BatteryState, PointCloud2
+from std_msgs.msg import UInt8
+
+from Follow_Lane.src.switch_control import ControlType
 
 
 
 BATT_FULL_V = 12.6    # 4.2 V/Zelle
 BATT_EMPTY_V = 11.0
+
+# Farbe pro Fahrmodus (BGR), damit auf einen Blick erkennbar ist, wer gerade faehrt.
+MODE_COLOR = {
+    ControlType.Lane:         (135, 250, 159),   # gruen  -- PID faehrt
+    ControlType.Obstacle:     (0, 165, 255),     # orange -- Nav2/MPPI faehrt
+    ControlType.Tunnel:       (255, 200, 0),     # cyan   -- Nav2/MPPI im Tunnel
+    ControlType.Stop:         (60, 60, 255),     # rot
+    ControlType.Intersection: (200, 200, 200),
+    ControlType.Align:        (200, 200, 200),
+}
+
+# Wer bei welchem Modus tatsaechlich /cmd_vel bespielt -- die haeufigste
+# Verstaendnisfrage beim Testen ("warum lenkt der PID nicht mehr?").
+MODE_DRIVER = {
+    ControlType.Lane:     'PID',
+    ControlType.Obstacle: 'Nav2/MPPI',
+    ControlType.Tunnel:   'Nav2/MPPI',
+}
 
 
 class debug_view(Node):
@@ -33,6 +54,12 @@ class debug_view(Node):
         self.sub_follow_lane_debug = self.create_subscription(FollowLaneDebug, '/detect/lane_debug',self.cb_get_follow_lane_debug, 1)
         self.sub_battery_state = self.create_subscription(
             BatteryState, '/battery_state', self.cb_get_battery_state, qos_profile_sensor_data)
+        self.sub_control_mode = self.create_subscription(
+            UInt8, '/control/mode', self.cb_get_control_mode, 1)
+        # Nur zum Mitzaehlen: bestaetigt im Debugbild, dass die Kette
+        # detect_lane -> lane_costmap_node -> Costmap wirklich Daten liefert.
+        self.sub_lane_obstacles = self.create_subscription(
+            PointCloud2, '/detect/lane_obstacles', self.cb_get_lane_obstacles, 1)
 
         #Publisher
         self.pub_debug_image = self.create_publisher(Image,'/lokal/debug_view',1)
@@ -43,6 +70,10 @@ class debug_view(Node):
         self.actual_v = 4.56
 
         self.battery_level = None
+
+        self.control_mode = None
+        self.lane_obstacle_points = 0
+        self.lane_obstacle_stamp = None
 
         media_dir = os.path.join(get_package_share_directory('Follow_Lane'), 'media', 'Battery')
         self.battery_icons = []
@@ -56,6 +87,17 @@ class debug_view(Node):
     def cb_get_follow_lane_debug(self, follow_lane_debug):
         self.follow_lane_debug = follow_lane_debug
         self.build_debug_image()
+
+    def cb_get_control_mode(self, msg):
+        try:
+            self.control_mode = ControlType(msg.data)
+        except ValueError:
+            self.control_mode = None
+
+    def cb_get_lane_obstacles(self, cloud):
+        # width * height = Punktanzahl, ohne die Punkte dekodieren zu muessen.
+        self.lane_obstacle_points = cloud.width * cloud.height
+        self.lane_obstacle_stamp = self.get_clock().now()
 
     def cb_get_battery_state(self, state):
         self.battery_level = self.battery_percent(state)
@@ -128,7 +170,7 @@ class debug_view(Node):
         cv2.putText(panelGeneric,f"{self.actual_v} m/s"    ,(8,230) ,cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(250, 135, 223)    ,2  ,cv2.LINE_AA)
         
 
-        panelMode = np.zeros((raw_h, panel_w, 3), dtype=np.uint8)
+        panelMode = self.build_mode_panel(raw_h, panel_w)
 
         total_w = raw_w + panel_w * 2
         head_panel = np.full((40, total_w, 3), (220,220,220) ,dtype=np.uint8)
@@ -145,6 +187,46 @@ class debug_view(Node):
         msg.header = self.follow_lane_debug.raw_image.header
         self.pub_debug_image.publish(msg)
         return final_debug_image
+
+    def build_mode_panel(self, height, width):
+        panel = np.zeros((height, width, 3), dtype=np.uint8)
+        cv2.line(panel, (1, 5), (1, height-5), thickness=1, color=(90,90,90), lineType=cv2.LINE_AA)
+
+        cv2.putText(panel, 'Mode', (8,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (200,200,200), 1, cv2.LINE_AA)
+
+        if self.control_mode is None:
+            cv2.putText(panel, '-- kein Mode --', (8,80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120,120,120), 1, cv2.LINE_AA)
+            return panel
+
+        color = MODE_COLOR.get(self.control_mode, (200,200,200))
+        cv2.putText(panel, self.control_mode.name, (8,85),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 2, cv2.LINE_AA)
+
+        # Wer gerade /cmd_vel bespielt -- im Obstacle/Tunnel-Modus ist der PID aus.
+        driver = MODE_DRIVER.get(self.control_mode, 'kein Regler')
+        cv2.putText(panel, 'faehrt:', (8,125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
+        cv2.putText(panel, driver, (8,160),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+        self.draw_lane_obstacle_status(panel)
+        return panel
+
+    def draw_lane_obstacle_status(self, panel):
+        cv2.putText(panel, 'Spur -> Costmap:', (8,215),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
+
+        if self.lane_obstacle_stamp is None:
+            text, color = 'nie empfangen', (120,120,120)
+        else:
+            age = (self.get_clock().now() - self.lane_obstacle_stamp).nanoseconds / 1e9
+            if age > 2.0:
+                text, color = f'still ({age:.0f}s)', (60,60,255)
+            else:
+                text, color = f'{self.lane_obstacle_points} Pkt', (135,250,159)
+
+        cv2.putText(panel, text, (8,250), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
     def draw_battery(self, head_panel, total_w):
         text = '--%' if self.battery_level is None else f"{self.battery_level}%"
