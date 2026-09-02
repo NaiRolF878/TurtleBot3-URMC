@@ -2,27 +2,54 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+SHARE = get_package_share_directory('Follow_Lane')
+LAUNCH_DIR = os.path.join(SHARE, 'launch')
+PARAM_DIR = os.path.join(SHARE, 'Parameter')
+
 
 def generate_launch_description():
-    param_dir = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
+    """Startet den Nav2-Zweig samt der Basis, auf die er angewiesen ist.
 
+    Bindet follow_lane.launch.py mit ein: Der Nav2-Zweig braucht ingress_node,
+    detect_lane und switch_control als Eingang und laeuft ohne sie ins Leere.
+
+    Die beiden Zweige stoeren sich nicht -- sie schliessen sich ueber /control/mode
+    gegenseitig aus: control_driving faehrt nur bei ControlType.Lane, lane_costmap_node
+    nur bei Obstacle, nav2_goal_publisher bei Obstacle oder Tunnel (und bricht laufende
+    Ziele beim Moduswechsel ab). switch_control entscheidet.
+
+    Nur Spurverfolgung ohne Nav2: follow_lane.launch.py.
+    """
     return LaunchDescription([
         # Ueberschreibbar, z.B. fuer eine andere Kamera-/Streckenkalibrierung:
         #   ros2 launch Follow_Lane nav2_obstacle.launch.py lane_costmap_params:=/pfad/datei.yaml
         DeclareLaunchArgument('lane_costmap_params',
-            default_value=os.path.join(param_dir, 'Lane_Costmap.yaml')),
+            default_value=os.path.join(PARAM_DIR, 'Lane_Costmap.yaml')),
         DeclareLaunchArgument('nav2_params',
-            default_value=os.path.join(param_dir, 'nav2_params.yaml')),
+            default_value=os.path.join(PARAM_DIR, 'nav2_params.yaml')),
+        # Gleiche Defaults wie in follow_lane.launch.py, damit sie auch von hier aus
+        # ueberschreibbar bleiben. Ein leerer Wert wuerde dort ins Leere zeigen.
+        DeclareLaunchArgument('detect_params',
+            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_PI_CAM2.yaml')),
+        DeclareLaunchArgument('control_params',
+            default_value=os.path.join(PARAM_DIR, 'Control_driving_PID.yaml')),
+        DeclareLaunchArgument('switch_control_params',
+            default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
 
-        # Voraussetzung: detect_lane_node, ingress_node und switch_control laufen
-        # bereits (siehe follow_lane.launch.py) -- dieses Launch-File startet nur
-        # den Nav2-Zweig zusaetzlich dazu. switch_control entscheidet ueber
-        # /control/mode (ControlType.Obstacle bzw. .Tunnel), welcher Zweig
-        # gerade Fahrbefehle ausgibt.
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(LAUNCH_DIR, 'follow_lane.launch.py')),
+            launch_arguments=[
+                ('detect_params', LaunchConfiguration('detect_params')),
+                ('control_params', LaunchConfiguration('control_params')),
+                ('switch_control_params', LaunchConfiguration('switch_control_params')),
+            ],
+        ),
+
         Node(
             package='Follow_Lane', executable='lane_costmap_node', name='lane_costmap_node',
             parameters=[LaunchConfiguration('lane_costmap_params')],
