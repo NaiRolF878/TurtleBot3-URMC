@@ -15,11 +15,11 @@ if [ ! -f "$CONFIG" ]; then
     exit 1
 fi
 
-# Ohne X-Freigabe scheitert rviz mit "could not connect to display" -- die Meldung
-# nennt aber nicht die Ursache, deshalb hier vorab pruefen.
-if ! xset q >/dev/null 2>&1; then
-    echo "WARNUNG: kein Zugriff auf den X-Server."
-    echo "Auf dem HOST (ausserhalb des Containers) ausfuehren:  xhost +local:root"
+# Kein xset-Test hier: das Programm ist im Container nicht installiert und meldete
+# deshalb faelschlich fehlenden X-Zugriff. Scheitert rviz mit "could not connect to
+# display", auf dem HOST "xhost +local:root" ausfuehren (nicht persistent).
+if [ -z "$DISPLAY" ]; then
+    echo "WARNUNG: DISPLAY ist nicht gesetzt -- rviz kann kein Fenster oeffnen."
     echo ""
 fi
 

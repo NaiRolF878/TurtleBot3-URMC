@@ -152,7 +152,12 @@ planner_server:
     expected_planner_frequency: 1.0
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner::NavfnPlanner"
+      # Schraegstrich, nicht "::": nav2_navfn_planner registriert sich in Humble als
+      # nav2_navfn_planner/NavfnPlanner. Die "::"-Schreibweise kam erst mit Iron und
+      # laesst planner_server hier mit "class ... does not exist" abstuerzen.
+      # Die uebrigen Plugins in dieser Datei laden mit "::" korrekt -- das ist je
+      # nach Paket unterschiedlich.
+      plugin: "nav2_navfn_planner/NavfnPlanner"
       use_astar: true
       allow_unknown: false
       tolerance: 0.3
