@@ -20,6 +20,8 @@ setup(
             glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'Parameter'),
             glob(package_name + '/Parameter/*.yaml')),
+        (os.path.join('share', package_name, 'Parameter', 'camera_info'),
+            glob(package_name + '/Parameter/camera_info/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -34,6 +36,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'avoid_obstacle       = Follow_Lane.src.avoid_obstacle:main',
             'control_driving      = Follow_Lane.src.control_driving:main',
             'debug_view           = Follow_Lane.src.debug_view:main',
             'detect_lane          = Follow_Lane.src.detect_lane:main',

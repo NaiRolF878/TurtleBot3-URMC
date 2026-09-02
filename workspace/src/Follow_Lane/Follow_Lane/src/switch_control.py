@@ -212,7 +212,9 @@ def main(args=None):
     finally:
 
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy raeumt den Context im eigenen SIGINT-Handler ab -- sonst wirft der zweite Aufruf
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 

@@ -25,5 +25,10 @@
     }
   },
   "containerEnv": { "ROS_DOMAIN_ID": "33" },
-  "postCreateCommand": "mkdir -p ~/turtlebot3_ws/src && cd ~/turtlebot3_ws/src && git clone -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git && cd ~/turtlebot3_ws && colcon build --symlink-install && echo 'source ~/turtlebot3_ws/install/setup.bash' >> ~/.bashrc && echo '[ -f /workspaces/TurtleBot3-URMC/workspace/install/setup.bash ] && source /workspaces/TurtleBot3-URMC/workspace/install/setup.bash' >> ~/.bashrc && echo \"alias tb='bash /workspaces/TurtleBot3-URMC/scripts/tb/launch.sh'\" >> ~/.bashrc && echo \"alias botssh='bash /workspaces/TurtleBot3-URMC/scripts/tb/ssh-bot.sh'\" >> ~/.bashrc && echo \"alias botcheck='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-check.sh'\" >> ~/.bashrc"
+  // Laeuft auf dem HOST, bevor der Container startet. Ohne die Freigabe scheitert jede
+  // GUI (rqt, rviz) mit "Authorization required" -- der Container laeuft als root,
+  // der X-Socket gehoert aber dem Host-User. xhost ist nicht persistent, daher bei
+  // jedem Containerstart neu. "|| true": auf Hosts ohne X (z.B. SSH) nicht abbrechen.
+  "initializeCommand": "xhost +local:root || true",
+  "postCreateCommand": "mkdir -p ~/turtlebot3_ws/src && cd ~/turtlebot3_ws/src && git clone -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git && cd ~/turtlebot3_ws && colcon build --symlink-install && echo 'source ~/turtlebot3_ws/install/setup.bash' >> ~/.bashrc && echo '[ -f /workspaces/TurtleBot3-URMC/workspace/install/setup.bash ] && source /workspaces/TurtleBot3-URMC/workspace/install/setup.bash' >> ~/.bashrc && echo \"alias tb='bash /workspaces/TurtleBot3-URMC/scripts/tb/launch.sh'\" >> ~/.bashrc && echo \"alias botssh='bash /workspaces/TurtleBot3-URMC/scripts/tb/ssh-bot.sh'\" >> ~/.bashrc && echo \"alias botcheck='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-check.sh'\" >> ~/.bashrc && echo \"alias botup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-up.sh'\" >> ~/.bashrc && echo \"alias botdown='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-down.sh'\" >> ~/.bashrc"
 }
