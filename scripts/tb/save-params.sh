@@ -5,11 +5,10 @@
 #   bash save-params.sh detect_lane
 #   bash save-params.sh detect_lane Follow_Lane_ROI_PI_CAM3.yaml
 #
-# Hintergrund: NICHT den Speichern-Knopf in rqt_reconfigure benutzen -- der schreibt
-# flaches YAML ohne Nodenamen. "--params-file" im Launch braucht aber die Struktur
-# "<node>: ros__parameters:", sonst stirbt der Node beim Start mit
-# "Cannot have a value before ros__parameters at line 1".
-# "ros2 param dump" erzeugt das richtige Format, deshalb dieser Weg.
+# Schreibt FLACHES YAML (name: wert) -- dasselbe Format, das rqt_reconfigure benutzt.
+# Das Launch-File liest es selbst ein (siehe load_flat_params dort), statt ueber
+# --params-file zu gehen. Dadurch gibt es genau ein Format und die Datei-Knoepfe in
+# rqt bleiben verwendbar. "ros2 param dump" liefert verschachtelt, wird hier umgebaut.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -49,12 +48,27 @@ if ! grep -q "ros__parameters" "$TMP"; then
     exit 1
 fi
 
-# use_sim_time gehoert nicht in die Streckenkonfiguration und erzeugt beim Laden Warnungen.
-grep -v "use_sim_time" "$TMP" > "$TARGET"
+python3 - "$TMP" "$TARGET" <<'PY' || exit 1
+import sys, yaml
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    data = yaml.safe_load(f) or {}
+flat = next(iter(data.values()))['ros__parameters']
+flat.pop('use_sim_time', None)          # gehoert nicht in eine Streckenkonfiguration
+if not flat:
+    print('Keine Parameter im Dump, nichts geschrieben.'); sys.exit(1)
+with open(dst, 'w') as f:
+    yaml.dump(flat, f, default_flow_style=False, sort_keys=True)
+print(f'{len(flat)} Parameter geschrieben.')
+PY
 
 echo "Gespeichert: $TARGET"
-echo "Baue neu (data_files kopiert die YAMLs, ohne Build laedt der naechste Start die alte Fassung)..."
-( cd "$REPO_ROOT/workspace" && colcon build --symlink-install --packages-select Follow_Lane ) \
-    | tail -2
 
-echo "Fertig."
+# Dank --symlink-install zeigt install/ auf src/ -- bestehende Dateien wirken sofort.
+# Der Build ist nur noetig, wenn die Datei NEU ist und der Symlink noch fehlt.
+if [ ! -e "$REPO_ROOT/workspace/install/Follow_Lane/share/Follow_Lane/Parameter/$FILE" ]; then
+    echo "Neue Datei -- baue einmalig, damit der Symlink entsteht..."
+    ( cd "$REPO_ROOT/workspace" && colcon build --symlink-install --packages-select Follow_Lane ) | tail -2
+fi
+
+echo "Fertig. Wirkt beim naechsten Start der Pipeline."

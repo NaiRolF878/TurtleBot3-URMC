@@ -33,7 +33,7 @@ class control_driving(Node):
         self.declare_parameter('kd',                 2.75, frange(0.0, 10.0))
         self.declare_parameter('MAX_VEL',            0.34, frange(0.0, 10.0))
         self.declare_parameter('speed_curve_factor', 1.0,  frange(0.0, 5.0))
-        self.declare_parameter('min_speed_factor',   0.5,  frange(0.0, 1.0))
+        self.declare_parameter('min_speed_factor',   0.5,  frange(0.0, 10.0))
 
         self._param_names = [
             'kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor',

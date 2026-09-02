@@ -145,7 +145,15 @@ class detect_lane(Node):
                                (self.hue_white_l,self.saturation_white_l, self.lightness_white_l),
                                (self.hue_white_h,self.saturation_white_h, self.lightness_white_h),)
 
-            
+                
+            kernel = np.ones((5, 5), np.uint8)    
+
+            mask_yellow = cv2.erode(mask_yellow,kernel,iterations =1 )
+
+
+            kernel = np.ones((5, 5), np.uint8)    
+
+            mask_white = cv2.erode(mask_white,kernel,iterations =1 )
 
             white_alternative = int(len(img[0]) * 0.95)
             yellow_alternative = int(len(img[0]) * 0.05)
@@ -307,7 +315,9 @@ def main(args=None):
     finally:
 
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy raeumt den Context im eigenen SIGINT-Handler ab -- sonst wirft der zweite Aufruf
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

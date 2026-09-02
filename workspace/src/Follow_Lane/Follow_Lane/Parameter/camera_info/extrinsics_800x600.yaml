@@ -1,0 +1,24 @@
+camera_height_m: 0.12286271293741557
+camera_pitch_deg: 20.992753937369223
+camera_roll_deg: 2.396648608432451
+forward_offset_m: 0.039
+ground_x_max_m: 0.75
+ground_x_min_m: 0.35
+ground_y_half_m: 0.14
+image_height: 600
+image_width: 800
+lateral_offset_m: 0.0
+output_size_px: 400
+samples: 20
+std_height_m: 0.00022896912589995087
+std_pitch_deg: 0.04023018746351211
+warp_matrix:
+- -6.984397234841423
+- -8.093730128261708
+- 3772.882210424792
+- 1.2338096938646002
+- -29.51973510003406
+- 4526.740857605469
+- 0.001627406499964016
+- -0.03893680607139352
+- 1.0
