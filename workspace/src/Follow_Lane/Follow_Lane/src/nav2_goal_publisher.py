@@ -87,14 +87,20 @@ class nav2_goal_publisher(Node):
             self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {msg.data}')
             return
 
+        if new_mode == self.current_control_mode:
+            return
+
         was_active = self.current_control_mode in _ACTIVE_MODES
         is_active = new_mode in _ACTIVE_MODES
         self.current_control_mode = new_mode
 
-        if was_active and not is_active:
+        # Jeder Moduswechsel bricht ein laufendes Ziel ab -- auch Obstacle <-> Tunnel,
+        # sonst laeuft die Geradeaus-Fahrt im Tunnel einfach weiter.
+        if was_active:
             self.cancel_goal()
             self._latest_explore_path = None
-        elif is_active and not was_active and not self._goal_active:
+
+        if is_active and not self._goal_active:
             self.try_start_chain()
 
     def cbExplorePath(self, path):

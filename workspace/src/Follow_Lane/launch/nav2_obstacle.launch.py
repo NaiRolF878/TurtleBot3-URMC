@@ -32,10 +32,12 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'Lane_Costmap.yaml')),
         DeclareLaunchArgument('nav2_params',
             default_value=os.path.join(PARAM_DIR, 'nav2_params.yaml')),
-        # Gleiche Defaults wie in follow_lane.launch.py, damit sie auch von hier aus
-        # ueberschreibbar bleiben. Ein leerer Wert wuerde dort ins Leere zeigen.
+        # ACHTUNG: muss immer dieselbe Datei sein wie in follow_lane.launch.py --
+        # gleicher Bot, gleiche Kamera. Beide liefen versehentlich auf
+        # unterschiedlichen Dateien, dadurch fuhr der Nav2-Zweig mit anderem ROI
+        # und anderem detection_row_factor (0.75 statt 0.94) als der Spur-Zweig.
         DeclareLaunchArgument('detect_params',
-            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_PI_CAM2.yaml')),
+            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_PI_CAM2_V3.yaml')),
         DeclareLaunchArgument('control_params',
             default_value=os.path.join(PARAM_DIR, 'Control_driving_PID.yaml')),
         DeclareLaunchArgument('switch_control_params',

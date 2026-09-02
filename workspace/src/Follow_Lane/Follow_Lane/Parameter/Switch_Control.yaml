@@ -1,7 +1,10 @@
 /switch_control:
   ros__parameters:
     # --- Obstacle-Erkennung (Lane <-> Obstacle) ---
-    obstacle_check_angle_deg: 30.0
+    # HALBwinkel -- 20.0 heisst 40 Grad Gesamtkegel, bei 1 m also ca. +/-0.36 m
+    # seitlich. Erster Wert zum Verkleinern, falls Streckenbegrenzungen faelschlich
+    # den Obstacle-Modus ausloesen.
+    obstacle_check_angle_deg: 20.0
     # 1.0 statt 0.4 m: der PID ignoriert Hindernisse komplett, bei 0.34 m/s
     # blieben Nav2 sonst nur ~1,2 s zum Ausweichen (Test 02.09.: Hindernis
     # wurde geschoben statt umfahren). 1.0 m passt zu 2,8 s Vorausschau.

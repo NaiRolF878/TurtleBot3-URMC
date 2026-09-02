@@ -98,6 +98,7 @@ class tunnel_explorer_node(Node):
         self.current_target = None      # (x, y) im odom-Frame
         self.target_set_time = None
         self.planning_in_progress = False
+        self._pending_target = None
 
         recompute_rate = self.get_parameter('recompute_rate').value
         self.timer = self.create_timer(1.0 / recompute_rate, self.cbTimer)
@@ -241,6 +242,11 @@ class tunnel_explorer_node(Node):
 
     def _cb_plan_result(self, future):
         self.planning_in_progress = False
+
+        # Waehrend der Planung kann der Modus gewechselt haben -- ein dann noch
+        # eintreffender Pfad gehoert nicht mehr veroeffentlicht.
+        if self.current_control_mode != ControlType.Tunnel or self._pending_target is None:
+            return
 
         result = future.result()
         path = result.result.path if result is not None else None

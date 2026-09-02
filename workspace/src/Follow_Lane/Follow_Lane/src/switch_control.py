@@ -164,6 +164,7 @@ class switch_control(Node):
         # Start-/Endwinkel des Scans korrekt geprueft wird.
         angles = np.arctan2(np.sin(angles), np.cos(angles))
 
+        # Halbwinkel: der Kegel ist doppelt so breit wie der Parameterwert.
         half_angle = math.radians(self.obstacle_check_angle_deg)
         in_cone = np.abs(angles) <= half_angle
         valid = np.isfinite(ranges) & (ranges > scan.range_min)
@@ -185,12 +186,20 @@ class switch_control(Node):
 
     def _is_open_space(self, scan):
         ranges = np.asarray(scan.ranges, dtype=np.float64)
-        valid = np.isfinite(ranges) & (ranges > scan.range_min)
-        if not np.any(valid):
+        if ranges.size == 0:
             return False
 
-        open_mask = ranges[valid] > self.tunnel_exit_open_distance
-        open_ratio = np.count_nonzero(open_mask) / open_mask.size
+        # inf/nan = kein Echo = nichts in Reichweite = frei. Diese Strahlen duerfen
+        # NICHT als ungueltig verworfen werden, sonst bleiben nur die kurzen uebrig
+        # und der Tunnel-Modus liesse sich nie verlassen.
+        no_echo = ~np.isfinite(ranges)
+        far = np.isfinite(ranges) & (ranges > self.tunnel_exit_open_distance)
+        # Zu kurze Messwerte sind Sensorartefakte, nicht "frei" -- die zaehlen als belegt.
+        too_close = np.isfinite(ranges) & (ranges <= scan.range_min)
+
+        open_ratio = np.count_nonzero(no_echo | far) / ranges.size
+        if np.count_nonzero(too_close) == ranges.size:
+            return False
         return open_ratio >= self.tunnel_exit_open_ratio
 
     def _leave_tunnel(self):

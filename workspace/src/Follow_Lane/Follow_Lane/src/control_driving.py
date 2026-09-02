@@ -90,9 +90,19 @@ class control_driving(Node):
         # mode ist eine UInt8-Message; fuer den Vergleich mit ControlType.Lane
         # muss daraus das Enum-Member werden.
         try:
-            self.current_control_mode = ControlType(mode.data)
+            new_mode = ControlType(mode.data)
         except ValueError:
             self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {mode.data}')
+            return
+
+        # Beim Zurueckschalten auf Lane den Regler zuruecksetzen: lastError stammt
+        # sonst von vor dem Ausflug (Sekunden alt) und der D-Anteil erzeugt sofort
+        # einen Lenkschlag bis in die +/-2.0-Begrenzung.
+        if new_mode == ControlType.Lane and self.current_control_mode != ControlType.Lane:
+            self.integral = 0
+            self.lastError = 0
+
+        self.current_control_mode = new_mode
 
 
     def shut_down(self):

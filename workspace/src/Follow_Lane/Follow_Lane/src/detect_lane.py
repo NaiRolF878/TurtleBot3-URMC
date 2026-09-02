@@ -75,6 +75,10 @@ class detect_lane(Node):
         self.declare_parameter('clahe_tile_grid_size', 8,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=64, step=1)]))
 
+        # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
+        self.declare_parameter('lane_mask_stride', 2,
+            ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=20, step=1)]))
+
 
 
         #--- Subscriber ---
@@ -126,7 +130,7 @@ class detect_lane(Node):
                 'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
                 'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
                 'detection_row_factor', 'min_lane_width',
-                'clahe_clip_limit', 'clahe_tile_grid_size',
+                'clahe_clip_limit', 'clahe_tile_grid_size', 'lane_mask_stride',
             ]
             for name in param_names:
                 setattr(self, name, self.get_parameter(name).value)
@@ -198,7 +202,10 @@ class detect_lane(Node):
             self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image)
             self.publish_mask_debug(mask_yellow, mask_white,
                                     center_yellow_x, center_yellow_y, center_white_x, center_white_y)
-            self.publish_lane_mask(mask_yellow, mask_white)
+            # Gefilterte Weissmaske: die links der gelben Linie ausgeblendeten Pixel
+            # haelt der Detektor selbst fuer unzuverlaessig -- als virtuelle Waende in
+            # der Costmap wuerden sie den freien Korridor blockieren.
+            self.publish_lane_mask(mask_yellow, mask_white_filtered)
 
         except Exception as e:
             self.get_logger().error(f"cbFindLane failed: {e}")
@@ -238,8 +245,13 @@ class detect_lane(Node):
         if self.pub_lane_mask.get_subscription_count() == 0:
             return
 
-        yellow_ys, yellow_xs = np.where(mask_yellow > 0)
-        white_ys, white_xs = np.where(mask_white > 0)
+        # Schon hier ausduennen: lane_costmap_node verwirft ohnehin die meisten Punkte
+        # wieder, in voller Aufloesung waeren es zehntausende int32 pro Frame.
+        stride = max(1, int(self.lane_mask_stride))
+        yellow_ys, yellow_xs = np.where(mask_yellow[::stride, ::stride] > 0)
+        white_ys, white_xs = np.where(mask_white[::stride, ::stride] > 0)
+        yellow_ys, yellow_xs = yellow_ys * stride, yellow_xs * stride
+        white_ys, white_xs = white_ys * stride, white_xs * stride
 
         msg = LaneMask()
         msg.header.stamp = self.get_clock().now().to_msg()
