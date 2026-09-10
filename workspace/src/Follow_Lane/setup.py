@@ -38,6 +38,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'avoid_node           = Follow_Lane.src.avoid_node:main',
             'avoid_obstacle       = Follow_Lane.src.avoid_obstacle:main',
             'control_driving      = Follow_Lane.src.control_driving:main',
             'debug_view           = Follow_Lane.src.debug_view:main',
@@ -46,6 +47,7 @@ setup(
             'keepout_zone_node    = Follow_Lane.src.keepout_zone_node:main',
             'lane_costmap_node    = Follow_Lane.src.lane_costmap_node:main',
             'nav2_goal_publisher  = Follow_Lane.src.nav2_goal_publisher:main',
+            'safety_node          = Follow_Lane.src.safety_node:main',
             'safety_stop          = Follow_Lane.src.safety_stop:main',
             'switch_control       = Follow_Lane.src.switch_control:main',
             'tunnel_explorer_node = Follow_Lane.src.tunnel_explorer_node:main',

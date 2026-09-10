@@ -1,37 +1,15 @@
-import os
-
-import yaml
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-PARAM_DIR = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
-
-
-def load_flat_params(path):
-    """Liest eine flache Parameterdatei (name: wert).
-
-    Bewusst NICHT ueber --params-file: das verlangt die Struktur
-    "<node>: ros__parameters:", waehrend rqt_reconfigure flaches YAML schreibt und
-    liest. Da Node(parameters=[...]) auch ein Dictionary akzeptiert, kommen wir mit
-    einem einzigen Format aus und die Datei-Knoepfe in rqt bleiben benutzbar.
-    """
-    if not os.path.isfile(path):
-        print(f'[follow_lane.launch] Parameterdatei nicht gefunden, nutze Code-Defaults: {path}')
-        return {}
-
-    with open(path) as f:
-        data = yaml.safe_load(f) or {}
-
-    # Aeltere Dateien lagen verschachtelt vor -- der Vollstaendigkeit halber mitnehmen.
-    if len(data) == 1 and isinstance(next(iter(data.values())), dict) \
-            and 'ros__parameters' in next(iter(data.values())):
-        data = next(iter(data.values()))['ros__parameters']
-
-    # use_sim_time gehoert nicht in eine Streckenkonfiguration.
-    return {k: v for k, v in data.items() if k != 'use_sim_time'}
+# Liegt im Paket, damit zone_avoid.launch.py dieselbe Funktion und dieselben
+# Default-Dateinamen benutzt statt einer Kopie -- kopierte Launch-Logik ist hier
+# schon einmal auseinandergelaufen.
+from Follow_Lane.src.launch_params import (
+    DEFAULT_CONTROL_PARAMS, DEFAULT_DETECT_PARAMS, DEFAULT_SWITCH_PARAMS,
+    load_flat_params, param_path,
+)
 
 
 def launch_setup(context, *args, **kwargs):
@@ -78,11 +56,11 @@ def generate_launch_description():
         # Ueberschreibbar, z.B. fuer eine zweite Streckenkonfiguration:
         #   ros2 launch Follow_Lane follow_lane.launch.py detect_params:=/pfad/zur/datei.yaml
         DeclareLaunchArgument('detect_params',
-            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_PI_CAM2_V3.yaml')),
+            default_value=param_path(DEFAULT_DETECT_PARAMS)),
         DeclareLaunchArgument('control_params',
-            default_value=os.path.join(PARAM_DIR, 'Control_driving_PID.yaml')),
+            default_value=param_path(DEFAULT_CONTROL_PARAMS)),
         DeclareLaunchArgument('switch_control_params',
-            default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
+            default_value=param_path(DEFAULT_SWITCH_PARAMS)),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
     ])

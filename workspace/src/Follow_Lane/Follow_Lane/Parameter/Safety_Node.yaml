@@ -1,0 +1,27 @@
+# Parameter fuer safety_node (LiDAR-Not-Aus, Prioritaet 1 im Mux).
+#
+# Flaches Format (name: wert), passend zu load_flat_params im Launch.
+
+# Alles naeher als das loest den Not-Aus aus (Meter).
+#
+# ACHTUNG Sensorgrenze: der LDS-01 des Burger meldet range_min = 0.12 m, alles
+# darunter ist unbrauchbar und wird verworfen. Bei 0.15 m bleibt also nur ein
+# 3 cm breites Band, in dem der Not-Aus ueberhaupt ausloesen kann -- ein
+# Hindernis kann bei voller Fahrt zwischen zwei Scans hindurchrutschen.
+# safety_node warnt beim Start, wenn das Band unter 5 cm liegt.
+# 0.15 ist der geforderte Wert; fuer verlaessliches Ausloesen im Fahrbetrieb
+# eher 0.20-0.25 einstellen (dann auch release_distance mit anheben).
+emergency_distance:  0.15
+# Hysterese: erst darueber gilt die Lage wieder als sicher. Muss groesser als
+# emergency_distance sein, sonst flattert der Not-Aus an der Schwelle.
+release_distance:    0.20
+# Mindesthaltezeit in Sekunden, auch wenn der Messwert sofort wieder frei ist.
+min_stop_duration:   0.5
+# Messwerte darunter sind Artefakte, kein Hindernis.
+min_valid_distance:  0.05
+# Halbwinkel des ueberwachten Sektors um die Fahrtrichtung, 180.0 = Vollkreis.
+# Kleiner stellen, falls Aufbauten am Roboter den Not-Aus faelschlich ausloesen.
+check_angle_deg:     180.0
+# Anzahl Messpunkte, die unter der Schwelle liegen muessen. 1 ist am
+# empfindlichsten, 2-3 unterdrueckt einzelne Ausreisser des LDS.
+min_hits:            2

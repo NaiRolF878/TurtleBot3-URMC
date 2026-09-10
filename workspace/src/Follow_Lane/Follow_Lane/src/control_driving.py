@@ -35,14 +35,22 @@ class control_driving(Node):
         self.declare_parameter('speed_curve_factor', 1.0,  frange(0.0, 5.0))
         self.declare_parameter('min_speed_factor',   0.5,  frange(0.0, 10.0))
 
+        # --- Ausweich-Offset (avoid_node) ---
+        # Aeltere Offsets werden verworfen: faellt avoid_node aus, soll der
+        # Regler auf reine Spurfolge zurueckfallen statt dauerhaft schief zu
+        # fahren.
+        self.declare_parameter('avoid_offset_timeout', 0.5, frange(0.05, 5.0))
+
         self._param_names = [
             'kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor',
+            'avoid_offset_timeout',
         ]
 
 
         #Subscriber
         self.sub_lane_error = self.create_subscription(Float64, '/detect/lane',self.cbFollowLane ,10)
         self.sub_control_mode = self.create_subscription(UInt8,'/control/mode',self.cbGetControlMode,1)
+        self.sub_avoid_offset = self.create_subscription(Float64,'/avoid/offset',self.cbAvoidOffset,1)
 
 
         #Publishers
@@ -56,6 +64,26 @@ class control_driving(Node):
         self.integral = 0
         self.v = 0
         self.a = 0
+        self._avoid_offset = 0.0
+        self._avoid_offset_time = None
+
+    def cbAvoidOffset(self, msg):
+        """Ausweich-Offset von avoid_node zwischenspeichern.
+
+        Positiver Offset = nach links, gleiche Konvention wie der Spur-Error
+        von detect_lane.
+        """
+        self._avoid_offset = float(msg.data)
+        self._avoid_offset_time = self.get_clock().now()
+
+    def _current_avoid_offset(self):
+        """Offset, falls er aktuell genug ist -- sonst 0.0."""
+        if self._avoid_offset_time is None:
+            return 0.0
+        age = (self.get_clock().now() - self._avoid_offset_time).nanoseconds / 1e9
+        if age > self.avoid_offset_timeout:
+            return 0.0
+        return self._avoid_offset
 
     def cbFollowLane(self,error):
         if self.current_control_mode != ControlType.Lane:
@@ -66,7 +94,10 @@ class control_driving(Node):
         for name in self._param_names:
             setattr(self, name, self.get_parameter(name).value)
 
-        Current_error = error.data
+        # Ausweich-Offset auf den Spur-Error addieren: der Roboter zieht dadurch
+        # innerhalb der Spur am Hindernis vorbei, waehrend die Spurerkennung
+        # weiter dagegenhaelt und die gelbe Linie nicht ueberfahren wird.
+        Current_error = error.data + self._current_avoid_offset()
 
         #PID-Regler eingefügt
         self.integral += Current_error
