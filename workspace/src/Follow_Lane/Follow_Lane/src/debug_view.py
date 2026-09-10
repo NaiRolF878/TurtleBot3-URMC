@@ -12,8 +12,8 @@ from rclpy.qos import qos_profile_sensor_data
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from follow_lane_msg.msg import FollowLaneDebug
-from sensor_msgs.msg import Image, BatteryState, PointCloud2
-from std_msgs.msg import UInt8
+from sensor_msgs.msg import Image, BatteryState
+from std_msgs.msg import Float64, String, UInt8
 
 from Follow_Lane.src.switch_control import ControlType
 
@@ -24,20 +24,16 @@ BATT_EMPTY_V = 11.0
 
 # Farbe pro Fahrmodus (BGR), damit auf einen Blick erkennbar ist, wer gerade faehrt.
 MODE_COLOR = {
-    ControlType.Lane:         (135, 250, 159),   # gruen  -- PID faehrt
-    ControlType.Obstacle:     (0, 165, 255),     # orange -- Nav2/MPPI faehrt
-    ControlType.Tunnel:       (255, 200, 0),     # cyan   -- Nav2/MPPI im Tunnel
-    ControlType.Stop:         (60, 60, 255),     # rot
-    ControlType.Intersection: (200, 200, 200),
-    ControlType.Align:        (200, 200, 200),
+    ControlType.Lane:     (135, 250, 159),   # gruen  -- PID faehrt
+    ControlType.Obstacle: (0, 165, 255),     # orange -- avoid_node faehrt
+    ControlType.Stop:     (60, 60, 255),     # rot
 }
 
 # Wer bei welchem Modus tatsaechlich /cmd_vel bespielt -- die haeufigste
 # Verstaendnisfrage beim Testen ("warum lenkt der PID nicht mehr?").
 MODE_DRIVER = {
     ControlType.Lane:     'PID',
-    ControlType.Obstacle: 'Nav2/MPPI',
-    ControlType.Tunnel:   'Nav2/MPPI',
+    ControlType.Obstacle: 'avoid_node',
 }
 
 
@@ -56,10 +52,11 @@ class debug_view(Node):
             BatteryState, '/battery_state', self.cb_get_battery_state, qos_profile_sensor_data)
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cb_get_control_mode, 1)
-        # Nur zum Mitzaehlen: bestaetigt im Debugbild, dass die Kette
-        # detect_lane -> lane_costmap_node -> Costmap wirklich Daten liefert.
-        self.sub_lane_obstacles = self.create_subscription(
-            PointCloud2, '/detect/lane_obstacles', self.cb_get_lane_obstacles, 1)
+        # Wer tatsaechlich faehrt -- der Mode sagt nur, wer fahren DUERFTE.
+        self.sub_cmd_source = self.create_subscription(
+            String, '/control/cmd_source', self.cb_get_cmd_source, 1)
+        self.sub_avoid_offset = self.create_subscription(
+            Float64, '/avoid/offset', self.cb_get_avoid_offset, 1)
 
         #Publisher
         self.pub_debug_image = self.create_publisher(Image,'/lokal/debug_view',1)
@@ -72,8 +69,9 @@ class debug_view(Node):
         self.battery_level = None
 
         self.control_mode = None
-        self.lane_obstacle_points = 0
-        self.lane_obstacle_stamp = None
+        self.cmd_source = None
+        self.cmd_source_stamp = None
+        self.avoid_offset = None
 
         media_dir = os.path.join(get_package_share_directory('Follow_Lane'), 'media', 'Battery')
         self.battery_icons = []
@@ -94,10 +92,12 @@ class debug_view(Node):
         except ValueError:
             self.control_mode = None
 
-    def cb_get_lane_obstacles(self, cloud):
-        # width * height = Punktanzahl, ohne die Punkte dekodieren zu muessen.
-        self.lane_obstacle_points = cloud.width * cloud.height
-        self.lane_obstacle_stamp = self.get_clock().now()
+    def cb_get_cmd_source(self, msg):
+        self.cmd_source = msg.data
+        self.cmd_source_stamp = self.get_clock().now()
+
+    def cb_get_avoid_offset(self, msg):
+        self.avoid_offset = msg.data
 
     def cb_get_battery_state(self, state):
         self.battery_level = self.battery_percent(state)
@@ -203,30 +203,59 @@ class debug_view(Node):
         cv2.putText(panel, self.control_mode.name, (8,85),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 2, cv2.LINE_AA)
 
-        # Wer gerade /cmd_vel bespielt -- im Obstacle/Tunnel-Modus ist der PID aus.
+        # Wer laut Modus fahren duerfte -- im Obstacle-Modus ist der PID aus.
         driver = MODE_DRIVER.get(self.control_mode, 'kein Regler')
         cv2.putText(panel, 'faehrt:', (8,125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
         cv2.putText(panel, driver, (8,160),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
-        self.draw_lane_obstacle_status(panel)
+        self.draw_cmd_source_status(panel)
         return panel
 
-    def draw_lane_obstacle_status(self, panel):
-        cv2.putText(panel, 'Spur -> Costmap:', (8,215),
+    # Farbe je Mux-Quelle, passend zum Mode-Farbschema darueber.
+    SOURCE_COLOR = {
+        'safe':  (60, 60, 255),      # rot    -- Not-Aus
+        'avoid': (0, 165, 255),      # orange -- avoid_node
+        'lane':  (135, 250, 159),    # gruen  -- PID
+        'none':  (120, 120, 120),    # grau   -- Nullbefehl
+    }
+
+    def draw_cmd_source_status(self, panel):
+        """Welche Quelle der Mux gerade durchlaesst, plus der Ausweich-Offset.
+
+        Der Mode sagt nur, wer fahren duerfte -- der Not-Aus greift quer dazu
+        durch, ohne den Mode zu aendern. Beim Testen ist genau das die Frage:
+        "warum faehrt er nicht, obwohl Lane steht?"
+        """
+        cv2.putText(panel, 'Mux-Quelle:', (8,215),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
 
-        if self.lane_obstacle_stamp is None:
+        if self.cmd_source_stamp is None:
             text, color = 'nie empfangen', (120,120,120)
         else:
-            age = (self.get_clock().now() - self.lane_obstacle_stamp).nanoseconds / 1e9
+            age = (self.get_clock().now() - self.cmd_source_stamp).nanoseconds / 1e9
             if age > 2.0:
                 text, color = f'still ({age:.0f}s)', (60,60,255)
             else:
-                text, color = f'{self.lane_obstacle_points} Pkt', (135,250,159)
+                text = self.cmd_source or '?'
+                color = self.SOURCE_COLOR.get(self.cmd_source, (200,200,200))
 
         cv2.putText(panel, text, (8,250), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+        # Offset: Vorzeichen als Richtungspfeil, damit es ohne Nachdenken lesbar
+        # ist (positiv = nach links, wie der Spur-Error von detect_lane).
+        cv2.putText(panel, 'Ausweich-Offset:', (8,290),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
+        if self.avoid_offset is None:
+            off_text, off_color = '--', (120,120,120)
+        elif abs(self.avoid_offset) < 0.01:
+            off_text, off_color = '0.00', (200,200,200)
+        else:
+            arrow = '<' if self.avoid_offset > 0 else '>'
+            off_text = f'{arrow} {abs(self.avoid_offset):.2f}'
+            off_color = (0,165,255)
+        cv2.putText(panel, off_text, (8,325), cv2.FONT_HERSHEY_SIMPLEX, 0.8, off_color, 2, cv2.LINE_AA)
 
     def draw_battery(self, head_panel, total_w):
         text = '--%' if self.battery_level is None else f"{self.battery_level}%"

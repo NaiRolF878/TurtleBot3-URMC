@@ -15,26 +15,44 @@ Ist die Frontzone komplett blockiert, meldet avoid_node die Uebernahme auf
 /avoid/takeover, switch_control geht auf Obstacle (womit control_driving
 verstummt) und avoid_node faehrt selbst ueber /cmd_avoid.
 
-Bewusst NICHT ueber follow_lane.launch.py eingebunden: dort ist control_driving
-direkt auf /cmd_vel gemappt und der alte avoid_obstacle-Node laeuft mit -- das
-wuerde den Mux umgehen. Die Parameter-Defaults der gemeinsamen Nodes werden
-aber von dort uebernommen (siehe LANE_LAUNCH), damit sie nicht doppelt gepflegt
-werden muessen.
+Einzige Launch-Datei des Pakets -- alle Parameter-Defaults stehen hier.
 """
 
+import os
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-# Die Dateinamen der Defaults stehen ausschliesslich in launch_params -- hier
-# nur nachschlagen, nicht kopieren.
-from Follow_Lane.src.launch_params import (
-    DEFAULT_AVOID_PARAMS, DEFAULT_CONTROL_PARAMS, DEFAULT_DETECT_PARAMS,
-    DEFAULT_SAFETY_PARAMS, DEFAULT_SWITCH_ZONE_PARAMS,
-    load_flat_params, param_path,
-)
+PARAM_DIR = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
+
+
+def load_flat_params(path):
+    """Liest eine flache Parameterdatei (name: wert).
+
+    Bewusst NICHT ueber --params-file: das verlangt die Struktur
+    "<node>: ros__parameters:", waehrend rqt_reconfigure flaches YAML schreibt und
+    liest. Da Node(parameters=[...]) auch ein Dictionary akzeptiert, kommen wir mit
+    einem einzigen Format aus und die Datei-Knoepfe in rqt bleiben benutzbar.
+    """
+    if not os.path.isfile(path):
+        print(f'[zone_avoid.launch] Parameterdatei nicht gefunden, nutze Code-Defaults: {path}')
+        return {}
+
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+
+    # Aeltere Dateien lagen verschachtelt vor -- der Vollstaendigkeit halber mitnehmen.
+    if len(data) == 1 and isinstance(next(iter(data.values())), dict) \
+            and 'ros__parameters' in next(iter(data.values())):
+        data = next(iter(data.values()))['ros__parameters']
+
+    # use_sim_time gehoert nicht in eine Streckenkonfiguration.
+    return {k: v for k, v in data.items() if k != 'use_sim_time'}
 
 
 def launch_setup(context, *args, **kwargs):
@@ -78,6 +96,8 @@ def launch_setup(context, *args, **kwargs):
 
         # Modus-Zustandsmaschine + Mux. Erst hier wird auf /cmd_vel gemappt,
         # dem einzigen Topic, auf das der turtlebot3_node aus dem Bringup hoert.
+        # Bewusst im Launch statt im Code: so bleibt der Mux auch in Gazebo o.ae.
+        # nutzbar.
         Node(
             package='Follow_Lane', executable='switch_control', name='switch_control',
             parameters=[switch_params],
@@ -98,20 +118,18 @@ def launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
-        # Ueberschreibbar wie in follow_lane.launch.py, z.B.:
+        # Ueberschreibbar, z.B. fuer eine zweite Streckenkonfiguration:
         #   ros2 launch Follow_Lane zone_avoid.launch.py avoid_params:=/pfad/datei.yaml
         DeclareLaunchArgument('detect_params',
-            default_value=param_path(DEFAULT_DETECT_PARAMS)),
+            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_PI_CAM2_V3.yaml')),
         DeclareLaunchArgument('control_params',
-            default_value=param_path(DEFAULT_CONTROL_PARAMS)),
-        # Abweichend zum Spur-Zweig: hier braucht switch_control den Mux und die
-        # Umschaltung ueber avoid_node statt ueber den eigenen LiDAR-Kegel.
+            default_value=os.path.join(PARAM_DIR, 'Control_driving_PID.yaml')),
         DeclareLaunchArgument('switch_control_params',
-            default_value=param_path(DEFAULT_SWITCH_ZONE_PARAMS)),
+            default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
         DeclareLaunchArgument('avoid_params',
-            default_value=param_path(DEFAULT_AVOID_PARAMS)),
+            default_value=os.path.join(PARAM_DIR, 'Avoid_Node.yaml')),
         DeclareLaunchArgument('safety_params',
-            default_value=param_path(DEFAULT_SAFETY_PARAMS)),
+            default_value=os.path.join(PARAM_DIR, 'Safety_Node.yaml')),
         DeclareLaunchArgument('image_view', default_value='true'),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),

@@ -22,8 +22,6 @@ setup(
             glob(package_name + '/Parameter/*.yaml')),
         (os.path.join('share', package_name, 'Parameter', 'camera_info'),
             glob(package_name + '/Parameter/camera_info/*.yaml')),
-        (os.path.join('share', package_name, 'rviz'),
-            glob('rviz/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -39,18 +37,12 @@ setup(
     entry_points={
         'console_scripts': [
             'avoid_node           = Follow_Lane.src.avoid_node:main',
-            'avoid_obstacle       = Follow_Lane.src.avoid_obstacle:main',
             'control_driving      = Follow_Lane.src.control_driving:main',
             'debug_view           = Follow_Lane.src.debug_view:main',
             'detect_lane          = Follow_Lane.src.detect_lane:main',
             'ingress_node         = Follow_Lane.src.ingress_node:main',
-            'keepout_zone_node    = Follow_Lane.src.keepout_zone_node:main',
-            'lane_costmap_node    = Follow_Lane.src.lane_costmap_node:main',
-            'nav2_goal_publisher  = Follow_Lane.src.nav2_goal_publisher:main',
             'safety_node          = Follow_Lane.src.safety_node:main',
-            'safety_stop          = Follow_Lane.src.safety_stop:main',
             'switch_control       = Follow_Lane.src.switch_control:main',
-            'tunnel_explorer_node = Follow_Lane.src.tunnel_explorer_node:main',
         ],
     },
 )

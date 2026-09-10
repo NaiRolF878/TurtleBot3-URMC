@@ -9,9 +9,9 @@ Ausbleiben der Nachrichten, dass er wieder auf die naechstniedrigere Quelle
 zurueckfallen darf. Ein dauerhaft sendender Not-Aus wuerde den Roboter fuer
 immer anhalten.
 
-Abgegrenzt zu safety_stop.py: das ist ein Watchdog auf /cmd_vel (faellt der
-Fahrbefehl aus, wird gestoppt). Dieser Node hier schaut auf den LiDAR und
-stoppt bei zu geringem Abstand -- die beiden ergaenzen sich.
+Den Fall "es kommt gar kein Fahrbefehl mehr" deckt dieser Node NICHT ab -- das
+erledigt der Mux in switch_control, der auf einen Nullbefehl faellt, sobald von
+allen Quellen nichts Aktuelles mehr eintrifft.
 """
 
 import math

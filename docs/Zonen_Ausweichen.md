@@ -1,10 +1,25 @@
 # Zonen-Ausweichen (Branch `Zone`)
 
-Hindernisvermeidung ueber eine Zoneneinteilung des 360-Grad-LiDAR, kombiniert
-mit der bestehenden Spurverfolgung.
+Spurverfolgung mit zonenbasierter Hindernisvermeidung und LiDAR-Not-Aus.
+
+Der Branch ist bewusst auf das reduziert, was zum Fahren gebraucht wird: der
+komplette Nav2-Zweig (Costmaps, MPPI, Planner, Tunnel-Exploration) ist hier
+entfernt. Wer ihn braucht, findet ihn unveraendert auf `Nav2LocalCostmap`.
 
 Start: `ros2 launch Follow_Lane zone_avoid.launch.py`
 (oder im `tb`-Menue der Launcher `zone_avoid.sh`)
+
+## Nodes
+
+| Node              | Aufgabe                                              |
+|-------------------|------------------------------------------------------|
+| `ingress_node`    | Kamerabild entzerren, `/scan` spiegeln                |
+| `detect_lane`     | Spurerkennung (HSV + CLAHE + Perspektivtransformation)|
+| `control_driving` | PID auf den Spur-Error, + Ausweich-Offset             |
+| `avoid_node`      | Zoneneinteilung, Offset bzw. komplettes Ausweichen    |
+| `safety_node`     | LiDAR-Not-Aus                                         |
+| `switch_control`  | Fahrmodus + Prioritaets-Mux                           |
+| `debug_view`      | Debugbild auf `/lokal/debug_view`                     |
 
 ## Signalfluss
 
@@ -16,7 +31,7 @@ detect_lane --/detect/lane--------------------> control_driving --/cmd_lane--.
                      |                                                       |
 /scan --> avoid_node -+--/avoid/takeover--> switch_control                   |
           |                                   (Mux)                          |
-          '--/cmd_avoid-------------------------+<------------------------- -'
+          '--/cmd_avoid-------------------------+<-------------------------- '
                                                 |
 /scan --> safety_node --/cmd_safe-------------->|
                                                 v
@@ -25,29 +40,31 @@ detect_lane --/detect/lane--------------------> control_driving --/cmd_lane--.
 
 Prioritaet im Mux (hoechste zuerst):
 
-| Prio | Topic        | Node            | Wann                                  |
-|------|--------------|-----------------|---------------------------------------|
-| 1    | `/cmd_safe`  | safety_node     | Hindernis < `emergency_distance`      |
-| 2    | `/cmd_avoid` | avoid_node      | Frontzone < `takeover_distance`       |
-| 3    | `/cmd_lane`  | control_driving | Normalbetrieb                         |
+| Prio | Topic        | Node            | Wann                             |
+|------|--------------|-----------------|----------------------------------|
+| 1    | `/cmd_safe`  | safety_node     | Hindernis < `emergency_distance` |
+| 2    | `/cmd_avoid` | avoid_node      | Frontzone < `takeover_distance`  |
+| 3    | `/cmd_lane`  | control_driving | Normalbetrieb                    |
 
 Der Mux waehlt die hoechste Prioritaet, von der noch **aktuelle** Nachrichten
 kommen (`cmd_timeout_*`). safety_node und avoid_node senden deshalb nur, wenn
 sie tatsaechlich zustaendig sind -- hoert eine Quelle auf, faellt der Mux von
-selbst zurueck. Kommt von gar keiner Quelle etwas, geht ein Nullbefehl raus.
+selbst zurueck. Kommt von gar keiner Quelle etwas, geht ein Nullbefehl raus
+statt des letzten Fahrbefehls. Damit ist auch der Fall "control_driving
+abgestuerzt" abgedeckt.
 
 ## Zonen
 
 Winkel in Grad gegen den Uhrzeigersinn ab Fahrtrichtung (0 = geradeaus,
 90 = links). Konfigurierbar in `Parameter/Avoid_Node.yaml`.
 
-| Zone          | Bereich     | Kosten |
-|---------------|-------------|--------|
-| Vorne         | 350deg-10deg| 0      |
-| Vorne-Links   | 10deg-50deg | +1     |
-| Vorne-Rechts  | 310deg-350deg| -1    |
-| Links         | 50deg-90deg | +2     |
-| Rechts        | 270deg-310deg| -2    |
+| Zone          | Bereich       | Kosten |
+|---------------|---------------|--------|
+| Vorne         | 350deg-10deg  | 0      |
+| Vorne-Links   | 10deg-50deg   | +1     |
+| Vorne-Rechts  | 310deg-350deg | -1     |
+| Links         | 50deg-90deg   | +2     |
+| Rechts        | 270deg-310deg | -2     |
 
 **Vorzeichen = Drehrichtung** (positiv = links), **Betrag = Kosten**. Gewaehlt
 wird der freie Sektor mit dem kleinsten Betrag, bei Gleichstand der mit mehr
@@ -55,7 +72,8 @@ Platz. Waere der reine Zahlenwert massgeblich, gewaenne immer der negativste
 Sektor und der Roboter wiche grundsaetzlich nach rechts aus.
 
 Ist kein Sektor frei (`clear_distance`), wird der mit der groessten gemessenen
-Distanz genommen.
+Distanz genommen. Eine Zone ganz ohne Echo zaehlt als frei -- `inf` heisst beim
+LiDAR "nichts in Reichweite", nicht "kein Messwert".
 
 ## Zwei Betriebsarten
 
@@ -85,26 +103,25 @@ Offset nicht mehr: avoid_node meldet `/avoid/takeover`, switch_control geht auf
 `takeover_release_debounce` Sekunden -- ohne diese Hysterese wuerde der Roboter
 an der Schwelle zwischen beiden Betriebsarten flattern.
 
-## Warum switch_control und nicht ein zweiter Node
+Der Offset wird auch waehrend der Uebernahme weiter gesendet. Ihn dort auf 0 zu
+zwingen waere ein Sprung im Sollwert: zwischen `/avoid/takeover` und dem
+`/control/mode`-Wechsel liegen ein bis zwei Nachrichten, und in diesem Fenster
+macht der D-Anteil (`kd`/0.1) daraus sofort einen Lenkausschlag bis an die
+Begrenzung.
 
-`switch_control` war schon vorher der einzige Publisher von `/control/mode`, an
-dem `nav2_goal_publisher`, `lane_costmap_node`, `keepout_zone_node`,
-`tunnel_explorer_node` und `debug_view` haengen. Der Mux sitzt deshalb im selben
-Node -- so bleiben Modus und Fahrbefehl konsistent.
+## Fahrmodus
 
-Der Mux ist per `cmd_mux_enabled` abschaltbar und **standardmaessig aus**:
-`follow_lane.launch.py` und `nav2_obstacle.launch.py` laufen unveraendert
-weiter, dort mappt control_driving nach wie vor direkt auf `/cmd_vel`.
+`switch_control` ist der einzige Publisher von `/control/mode`:
 
-Ebenso `obstacle_source`:
+| Modus      | Wert | Wer faehrt   |
+|------------|------|--------------|
+| `Lane`     | 1    | control_driving |
+| `Obstacle` | 2    | avoid_node   |
+| `Stop`     | 3    | niemand      |
 
-- `'scan'` (Default, Nav2-Zweig): switch_control entscheidet selbst per
-  LiDAR-Kegel ab `obstacle_trigger_distance` (1.0 m)
-- `'avoid'` (Zonen-Zweig): avoid_node entscheidet ueber `/avoid/takeover`
-
-Beides gleichzeitig waere ein Fehler: switch_control haette bei 1.0 m schon auf
-`Obstacle` geschaltet und damit den PID stummgeschaltet, waehrend avoid_node
-erst ab 0.20 m selbst faehrt -- der Roboter stuende dazwischen.
+Der Modus sagt nur, wer fahren **duerfte**. Der Not-Aus greift quer dazu durch,
+ohne den Modus zu aendern -- beim Testen ist `/control/cmd_source` deshalb die
+aussagekraeftigere Anzeige, und sie steht auch im Debugbild.
 
 ## Not-Aus (safety_node)
 
@@ -119,28 +136,31 @@ liegen, und haelt ueber `min_stop_duration` und `release_distance`.
 > verlaessliches Ausloesen eher 0.20-0.25 einstellen und `release_distance`
 > mit anheben.
 
-`safety_node` (LiDAR) ersetzt **nicht** `safety_stop.py` (Watchdog auf
-`/cmd_vel`, schlaegt bei ausbleibenden Fahrbefehlen an) -- die beiden decken
-verschiedene Faelle ab. `safety_stop` wird in dieser Launch-Datei wie bisher
-nicht gestartet.
-
 ## Diagnose
 
 ```bash
 ros2 topic echo /avoid/zones          # Zonendistanzen + Betriebsart
 ros2 topic echo /control/cmd_source   # welche Quelle gerade faehrt
+ros2 topic echo /control/mode         # Fahrmodus (1 Lane, 2 Obstacle, 3 Stop)
 ros2 topic echo /avoid/offset         # aktueller Offset
 ros2 topic echo /safety/emergency     # Not-Aus aktiv?
-ros2 run rqt_reconfigure rqt_reconfigure   # Parameter live nachziehen
+bash scripts/tb/launchers/rqt_params.sh    # Parameter live nachziehen
 ```
 
 ## Parameterdateien
 
 | Datei                             | Node            |
 |-----------------------------------|-----------------|
+| `Parameter/Follow_Lane_ROI_PI_CAM2_V3.yaml` | detect_lane |
+| `Parameter/Control_driving_PID.yaml` | control_driving |
 | `Parameter/Avoid_Node.yaml`       | avoid_node      |
 | `Parameter/Safety_Node.yaml`      | safety_node     |
-| `Parameter/Switch_Control_Zone.yaml` | switch_control (Mux an, `obstacle_source: avoid`) |
+| `Parameter/Switch_Control.yaml`   | switch_control  |
 
 Flaches Format (`name: wert`) wie die uebrigen Dateien, damit die
-Datei-Knoepfe in `rqt_reconfigure` benutzbar bleiben.
+Datei-Knoepfe in `rqt_reconfigure` benutzbar bleiben. Ueberschreibbar beim
+Start, z.B.:
+
+```bash
+ros2 launch Follow_Lane zone_avoid.launch.py avoid_params:=/pfad/datei.yaml
+```

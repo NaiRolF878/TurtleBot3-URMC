@@ -1,18 +1,20 @@
-/switch_control:
-  ros__parameters:
-    # --- Obstacle-Erkennung (Lane <-> Obstacle) ---
-    # HALBwinkel -- 20.0 heisst 40 Grad Gesamtkegel, bei 1 m also ca. +/-0.36 m
-    # seitlich. Erster Wert zum Verkleinern, falls Streckenbegrenzungen faelschlich
-    # den Obstacle-Modus ausloesen.
-    obstacle_check_angle_deg: 20.0
-    # 1.0 statt 0.4 m: der PID ignoriert Hindernisse komplett, bei 0.34 m/s
-    # blieben Nav2 sonst nur ~1,2 s zum Ausweichen (Test 02.09.: Hindernis
-    # wurde geschoben statt umfahren). 1.0 m passt zu 2,8 s Vorausschau.
-    obstacle_trigger_distance: 1.0
-    obstacle_clear_debounce: 1.0
+# Parameter fuer switch_control (Fahrmodus + Fahrbefehl-Mux).
+#
+# Flaches Format (name: wert), passend zu load_flat_params im Launch und zu den
+# Datei-Knoepfen von rqt_reconfigure.
 
-    # --- Tunnel-Austritt (Tunnel -> vorheriger Modus) ---
-    tunnel_exit_open_distance: 1.5
-    tunnel_exit_open_ratio: 0.8
-    tunnel_exit_min_lane_pixels: 20
-    tunnel_exit_debounce: 1.0
+# --- Fahrbefehl-Mux: 1 /cmd_safe > 2 /cmd_avoid > 3 /cmd_lane ---
+# Takt, in dem der Mux seine Auswahl auf /control/cmd_vel schiebt.
+cmd_mux_rate: 20.0
+
+# Aktualitaetsfenster je Quelle (Sekunden). Bleiben Nachrichten laenger aus,
+# faellt der Mux auf die naechste Prioritaet zurueck -- und wenn gar nichts mehr
+# kommt, auf einen Nullbefehl. Genau darueber geben safety_node und avoid_node
+# das Steuer wieder ab: sie hoeren einfach auf zu senden.
+#
+# Nicht zu knapp waehlen: control_driving sendet im Takt von detect_lane
+# (kamerabedingt ca. 10 Hz), ein Fenster nahe 0.1 s wuerde die Spurfolge bei
+# jedem ausgelassenen Frame kurz auf "none" fallen lassen -- der Bot ruckelt.
+cmd_timeout_safe:  0.5
+cmd_timeout_avoid: 0.5
+cmd_timeout_lane:  0.5
