@@ -8,7 +8,7 @@ from std_msgs.msg import Float64
 from sensor_msgs.msg import Image, CompressedImage
 from cv_bridge import CvBridge
 
-from follow_lane_msg.msg import FollowLaneDebug, LaneMask
+from follow_lane_msg.msg import FollowLaneDebug
 
 
 class detect_lane(Node):
@@ -75,10 +75,6 @@ class detect_lane(Node):
         self.declare_parameter('clahe_tile_grid_size', 8,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=64, step=1)]))
 
-        # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
-        self.declare_parameter('lane_mask_stride', 2,
-            ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=20, step=1)]))
-
 
 
         #--- Subscriber ---
@@ -94,9 +90,6 @@ class detect_lane(Node):
         self.pub_debug_image = self.create_publisher(FollowLaneDebug, '/detect/lane_debug', 1)
         # Muss auf /compressed enden: image_transport deutet das letzte Namenssegment als Transport
         self.pub_mask_debug = self.create_publisher(CompressedImage, '/detect/mask_debug/compressed', 1)
-        # Verlustfreie Pixelkoordinaten der Linienpunkte, z.B. fuer lane_costmap_node --
-        # bewusst getrennt vom komprimierten Debug-Bild oben, das nur zum Anschauen gedacht ist.
-        self.pub_lane_mask = self.create_publisher(LaneMask, '/detect/lane_mask', 1)
 
         #Andere Variablen:
 
@@ -130,7 +123,7 @@ class detect_lane(Node):
                 'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
                 'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
                 'detection_row_factor', 'min_lane_width',
-                'clahe_clip_limit', 'clahe_tile_grid_size', 'lane_mask_stride',
+                'clahe_clip_limit', 'clahe_tile_grid_size',
             ]
             for name in param_names:
                 setattr(self, name, self.get_parameter(name).value)
@@ -202,10 +195,6 @@ class detect_lane(Node):
             self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image)
             self.publish_mask_debug(mask_yellow, mask_white,
                                     center_yellow_x, center_yellow_y, center_white_x, center_white_y)
-            # Gefilterte Weissmaske: die links der gelben Linie ausgeblendeten Pixel
-            # haelt der Detektor selbst fuer unzuverlaessig -- als virtuelle Waende in
-            # der Costmap wuerden sie den freien Korridor blockieren.
-            self.publish_lane_mask(mask_yellow, mask_white_filtered)
 
         except Exception as e:
             self.get_logger().error(f"cbFindLane failed: {e}")
@@ -239,28 +228,6 @@ class detect_lane(Node):
         msg.format = 'jpeg'
         msg.data = encoded.tobytes()
         self.pub_mask_debug.publish(msg)
-
-    def publish_lane_mask(self, mask_yellow, mask_white):
-        # Nur berechnen, wenn jemand zuschaut -- gleiche Begruendung wie bei publish_mask_debug.
-        if self.pub_lane_mask.get_subscription_count() == 0:
-            return
-
-        # Schon hier ausduennen: lane_costmap_node verwirft ohnehin die meisten Punkte
-        # wieder, in voller Aufloesung waeren es zehntausende int32 pro Frame.
-        stride = max(1, int(self.lane_mask_stride))
-        yellow_ys, yellow_xs = np.where(mask_yellow[::stride, ::stride] > 0)
-        white_ys, white_xs = np.where(mask_white[::stride, ::stride] > 0)
-        yellow_ys, yellow_xs = yellow_ys * stride, yellow_xs * stride
-        white_ys, white_xs = white_ys * stride, white_xs * stride
-
-        msg = LaneMask()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.crop_im_size = self._crop_im_size
-        msg.yellow_x = yellow_xs.astype(np.int32).tolist()
-        msg.yellow_y = yellow_ys.astype(np.int32).tolist()
-        msg.white_x = white_xs.astype(np.int32).tolist()
-        msg.white_y = white_ys.astype(np.int32).tolist()
-        self.pub_lane_mask.publish(msg)
 
     def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, lane_center, img):
         follow_lane_debug_info = FollowLaneDebug()
