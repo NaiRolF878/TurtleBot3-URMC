@@ -15,7 +15,7 @@
 # laufende Nodes behalten sonst intern die alte Zeitbasis.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BOT_USER="gertrude"
+source "$SCRIPT_DIR/bot.conf" || exit 1
 
 BOT_IP=$(bash "$SCRIPT_DIR/find-bot-ip.sh") || exit 1
 

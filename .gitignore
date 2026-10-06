@@ -47,3 +47,9 @@ logs/
 *.log
 *.bag
 *.db3
+
+# Vision-Datensatz von scripts/tb/dataset-capture.py
+dataset/
+
+# Lokales Allerlei, das nicht zum eigentlichen Projekt gehoert (z.B. Bot-Melodien) -- nicht ins Repo.
+misc/

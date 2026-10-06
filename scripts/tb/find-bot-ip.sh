@@ -3,7 +3,8 @@
 # Sucht per MAC-Adresse, weil die IP je nach WLAN/DHCP wechselt, die MAC aber nicht.
 # Meldungen gehen bewusst nach stderr, damit "$(bash find-bot-ip.sh)" nur die IP liefert.
 
-BOT_MAC="2C:CF:67:47:38:54"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/bot.conf" || exit 1
 
 IFACE=$(ip -4 -o addr show scope global | awk '{print $2}' | grep -v -E "^(lo|docker0)$" | head -n1)
 if [ -z "$IFACE" ]; then
@@ -17,7 +18,7 @@ if [ -z "$CIDR" ]; then
     exit 1
 fi
 
-echo "Suche Bot (MAC $BOT_MAC) in $CIDR ueber $IFACE ..." >&2
+echo "Suche Bot $BOT (MAC $BOT_MAC) in $CIDR ueber $IFACE ..." >&2
 
 for attempt in 1 2 3 4 5 6; do
     BOT_IP=$(nmap -sn "$CIDR" 2>/dev/null | grep -B2 -i "$BOT_MAC" \

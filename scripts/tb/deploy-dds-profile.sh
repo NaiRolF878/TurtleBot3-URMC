@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PROFILE="$REPO_ROOT/.devcontainer/fastdds_profile.xml"
-BOT_USER="gertrude"
+source "$SCRIPT_DIR/bot.conf" || exit 1
 REMOTE_PATH="/home/$BOT_USER/fastdds_profile.xml"
 
 if [ ! -f "$PROFILE" ]; then
