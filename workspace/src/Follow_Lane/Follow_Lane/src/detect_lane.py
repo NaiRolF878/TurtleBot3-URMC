@@ -1,14 +1,20 @@
+import os
+
 import numpy as np
+import yaml
 from rcl_interfaces.msg import ParameterDescriptor, IntegerRange, FloatingPointRange
 
 import cv2
 import rclpy
 from rclpy.node import Node
+from ament_index_python.packages import get_package_share_directory
 from std_msgs.msg import Float64
 from sensor_msgs.msg import Image, CompressedImage
 from cv_bridge import CvBridge
 
 from follow_lane_msg.msg import FollowLaneDebug
+
+EXTRINSICS = 'extrinsics_800x600.yaml'
 
 
 class detect_lane(Node):
@@ -49,6 +55,12 @@ class detect_lane(Node):
         # --- Crop-Image-Parameter ---
         # --- Perspektiv-Punkte ---
         # --- (Im Moment noch DuckieCam Parameter) ---
+        # use_metric_warp=True nutzt stattdessen die vermessene Bodenebenen-Homographie
+        # aus Parameter/camera_info/extrinsics_800x600.yaml (warp_matrix). Die vier
+        # top_/bottom_-Punkte werden dann daraus abgeleitet, damit debug_view sie
+        # unveraendert zurueckrechnen kann. Default False: erst einschalten, wenn
+        # Intrinsik UND Extrinsik neu und sauber vermessen sind (siehe docs/MEMORY.md).
+        self.declare_parameter('use_metric_warp', False)
         self.declare_parameter('top_left_x',     159, crop)
         self.declare_parameter('top_left_y',     218, crop)
         self.declare_parameter('top_right_x',    441, crop)
@@ -100,6 +112,44 @@ class detect_lane(Node):
         self._crop_im_size = 400
         self.raw_image = None
 
+        self._metric_M = self._load_metric_warp()
+
+    def _load_metric_warp(self):
+        """Bodenebenen-Homographie (src->dst, entzerrtes Bild) aus der Extrinsik-YAML.
+        Gibt None zurueck, wenn die Datei fehlt oder nicht zum crop_im_size passt --
+        dann bleibt es bei den handgetunten RoI-Punkten."""
+        try:
+            path = os.path.join(get_package_share_directory('Follow_Lane'),
+                                'Parameter', 'camera_info', EXTRINSICS)
+            with open(path) as f:
+                d = yaml.safe_load(f)
+            M = np.array(d['warp_matrix'], dtype=np.float64).reshape(3, 3)
+            size = int(d.get('output_size_px', self._crop_im_size))
+            if size != self._crop_im_size:
+                self.get_logger().warn(
+                    f'{EXTRINSICS}: output_size_px={size} != crop_im_size={self._crop_im_size} '
+                    '-- metrische Vogelperspektive deaktiviert.')
+                return None
+            self.get_logger().info(f'Metrische Vogelperspektive aus {EXTRINSICS} geladen '
+                                   '(nutzbar per Parameter use_metric_warp).')
+            return M
+        except Exception as e:
+            self.get_logger().warn(f'Keine metrische Kalibrierung ({e}) -- RoI-Punkte werden genutzt.')
+            return None
+
+    def _apply_metric_warp_corners(self):
+        """Setzt die vier top_/bottom_-Punkte auf die Bildecken, die die warp_matrix
+        auf die Ecken des 400x400-Ausschnitts abbildet. crop_img() baut daraus per
+        getPerspectiveTransform dieselbe Homographie wieder auf, und debug_view kann
+        sie unveraendert invertieren -- eine einzige Quelle der Wahrheit."""
+        size = self._crop_im_size
+        out = np.float32([[0, 0], [size, 0], [size, size], [0, size]]).reshape(-1, 1, 2)
+        src = cv2.perspectiveTransform(out, np.linalg.inv(self._metric_M)).reshape(-1, 2)
+        (self.top_left_x, self.top_left_y) = (int(round(src[0][0])), int(round(src[0][1])))
+        (self.top_right_x, self.top_right_y) = (int(round(src[1][0])), int(round(src[1][1])))
+        (self.bottom_right_x, self.bottom_right_y) = (int(round(src[2][0])), int(round(src[2][1])))
+        (self.bottom_left_x, self.bottom_left_y) = (int(round(src[3][0])), int(round(src[3][1])))
+
     def cbGetRawImage(self,img):
         self.raw_image = img
 
@@ -127,6 +177,11 @@ class detect_lane(Node):
             ]
             for name in param_names:
                 setattr(self, name, self.get_parameter(name).value)
+
+            # Bei aktiver metrischer Vogelperspektive die vier RoI-Punkte aus der
+            # warp_matrix ableiten -- ueberschreibt die eben gelesenen Parameterwerte.
+            if self.get_parameter('use_metric_warp').value and self._metric_M is not None:
+                self._apply_metric_warp_corners()
 
             detection_row_factor = self.detection_row_factor
 
