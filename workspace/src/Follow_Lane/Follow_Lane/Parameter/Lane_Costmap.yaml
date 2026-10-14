@@ -1,7 +1,7 @@
 /lane_costmap_node:
   ros__parameters:
-    # Spurwaende nur im Lane-Modus und nur zur Anzeige (Kontrolle der Homographie
-    # in RViz) -- Nav2 faehrt nie danach, siehe Docstring in lane_costmap_node.py.
+    # Spurwaende fuer den lane_layer, in jedem Modus ausser Tunnel (Kamera dort
+    # verboten), siehe Docstring in lane_costmap_node.py.
     # Pixel -> Meter kommt aus Parameter/camera_info/ground_homography_800x600.yaml.
     # Wurde die Kamera verstellt, die Datei mit scripts/tb/ground-calib.py neu
     # erzeugen und ground_x_min/ground_x_max pruefen.

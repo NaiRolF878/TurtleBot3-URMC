@@ -17,18 +17,19 @@ from Follow_Lane.src.switch_control import ControlType
 
 
 class lane_costmap_node(Node):
-    """Spurlinien-Pixel von /detect/lane_mask als PointCloud2 in den lane_layer
-    der Local Costmap -- nur zur Anzeige, Nav2 faehrt nie danach.
+    """Spurlinien-Pixel von /detect/lane_mask als PointCloud2 fuer Nav2s
+    obstacle_layer -- virtuelle Waende in der Local Costmap, zwischen denen MPPI
+    im Obstacle-Modus ausweicht.
 
-    Sendet ausschliesslich im Lane-Modus, in dem der PID faehrt und Nav2 ruht.
-    So sieht man in RViz, ob die Spurwaende auf den echten Linien liegen
-    (Kontrolle der Bodenhomographie). Beim Verlassen des Lane-Modus wird die
-    Local Costmap geleert, damit MPPI weder im Obstacle- noch im Tunnel-Modus
-    Spurwaende sieht:
-    - Obstacle: die Spur ist ~20 cm breit, der Burger 17,8 cm. Mit
-      robot_radius 0.105 und 5-cm-Raster bleibt zwischen zwei Spurwaenden keine
-      kollisionsfreie Zelle, MPPI faende keinen Weg.
-    - Tunnel: die Kamera ist dort laut Reglement verboten.
+    Sendet in jedem Modus ausser Tunnel: so enthaelt der lane_layer beim
+    Umschalten auf Obstacle schon einen Korridor, statt erst dann leer
+    anzufangen. Im Tunnel ist die Kamera laut Reglement verboten -- dort sendet
+    der Node nichts und leert beim Eintritt die Local Costmap, damit auch keine
+    vorher gemerkten Spurwaende mehr darin liegen.
+
+    Die Korridorbreite muss nirgends eingestellt werden: MPPI prueft Kollisionen
+    mit dem echten Footprint des Burger gegen die Linienzellen (siehe
+    nav2_params.yaml, local_costmap.footprint).
 
     Pixel -> Meter ueber die vermessene Bodenhomographie H_image_to_ground aus
     Parameter/camera_info/<ground_homography_file> (erzeugt mit
@@ -119,10 +120,10 @@ class lane_costmap_node(Node):
             self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {msg.data}')
             return
 
-        leaving_lane = (self.current_control_mode == ControlType.Lane
-                        and new_mode != ControlType.Lane)
+        entering_tunnel = (new_mode == ControlType.Tunnel
+                           and self.current_control_mode != ControlType.Tunnel)
         self.current_control_mode = new_mode
-        if leaving_lane:
+        if entering_tunnel:
             self._clear_local_costmap()
 
     def _clear_local_costmap(self):
@@ -135,7 +136,7 @@ class lane_costmap_node(Node):
         self.clear_local_costmap.call_async(ClearEntireCostmap.Request())
 
     def cbLaneMask(self, lane_mask):
-        if self.current_control_mode != ControlType.Lane:
+        if self.current_control_mode == ControlType.Tunnel:
             return
         if self._H is None:
             return
