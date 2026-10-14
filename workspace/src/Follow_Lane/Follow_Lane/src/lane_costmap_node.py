@@ -7,22 +7,24 @@ import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange
-from std_msgs.msg import Header
+from std_msgs.msg import Header, UInt8
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
+from nav2_msgs.srv import ClearEntireCostmap
 
 from follow_lane_msg.msg import LaneMask
+from Follow_Lane.src.switch_control import ControlType
 
 
 class lane_costmap_node(Node):
     """Spurlinien-Pixel von /detect/lane_mask als PointCloud2 fuer Nav2s
     obstacle_layer -- virtuelle Waende in der Local Costmap.
 
-    Laeuft unabhaengig vom Control-Mode durchgehend: der Node ist reine
-    Wahrnehmung und sendet keine Fahrbefehle. Gesperrt wird in dieser
-    Architektur nur, wer faehrt (control_driving, nav2_goal_publisher).
-    Durchgehender Betrieb heisst, dass der lane_layer beim Umschalten auf
-    Obstacle schon einen Korridor enthaelt, statt erst dann leer anzufangen.
+    Sendet in jedem Modus ausser Tunnel: so enthaelt der lane_layer beim
+    Umschalten auf Obstacle schon einen Korridor, statt erst dann leer
+    anzufangen. Im Tunnel ist die Kamera laut Reglement verboten -- dort sendet
+    der Node nichts und leert beim Eintritt die Local Costmap, damit auch keine
+    vorher gemerkten Spurwaende mehr darin liegen.
 
     Pixel -> Meter ueber die vermessene Bodenhomographie H_image_to_ground aus
     Parameter/camera_info/<ground_homography_file> (erzeugt mit
@@ -67,9 +69,16 @@ class lane_costmap_node(Node):
 
         self.sub_lane_mask = self.create_subscription(
             LaneMask, '/detect/lane_mask', self.cbLaneMask, 1)
+        self.sub_control_mode = self.create_subscription(
+            UInt8, '/control/mode', self.cbGetControlMode, 1)
 
         output_topic = self.get_parameter('output_topic').value
         self.pub_lane_obstacles = self.create_publisher(PointCloud2, output_topic, 1)
+
+        self.clear_local_costmap = self.create_client(
+            ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
+
+        self.current_control_mode = ControlType.Lane
 
         self._H = None
         self._H_size = None
@@ -99,7 +108,31 @@ class lane_costmap_node(Node):
             f'Bodenhomographie {filename} geladen ({width}x{height}, '
             f'Kreuzvalidierung {d.get("crossval_rms_mm", float("nan")):.1f} mm RMS).')
 
+    def cbGetControlMode(self, msg):
+        try:
+            new_mode = ControlType(msg.data)
+        except ValueError:
+            self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {msg.data}')
+            return
+
+        entering_tunnel = (new_mode == ControlType.Tunnel
+                           and self.current_control_mode != ControlType.Tunnel)
+        self.current_control_mode = new_mode
+        if entering_tunnel:
+            self._clear_local_costmap()
+
+    def _clear_local_costmap(self):
+        # Leert alle Layer; LiDAR und Eingangssperre fuellen sich im naechsten Zyklus neu.
+        if not self.clear_local_costmap.service_is_ready():
+            self.get_logger().error(
+                'local_costmap-Clear-Service nicht erreichbar -- alte Spurwaende bleiben '
+                'im Tunnel in der Karte. Laeuft controller_server?')
+            return
+        self.clear_local_costmap.call_async(ClearEntireCostmap.Request())
+
     def cbLaneMask(self, lane_mask):
+        if self.current_control_mode == ControlType.Tunnel:
+            return
         if self._H is None:
             return
 

@@ -5,14 +5,14 @@
     # seitlich. Erster Wert zum Verkleinern, falls Streckenbegrenzungen faelschlich
     # den Obstacle-Modus ausloesen.
     obstacle_check_angle_deg: 20.0
-    # 1.0 statt 0.4 m: der PID ignoriert Hindernisse komplett, bei 0.34 m/s
-    # blieben Nav2 sonst nur ~1,2 s zum Ausweichen (Test 02.09.: Hindernis
-    # wurde geschoben statt umfahren). 1.0 m passt zu 2,8 s Vorausschau.
+    # 1.0 statt 0.4 m: der PID ignoriert Hindernisse komplett, bei 0.4 m blieben
+    # Nav2 sonst nur ~1,2-1,8 s zum Ausweichen (PID-Sollwert MAX_VEL 0.34, der
+    # Burger faehrt hoechstens 0.22 m/s; Test 02.09.: Hindernis wurde geschoben
+    # statt umfahren). 1.0 m entspricht goal_distance und der MPPI-Vorausschau.
     obstacle_trigger_distance: 1.0
     obstacle_clear_debounce: 1.0
 
-    # --- Tunnel-Austritt (Tunnel -> vorheriger Modus) ---
+    # --- Tunnel-Austritt (Tunnel -> vorheriger Modus), nur LiDAR ---
     tunnel_exit_open_distance: 1.5
     tunnel_exit_open_ratio: 0.8
-    tunnel_exit_min_lane_pixels: 20
     tunnel_exit_debounce: 1.0

@@ -6,11 +6,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange
+from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange
 from std_msgs.msg import UInt8
 from sensor_msgs.msg import LaserScan
-
-from follow_lane_msg.msg import LaneMask
 
 
 class ControlType(Enum):
@@ -31,8 +29,9 @@ class switch_control(Node):
     -> Tunnel: per Schild auf /detect/sign. Der Detektor dafuer fehlt noch,
     manuell testbar mit
       ros2 topic pub /detect/sign std_msgs/msg/UInt8 "{data: 6}"
-    Zurueck erst, wenn LiDAR freien Raum sieht UND die Kamera wieder Spurpixel
-    liefert; wiederhergestellt wird der Modus von vor dem Tunnel.
+    Zurueck, sobald der LiDAR freien Raum sieht; wiederhergestellt wird der
+    Modus von vor dem Tunnel. Bewusst ohne Kamera: in der Enclosure ist sie laut
+    Reglement verboten.
     """
 
     def __init__(self):
@@ -52,20 +51,16 @@ class switch_control(Node):
         # --- Tunnel-Austritt (Tunnel -> vorheriger Modus) ---
         self.declare_parameter('tunnel_exit_open_distance', 1.5, frange(0.1, 10.0))
         self.declare_parameter('tunnel_exit_open_ratio', 0.8, frange(0.0, 1.0))
-        self.declare_parameter('tunnel_exit_min_lane_pixels', 20,
-            ParameterDescriptor(integer_range=[IntegerRange(from_value=0, to_value=5000, step=1)]))
         self.declare_parameter('tunnel_exit_debounce', 1.0, frange(0.0, 10.0))
 
         self._param_names = [
             'obstacle_check_angle_deg', 'obstacle_trigger_distance', 'obstacle_clear_debounce',
             'tunnel_exit_open_distance', 'tunnel_exit_open_ratio',
-            'tunnel_exit_min_lane_pixels', 'tunnel_exit_debounce',
+            'tunnel_exit_debounce',
         ]
 
         self.sub_scan = self.create_subscription(
             LaserScan, '/scan', self.cbScan, qos_profile_sensor_data)
-        self.sub_lane_mask = self.create_subscription(
-            LaneMask, '/detect/lane_mask', self.cbLaneMask, 1)
         # Publisher folgt mit der Schild-Detektor-Node
         self.sub_sign = self.create_subscription(UInt8, '/detect/sign', self.cbSign, 1)
 
@@ -78,7 +73,6 @@ class switch_control(Node):
         self._mode_before_tunnel = None
         self._obstacle_clear_since = None
         self._tunnel_exit_since = None
-        self._lane_visible = False
 
     def _read_params(self):
         for name in self._param_names:
@@ -105,11 +99,6 @@ class switch_control(Node):
         else:
             self.get_logger().debug(
                 f'Schild {sign.name} erkannt, dafuer ist noch keine Aktion definiert.')
-
-    def cbLaneMask(self, lane_mask):
-        self._read_params()
-        total_pixels = len(lane_mask.yellow_x) + len(lane_mask.white_x)
-        self._lane_visible = total_pixels >= self.tunnel_exit_min_lane_pixels
 
     def cbScan(self, scan):
         self._read_params()
@@ -157,7 +146,7 @@ class switch_control(Node):
     def _update_tunnel_exit(self, scan):
         scan_open = self._is_open_space(scan)
 
-        if scan_open and self._lane_visible:
+        if scan_open:
             now = self.get_clock().now()
             if self._tunnel_exit_since is None:
                 self._tunnel_exit_since = now

@@ -15,7 +15,9 @@
 #    reicht reine Odometrie. tunnel_explorer_node sucht darauf Frontier-
 #    Punkte (Rand zwischen bekannt-frei und unbekannt) und laesst
 #    planner_server (allow_unknown:false, plant also nie ins Unbekannte)
-#    einen echten Pfad dorthin berechnen.
+#    einen echten Pfad dorthin berechnen. Die Kamera ist im Tunnel laut
+#    Reglement verboten -- auch die local_costmap sieht dort nur LiDAR und
+#    die Eingangssperre, der lane_layer bleibt leer.
 #
 # Warum MPPI statt DWB: Ohne echten globalen Pfad bekommt der Local Controller
 # hier nur ein kurzes, staendig neu gesetztes "fahr geradeaus"-Ziel von
@@ -246,7 +248,12 @@ global_costmap:
           marking: true
           max_obstacle_height: 2.0
           min_obstacle_height: -1.0
-          obstacle_max_range: 3.0
+          # Die Wolke kommt im odom-Frame, die Reichweite zaehlt deshalb ab dem
+          # odom-Nullpunkt, nicht ab dem Bot. Mit 3.0 fiel die Sperre still weg,
+          # sobald der Eingang mehr als 3 m vom Startpunkt entfernt lag. Praktisch
+          # unbegrenzt: was ausserhalb des mitfahrenden Fensters liegt, verwirft
+          # die Costmap ohnehin. raytrace_* wirkt wegen clearing:false nicht.
+          obstacle_max_range: 100.0
           obstacle_min_range: 0.0
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
@@ -266,7 +273,9 @@ local_costmap:
       robot_base_frame: base_footprint
       rolling_window: true
       # 4x4 statt 3x3 m: bei 3x3 sah der Regler nur 1,5 m weit -- zu knapp fuers
-      # Umfahren bei 1-m-Ziel und 2,8 s Vorausschau.
+      # Umfahren bei 1-m-Ziel. Nicht groesser: MPPI plant nur ~1 m voraus
+      # (time_steps * model_dt * vx_max), alles darueber kostet bei 10 Hz nur
+      # Rechenzeit.
       width: 4
       height: 4
       resolution: 0.05
@@ -294,7 +303,8 @@ local_costmap:
       # linie + weisser Fahrbahnrand), gespeist von lane_costmap_node ueber
       # /detect/lane_obstacles (PointCloud2). Technisch derselbe Plugin-Typ
       # wie obstacle_layer, nur mit einer anderen Beobachtungsquelle -- kein
-      # eigenes Costmap-Plugin noetig.
+      # eigenes Costmap-Plugin noetig. Im Tunnel-Modus leer: lane_costmap_node
+      # sendet dort nichts und leert beim Eintritt die Karte (Kamera verboten).
       lane_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -332,7 +342,12 @@ local_costmap:
           marking: true
           max_obstacle_height: 2.0
           min_obstacle_height: -1.0
-          obstacle_max_range: 3.0
+          # Die Wolke kommt im odom-Frame, die Reichweite zaehlt deshalb ab dem
+          # odom-Nullpunkt, nicht ab dem Bot. Mit 3.0 fiel die Sperre still weg,
+          # sobald der Eingang mehr als 3 m vom Startpunkt entfernt lag. Praktisch
+          # unbegrenzt: was ausserhalb des mitfahrenden Fensters liegt, verwirft
+          # die Costmap ohnehin. raytrace_* wirkt wegen clearing:false nicht.
+          obstacle_max_range: 100.0
           obstacle_min_range: 0.0
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
