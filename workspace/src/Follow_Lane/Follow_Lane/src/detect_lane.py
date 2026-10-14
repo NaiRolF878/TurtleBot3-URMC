@@ -192,6 +192,12 @@ class detect_lane(Node):
 
             detection_row_factor = self.detection_row_factor
 
+            # Stempel der Quelle sichern, bevor img unten ueberschrieben wird: Nav2s
+            # obstacle_layer transformiert die Spurwolke per TF auf genau diesen Zeitpunkt.
+            # Ein spaeterer Stempel (now()) wuerde die Waende gegenueber der Roboterpose
+            # verschieben, zu der das Bild tatsaechlich aufgenommen wurde.
+            source_stamp = img.header.stamp
+
             cv_image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
             self.raw_img = cv_image
             img = self.apply_clahe(cv_image)
@@ -260,7 +266,7 @@ class detect_lane(Node):
             # Gefilterte Weissmaske: die links der gelben Linie ausgeblendeten Pixel
             # haelt der Detektor selbst fuer unzuverlaessig -- als virtuelle Waende in
             # der Costmap wuerden sie den freien Korridor blockieren.
-            self.publish_lane_mask(mask_yellow, mask_white_filtered)
+            self.publish_lane_mask(mask_yellow, mask_white_filtered, source_stamp)
 
         except Exception as e:
             self.get_logger().error(f"cbFindLane failed: {e}")
@@ -295,7 +301,7 @@ class detect_lane(Node):
         msg.data = encoded.tobytes()
         self.pub_mask_debug.publish(msg)
 
-    def publish_lane_mask(self, mask_yellow, mask_white):
+    def publish_lane_mask(self, mask_yellow, mask_white, source_stamp):
         # Nur berechnen, wenn jemand zuschaut -- gleiche Begruendung wie bei publish_mask_debug.
         if self.pub_lane_mask.get_subscription_count() == 0:
             return
@@ -309,7 +315,7 @@ class detect_lane(Node):
         white_ys, white_xs = white_ys * stride, white_xs * stride
 
         msg = LaneMask()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = source_stamp
         msg.crop_im_size = self._crop_im_size
         msg.yellow_x = yellow_xs.astype(np.int32).tolist()
         msg.yellow_y = yellow_ys.astype(np.int32).tolist()
