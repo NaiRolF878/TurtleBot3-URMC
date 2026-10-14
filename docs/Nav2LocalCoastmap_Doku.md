@@ -70,6 +70,7 @@ flowchart TB
 
     LANE --> LCM[lane_costmap_node]
     LCM -->|"/detect/lane_obstacles\n(nicht im Tunnel)"| LC[local_costmap\nin controller_server]
+    LCM -->|"/lane/center_path\n(Spurmitte)"| GP
 
     SC -->|Tunnel-Eintritt| KZ[keepout_zone_node]
     KZ -->|"/detect/tunnel_entrance_obstacle"| LC
@@ -97,7 +98,7 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet in jedem Modus außer Tun
 Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern.
 
 ### `lane_costmap_node` — Spurlinien als virtuelle Wände (nicht im Tunnel)
-Wandelt die von der Kamera erkannten Spurlinien-Pixel über die vermessene Bodenhomographie in Meter um und speist sie als virtuelle Wände in den `lane_layer` der local_costmap ein, damit Nav2 beim Ausweichen nicht über die Linien fährt. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Im Tunnel sendet er nichts und leert beim Eintritt die local_costmap.
+Wandelt die von der Kamera erkannten Spurlinien-Pixel über die vermessene Bodenhomographie in Meter um und speist sie als virtuelle Wände in den `lane_layer` der local_costmap ein, damit Nav2 beim Ausweichen nicht über die Linien fährt. Außerdem berechnet er die Spurmitte und sendet sie als Pfad (`/lane/center_path`), mit laufend gemessener Spurbreite. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Im Tunnel sendet er nichts und leert beim Eintritt die local_costmap.
 
 ### `keepout_zone_node` — die Eingangs-Sperrzone (nur Tunnel-Modus)
 Merkt sich einmalig, wo der Roboter in den Tunnel eingefahren ist, und blockiert diese Stelle dauerhaft als virtuelle Wand — damit der Roboter nicht durch den Eingang wieder rausfährt. Setzt außerdem bei jedem neuen Tunnel-Eintritt die Explorationskarte (`global_costmap`) zurück, damit sich mehrere Tunnel auf derselben Strecke nicht gegenseitig stören.
@@ -106,7 +107,7 @@ Merkt sich einmalig, wo der Roboter in den Tunnel eingefahren ist, und blockiert
 Der "Kopf" der Exploration: sucht auf der Explorationskarte nach unerkundeten Bereichen, wählt den vielversprechendsten aus (weit weg vom Eingang, aber noch schnell erreichbar) und lässt dorthin einen echten Pfad berechnen. Details siehe Abschnitt 7.
 
 ### `nav2_goal_publisher` — der Übergeber
-Schickt das eigentliche Fahrkommando an Nav2. Im Obstacle-Modus baut er sich selbst ein einfaches "geradeaus"-Ziel, im Tunnel-Modus nimmt er stattdessen den Pfad, den `tunnel_explorer_node` geliefert hat.
+Schickt das eigentliche Fahrkommando an Nav2. Im Obstacle-Modus nimmt er die Spurmitte von `lane_costmap_node`; ist sie veraltet, ein einfaches "geradeaus"-Ziel. Im Tunnel-Modus nimmt er stattdessen den Pfad, den `tunnel_explorer_node` geliefert hat.
 
 ### `controller_server` (Nav2, MPPI) — die eigentliche Fahrsteuerung
 Nav2-Standardkomponente, nicht selbst geschrieben. Nimmt das Ziel/den Pfad entgegen und berechnet daraus in Echtzeit die tatsächlichen Fahrbefehle, wobei er ständig Hindernissen in der `local_costmap` ausweicht.
@@ -169,7 +170,8 @@ Sendet in jedem Modus außer Tunnel. Details: `docs/Nav2_Costmap_Werte.md`, Absc
 
 | Parameter | Standard | Bedeutung | Auswirkung |
 |---|---|---|---|
-| `goal_distance` | 1.0 m | Nur für Obstacle-Modus: wie weit "geradeaus" vorgegeben wird | Größer = weitsichtiger, aber reagiert langsamer auf plötzliche Hindernisse |
+| `center_path_max_age` | 1.0 s | Obstacle-Modus: bis zu welchem Alter die Spurmitte als Ziel gilt | Größer = fährt länger nach einer alten Spurmitte, wenn die Linien verdeckt sind |
+| `goal_distance` | 1.0 m | Obstacle-Modus, nur wenn keine aktuelle Spurmitte da ist: wie weit "geradeaus" vorgegeben wird | Größer = weitsichtiger, aber reagiert langsamer auf plötzliche Hindernisse |
 
 Die übrigen Parameter (`goal_frame_id`, `num_waypoints`, `watchdog_rate`) sind technische Details, an denen normalerweise nichts verändert werden muss.
 
@@ -193,19 +195,19 @@ Anders als der Tunnel-Modus (Abschnitt 7) braucht der Obstacle-Modus **keine Exp
 flowchart LR
     A["LiDAR erkennt Hindernis\nim Pruefkegel vor dem Roboter"] --> B["switch_control:\nModus -> Obstacle"]
     B --> C["lane_costmap_node:\nSpurlinien als virtuelle\nWaende in die Costmap"]
-    B --> D["nav2_goal_publisher:\nfestes 'geradeaus'-Ziel"]
+    B --> D["nav2_goal_publisher:\nSpurmitte als Ziel"]
     C --> E["controller_server (MPPI):\nweicht dem Hindernis aus,\nFootprint bleibt zwischen den Linien"]
     D --> E
     E -->|"Hindernis laenger weg\n(entprellt)"| F["switch_control:\nModus -> zurueck zu Lane"]
 ```
 
-Der Trick: es wird **kein** neues Ziel berechnet, das um das Hindernis "herumführt" — stattdessen bekommt der Regler weiterhin nur "fahr geradeaus" vorgegeben (dasselbe simple Ziel wie immer im Obstacle-Modus, siehe Abschnitt 2), und die Local Costmap enthält gleichzeitig das echte LiDAR-Hindernis und die Spurlinien. Der MPPI-Regler weicht dann von sich aus lokal aus, ohne dass irgendein Node "berechnet", wo genau vorbeigefahren werden soll — das ist der ganze Witz an MPPI (Details zu den einzelnen Bewertungskriterien/"Critics" siehe Kommentare im `FollowPath`-Block von `nav2_params.yaml`).
+Der Trick: es wird **kein** neues Ziel berechnet, das um das Hindernis "herumführt" — stattdessen bekommt der Regler die Spurmitte vorgegeben, die mitten durch das Hindernis führt, und die Local Costmap enthält gleichzeitig das echte LiDAR-Hindernis und die Spurlinien. Der MPPI-Regler weicht dann von sich aus lokal aus, ohne dass irgendein Node "berechnet", wo genau vorbeigefahren werden soll — das ist der ganze Witz an MPPI (Details zu den einzelnen Bewertungskriterien/"Critics" siehe Kommentare im `FollowPath`-Block von `nav2_params.yaml`).
 
 Sobald der Prüfkegel vor dem Roboter wieder für `obstacle_clear_debounce` Sekunden durchgehend frei ist, schaltet `switch_control` automatisch zurück zu `Lane`, und die PID-Regelung übernimmt wieder die Spurmitte-Steuerung (siehe Vergleichstabelle in Abschnitt 2).
 
 **Bekannte Grenze:** Auf der normalen Spur (20 cm zwischen den Linien, Burger 17,8 cm) ist neben einem Hindernis kein Platz. Löst der Obstacle-Modus dort aus, findet MPPI erwartbar keine kollisionsfreie Bewegung und bleibt stehen, statt die Spur zu verlassen. Abgeleitet, nicht auf dem Bot beobachtet.
 
-**Bekannte Grenze:** Das Ziel ist eine Gerade „1 m voraus“. In einem kurvigen Hindernisbereich zeigt sie irgendwann in eine Spurwand.
+**Bekannte Grenze:** Die Spurmitte reicht nur so weit, wie die Kamera sieht (~0,8 m). In engen Kurven liegt die innere Linie außerhalb des Bildes; dann gilt die zuletzt gemessene Spurbreite. Details: `docs/Nav2_Costmap_Werte.md`, Abschnitt 4.
 
 **Bekannte Grenze:** Die Erkennung ist bewusst simpel (ein Prüfkegel + eine feste Distanzschwelle) und kennt weder die Form noch die Bewegung des Hindernisses — bei mehreren Hindernissen kurz hintereinander oder einem sich bewegenden Hindernis kann der Roboter dadurch mehrfach zwischen den Modi hin- und herschalten. Das ist so beabsichtigt (Einfachheit vor Perfektion für diesen Fall), sollte aber beim Testen im Blick behalten werden.
 
@@ -236,6 +238,7 @@ Das ist bewusst **kein SLAM** (keine Positions-Korrektur, keine "Loop Closure") 
 
 **Obstacle-Modus:**
 - [ ] In RViz prüfen, ob `/detect/lane_obstacles` auf den echten Linien liegt (Homographie)
+- [ ] In RViz prüfen, ob „Spurmitte“ (`/lane/center_path`) in Kurven und im Hindernisbereich mittig liegt
 - [ ] Prüfen, ob MPPI mit `consider_footprint: true` die 20 Hz hält (Rechenlast)
 - [ ] `inflation_radius` im Hindernisbereich testen (Zug zur Mitte vs. enge Durchfahrten)
 - [ ] `obstacle_check_angle_deg`/`obstacle_trigger_distance`/`obstacle_clear_debounce` mit dem echten Roboter/der echten Strecke testen (löst zu früh/zu spät aus? schaltet zu oft hin und her?)

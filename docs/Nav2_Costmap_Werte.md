@@ -290,6 +290,64 @@ bis 0,70 m, seitlich bis ±0,20 m.
   der Radachse und passt damit zur Konvention der Homographie. Nicht ändern,
   solange die Homographie ab Radachse gemessen ist.
 
+### Spurmitte als Pfad für MPPI
+
+Aus denselben Linienpunkten berechnet `lane_costmap_node` die Spurmitte und
+sendet sie als `nav_msgs/Path` auf `/lane/center_path`. Im Obstacle-Modus ist
+sie das Ziel für MPPI (Abschnitt 5). So folgt der Bot auch in Kurven der Spur
+statt einer Geraden, die irgendwann in die Spurwand zeigt.
+
+**Verfahren** (Funktionen `lane_center_points`, `fit_center_line`):
+1. Pro Linie und pro 5-cm-Streifen in Fahrtrichtung den Median-Punkt der
+   Linienpixel nehmen. Weiß links der gelben Linie gehört nicht zur Spur und
+   fällt heraus.
+2. Jede Linie für sich durch ein Polynom 2. Grades annähern, wie ROBOTIS in
+   `turtlebot3_autorace`.
+3. **Spurbreite messen**, wo beide Linien zu sehen sind: senkrecht zur Linie,
+   von Linienmitte zu Linienmitte. Die Linienbreite fällt dabei heraus.
+4. Jeden Linienpunkt senkrecht zur Linie um die halbe Breite zur Mitte
+   versetzen. Senkrecht, weil in Kurven der Abstand entlang Y größer ist als
+   die echte Breite.
+5. Durch alle Mittelpunkte ein Polynom 2. Grades legen und alle 5 cm abtasten,
+   nur zwischen nächstem und fernstem Mittelpunkt.
+6. Mit der TF `odom ← base_footprint` **zum Bildzeitpunkt** nach `odom`
+   umrechnen. Dort bleibt der Pfad liegen, auch wenn der Bot beim Ausweichen
+   schräg steht und die Linien kurz nicht sieht.
+
+Sieht ein Bild nur eine Linie (Lücke in Weiß, enge Kurve, Hindernis verdeckt),
+gilt die Breite aus den letzten Bildern (`center_width_history`). ROBOTIS
+versetzt an dieser Stelle um feste 280 Pixel; hier wird die Breite gemessen,
+damit derselbe Code auf der 20-cm-Spur und im breiteren Hindernisbereich
+funktioniert.
+
+| Wert | aktuell | Herkunft |
+|---|---|---|
+| `center_path_topic` | `/lane/center_path` | gewählt |
+| `odom_frame` | `odom` | = `global_frame` der Costmaps |
+| `center_bin_size` | 0.05 m | = `resolution`, feiner kann MPPI nicht unterscheiden |
+| `center_min_points` | 3 | gewählt; darunter kein Pfad |
+| `center_width_history` | 20 Bilder | gewählt; Median der gemessenen Breite |
+
+**Offline geprüft** (synthetische Spuren über die echte Homographie gerendert,
+gleiche Rasterung wie `detect_lane`, nicht auf dem Bot):
+
+| Fall | Abweichung von der echten Mitte |
+|---|---|
+| gerade, 20 cm und 50 cm | ≤ 0,5 mm |
+| Kurve R = 1,2 m, 20 cm | 2,8 mm |
+| 50-cm-Lücke in Weiß | 0,8 mm |
+| nur eine Linie, gerade / Kurve R = 1,2 m | 1,8 / 2,4 mm |
+| nur Gelb, Kurve R = 0,7 m | 8,7 mm |
+
+**Grenzen:**
+- Die Kamera sieht nah am Bot nur ±11 cm. In engen Kurven (R ≈ 0,7 m) liegt
+  die innere Linie dann außerhalb des Bildes, und es gilt die gelernte Breite.
+  Im 50 cm breiten Bereich beginnt der Pfad erst bei ~0,45 m, weil beide
+  Linien vorher außerhalb des Bildes liegen.
+- Gelbe oder weiße Linien, die quer durch den Hindernisbereich laufen, würden
+  die Anpassung verfälschen. Das muss man vor Ort in RViz prüfen (Anzeige
+  „Spurmitte“).
+
 ---
 
 ## 5. Regler und Vorausschau
@@ -301,7 +359,8 @@ bis 0,70 m, seitlich bis ±0,20 m.
 | `time_steps` | nav2_params | 90 |
 | `vx_max` | nav2_params | 0.22 m/s |
 | `prune_distance` | nav2_params | 1.7 m |
-| `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m |
+| `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m (nur Ersatz-Gerade) |
+| `center_path_max_age` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 s |
 
 ### Die Zusammenhänge
 
@@ -331,10 +390,13 @@ Bedingungen:
   `time_steps` nachziehen.
 - **`prune_distance`:** Wie weit voraus MPPI den Pfad berücksichtigt. *Woher:*
   gewählt, durch die Kartengröße begrenzt.
-- **`goal_distance`:** So weit voraus setzt `nav2_goal_publisher` im
-  Obstacle-Modus das Ziel. Ein neues Ziel kommt erst, wenn das alte erreicht
-  (`xy_goal_tolerance`) oder abgebrochen ist. Die Distanz zum Ziel läuft also
-  von 1,0 m auf ~0,15 m herunter. *Woher:* gewählt.
+- **Ziel im Obstacle-Modus:** die Spurmitte (Abschnitt 4), solange sie jünger
+  ist als `center_path_max_age` (Empfangszeit, damit die Uhren von Bot und
+  Rechner nicht synchron sein müssen). Sie reicht bis ~0,8 m voraus. Ist sie
+  älter, weil die Linien eine Weile nicht zu sehen waren, gilt die Gerade
+  `goal_distance` (1,0 m) geradeaus. Ein neues Ziel kommt erst, wenn das alte
+  erreicht (`xy_goal_tolerance`) oder abgebrochen ist; dann wird die jeweils
+  neueste Spurmitte genommen. *Woher:* gewählt.
 
 ---
 
@@ -369,14 +431,14 @@ ergibt das:
 - **`PathFollowCritic` Schwelle 0.5:** Vorher stand 1.4 m. Bei 1,0 m Pfadlänge
   griff die Kritik damit nie, ausgerechnet die, die den Vorwärtsdrang halten
   soll.
-- **`GoalAngleCritic` abgeschaltet:** Jeder rollierende Pfad endet mit
+- **`GoalAngleCritic` abgeschaltet:** Die Ersatz-Gerade endet mit
   `orientation.w = 1.0`, also „geradeaus, gemessen im Moment der
   Pfaderzeugung“. Ab 0,5 m vor dem Ziel zog die Kritik den Bot in genau diese
   Ausgangsrichtung zurück, während er am Hindernis vorbei sollte. Der
   `goal_checker` lässt das Ziel mit `yaw_goal_tolerance` 3.15 ohnehin
   durchgehen, die Endausrichtung spielt keine Rolle.
-- **`PathAlignCritic` niedrig gewichtet (2.0):** Unser Pfad ist eine Gerade
-  *durch* das Hindernis, kein geplanter Pfad darum herum. Mit 14.0 (Nav2-Beispiel)
+- **`PathAlignCritic` niedrig gewichtet (2.0):** Unser Pfad (Spurmitte oder
+  Gerade) führt *durch* das Hindernis, kein geplanter Pfad darum herum. Mit 14.0 (Nav2-Beispiel)
   hat MPPI das Hindernis vor sich hergeschoben statt auszuweichen (Test 02.09.).
   „Auf der Linie bleiben“ ist deshalb nur ein Hinweis. Zusätzlich schaltet
   `max_path_occupancy_ratio` 0.05 die Kritik ab, sobald mehr als 5 % der
@@ -426,6 +488,7 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
 | `/global_costmap/costmap` | die Tunnelkarte (LiDAR + Eingangssperre, keine Spur), 7×7 m um den Bot |
 | `/scan` | LiDAR-Rohdaten, unabhängig von Nav2 |
 | `/detect/lane_obstacles` (PointCloud2) | die Spurpunkte in Metern, außerhalb des Tunnels. Hier prüft man, ob die Homographie stimmt. |
+| `/lane/center_path` (Anzeige „Spurmitte“) | die berechnete Spurmitte, das Ziel für MPPI im Obstacle-Modus |
 
 **Der Test, mit dem wir den Fehler gefunden haben:** Eine Wand vor den LiDAR
 halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
