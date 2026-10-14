@@ -1,26 +1,57 @@
+# scripts/tb/camera-intrinsics.py -- Modell: cx,cy fest + p1=p2=0 + k3=0   (EMPFOHLEN)
+# 58 Ansichten. Rohbilder: logs/intrinsik_aufnahmen.tar.gz
 image_width: 800
 image_height: 600
 camera_name: camera
 camera_matrix:
   rows: 3
   cols: 3
-  data: [687.01174,   0.     , 475.82144,
-           0.     , 686.06419, 309.05642,
-           0.     ,   0.     ,   1.     ]
+  data:
+  - 648.9473191552362
+  - 0.0
+  - 400.0
+  - 0.0
+  - 649.1510321140029
+  - 300.0
+  - 0.0
+  - 0.0
+  - 1.0
 distortion_model: plumb_bob
 distortion_coefficients:
   rows: 1
   cols: 5
-  data: [0.192938, -0.134742, 0.005676, 0.035350, -0.112707]
+  data:
+  - 0.1987753738858066
+  - -0.31534659398068987
+  - 0.0
+  - 0.0
+  - 0.0
 rectification_matrix:
   rows: 3
   cols: 3
-  data: [1., 0., 0.,
-         0., 1., 0.,
-         0., 0., 1.]
+  data:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
 projection_matrix:
   rows: 3
   cols: 4
-  data: [702.37823,   0.     , 499.75379,   0.     ,
-           0.     , 736.7782 , 310.93605,   0.     ,
-           0.     ,   0.     ,   1.     ,   0.     ]
+  data:
+  - 648.9473191552362
+  - 0.0
+  - 400.0
+  - 0.0
+  - 0.0
+  - 649.1510321140029
+  - 300.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0

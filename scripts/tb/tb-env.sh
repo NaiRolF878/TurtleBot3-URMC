@@ -5,8 +5,9 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/bot.conf" || return 1
 
-export ROS_DOMAIN_ID=33
+export ROS_DOMAIN_ID=$BOT_DOMAIN_ID
 
 source /opt/ros/humble/setup.bash
 source ~/turtlebot3_ws/install/setup.bash
@@ -31,6 +32,6 @@ source "$REPO_ROOT/workspace/install/setup.bash"
 # bewusst von Hand "ros2 daemon stop" in EINEM Terminal, waehrend nichts laeuft.
 ros2 daemon start >/dev/null 2>&1
 
-echo "ROS2-Umgebung bereit (ROS_DOMAIN_ID=$ROS_DOMAIN_ID, Follow_Lane-Workspace gesourct)."
+echo "ROS2-Umgebung bereit (Bot $BOT, ROS_DOMAIN_ID=$ROS_DOMAIN_ID, Follow_Lane-Workspace gesourct)."
 echo "Hinweis: Die Kamera (camera_ros) laeuft nur auf dem Bot, nicht hier im Devcontainer."
 echo "  Auf dem Bot separat per SSH starten: ros2 run camera_ros camera_node --ros-args -p format:=RGB888"

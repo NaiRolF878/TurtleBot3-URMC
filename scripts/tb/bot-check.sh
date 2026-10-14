@@ -6,8 +6,8 @@
 # "Netz transportiert nicht". Lokal auf dem Bot faellt das Netz als Faktor weg.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BOT_USER="gertrude"
-export ROS_DOMAIN_ID=33
+source "$SCRIPT_DIR/bot.conf" || exit 1
+export ROS_DOMAIN_ID=$BOT_DOMAIN_ID
 
 BOT_IP=$(bash "$SCRIPT_DIR/find-bot-ip.sh") || exit 1
 
