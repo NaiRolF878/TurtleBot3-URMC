@@ -395,7 +395,7 @@ Visualization Manager:
     Max Intensity: 4096
     Min Color: 0; 0; 0
     Min Intensity: 0
-    Name: Spurwaende (nur Obstacle-Modus)
+    Name: Spurwaende (nur Lane-Modus, Anzeige)
     Position Transformer: XYZ
     Selectable: true
     Size (Pixels): 5
