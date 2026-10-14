@@ -7,8 +7,10 @@ hängen voneinander ab; diese Abhängigkeiten sind als nachrechenbare Regeln
 angegeben.
 
 Pfade sind relativ zu `workspace/src/Follow_Lane/Follow_Lane/`. Maße der
-Strecke und des Roboters stammen aus dem Reglement 2026 (Spur ~20 cm breit,
-Linien ~2 cm, Burger 138 × 178 mm, max. 0,22 m/s).
+Strecke und des Roboters stammen aus dem Reglement 2026: normale Spur 20 cm
+zwischen den Linien, Linien ~2 cm, Burger 138 × 178 mm (L × B), max. 0,22 m/s.
+Der Hindernisbereich außerhalb des Tunnels ist breiter, seine Maße sind vorab
+nicht bekannt.
 
 **Herkunft** heißt:
 - *gemessen*: am Bot oder an der Strecke vermessen
@@ -20,12 +22,12 @@ Linien ~2 cm, Burger 138 × 178 mm, max. 0,22 m/s).
 
 | Modus | fährt | local_costmap enthält |
 |---|---|---|
-| Lane | PID (`control_driving`) | LiDAR + Spurwände (nur Anzeige, Nav2 ruht) |
-| Obstacle | Nav2/MPPI | LiDAR, **keine Spurwände** |
+| Lane | PID (`control_driving`) | LiDAR + Spurwände (Nav2 ruht) |
+| Obstacle | Nav2/MPPI | LiDAR + Spurwände |
 | Tunnel | Nav2/MPPI | LiDAR + Eingangssperre, **keine Kamera** (Reglement) |
 
-Beim Verlassen des Lane-Modus leert `lane_costmap_node` die local_costmap.
-Warum es im Obstacle-Modus keine Spurwände gibt, steht in Abschnitt 3.
+Beim Tunnel-Eintritt leert `lane_costmap_node` die local_costmap. Warum keiner
+der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 
 ---
 
@@ -36,7 +38,7 @@ Warum es im Obstacle-Modus keine Spurwände gibt, steht in Abschnitt 3.
 | `rolling_window` | `true` | `true` |
 | `width` / `height` | 4 / 4 m | 7 / 7 m |
 | `resolution` | 0.05 m | 0.05 m |
-| `robot_radius` | 0.105 m | 0.105 m |
+| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.105 m |
 | `global_frame` | `odom` | `odom` |
 
 ### `rolling_window`
@@ -78,21 +80,34 @@ Warum es im Obstacle-Modus keine Spurwände gibt, steht in Abschnitt 3.
 ### `resolution`
 - **Was er bewirkt:** Kantenlänge einer Zelle, 0,05 m.
 - **Woher:** gewählt. Die Dateien begründen den Wert nicht.
-- **Was kaputtgeht:** Viele andere Werte hängen an ihm: die 3,2-m-Grenze oben,
-  die Quantisierung des `inflation_radius` (Abschnitt 3) und die Frage, ob
-  zwischen zwei Spurwänden noch eine freie Zelle liegt (ebenfalls Abschnitt 3).
-  Wer `resolution` ändert, muss diese Werte neu rechnen.
+- **Was kaputtgeht:** Andere Werte hängen an ihm: die 3,2-m-Grenze oben und
+  die Quantisierung des `inflation_radius` (Abschnitt 3). Außerdem wird jede
+  Linie auf ganze Zellen vergröbert. Wo nur wenige Zentimeter Luft sind, kann
+  der Footprint deshalb schon eine Linienzelle berühren, obwohl real noch Platz
+  wäre. Wer `resolution` ändert, muss diese Werte neu rechnen.
 
-### `robot_radius`
+### `footprint` (local_costmap)
+- **Was er bewirkt:** der Umriss des Burger relativ zu `base_footprint`. Mit
+  `consider_footprint: true` im `CostCritic` gilt eine Trajektorie als
+  Kollision, sobald dieser Umriss eine belegte Zelle berührt. Das gilt für
+  Linien, Hindernisse und Enclosure-Wände gleichermaßen.
+- **Woher:** abgeleitet aus 138 × 178 mm (Reglement) und der TurtleBot3-URDF.
+  Der Rumpf sitzt dort 3,2 cm hinter der Radachse, reicht also 3,7 cm nach vorn
+  und 10,1 cm nach hinten, seitlich ±6,9 cm. Die Räder liegen bei ±8,9 cm außen
+  und ±3,3 cm vor und hinter der Achse. Eingetragen ist die konvexe Hülle aus
+  beidem. Nav2 legt zusätzlich `footprint_padding` (Standard 1 cm) darum.
+- **Was kaputtgeht:** Ein zu kleiner Umriss lässt den Bot Linien überfahren und
+  Wände streifen, ein zu großer macht enge Durchfahrten unpassierbar. Da alle
+  Burger laut Reglement identisch sind, muss der Wert nie angepasst werden.
+
+### `robot_radius` (global_costmap)
 - **Was er bewirkt:** Zellen, die näher als dieser Radius an einem Hindernis
-  liegen, gelten für den Mittelpunkt des Roboters als Kollision.
-- **Woher:** laut Kopfkommentar der Datei „an die Burger-Spezifikation
-  angelehnt“. Er liegt 1,6 cm über der halben Breite des Burger (178 mm / 2 =
-  0,089 m). Statt eines Footprint-Polygons wird ein Radius verwendet, deshalb
-  steht `consider_footprint: false` beim `CostCritic`.
-- **Was kaputtgeht:** Ist der Wert zu klein, streift der Bot Wände und
-  Hindernisse. In der Enclosure kostet jede Wandberührung einen Punkt. **Nicht
-  unter 0,10 m senken, nur damit Spurwände befahrbar werden** (Abschnitt 3).
+  liegen, gelten für den Mittelpunkt des Roboters als Kollision. Nur für
+  `planner_server` (NavFn) im Tunnel. NavFn plant für einen Punkt und prüft
+  keinen Umriss, deshalb bleibt hier der Kreis.
+- **Woher:** 1,6 cm über der halben Breite des Burger (178 mm / 2 = 0,089 m).
+- **Was kaputtgeht:** Ist der Wert zu klein, plant NavFn Wege zu dicht an den
+  Enclosure-Wänden. Jede Wandberührung kostet einen Punkt.
 
 ---
 
@@ -122,10 +137,14 @@ ankommt.
   Einträge in der Karte. Ist `raytrace_max_range` kleiner als
   `obstacle_max_range`, bleiben Geisterhindernisse am Rand stehen.
 
-### `lane_layer` (Spurwände, nur Anzeige)
-- Wird nur im Lane-Modus gefüllt, wenn Nav2 nicht fährt, und beim Verlassen des
-  Lane-Modus geleert. Er dient dazu, in RViz zu prüfen, ob die Spurwände auf den
-  echten Linien liegen.
+### `lane_layer` (Spurwände)
+- Wird in jedem Modus außer Tunnel gefüllt. Er steht in der `plugins`-Liste
+  **vor** dem `inflation_layer` (siehe Abschnitt 3).
+- **`clearing: true`:** Die Strahlen von `base_footprint` zu den aktuellen
+  Linienpunkten löschen alte Spurpunkte, die dazwischen liegen. Das wirkt nur
+  auf die Zellen des `lane_layer`. Spurpunkte außerhalb des Kamerabilds bleiben
+  erhalten. Das ist das Gedächtnis, das den Korridor neben und hinter dem Bot
+  hält.
 - **`obstacle_max_range` / `raytrace_max_range` 2.0:** Gemessen ab
   `base_footprint`. *Woher:* nicht dokumentiert. Faktisch **begrenzen sie
   nichts**: `lane_costmap_node` schickt nur Punkte bis `ground_x_max` (0.80 m)
@@ -145,60 +164,60 @@ ankommt.
 
 ---
 
-## 3. Inflation und warum es beim Fahren keine Spurwände gibt
+## 3. Kollision und Inflation: unabhängig von der Spurbreite
 
 | Wert | local_costmap | global_costmap |
 |---|---|---|
+| `consider_footprint` (`CostCritic`) | `true` | – |
 | `inflation_radius` | 0.20 m | 0.3 m |
 | `cost_scaling_factor` | 3.0 | 3.0 |
 
+### Das Prinzip
+
+Die Breite des Hindernisbereichs ist vorab nicht bekannt, und die normale Spur
+ist mit 20 cm nur knapp breiter als der Burger (17,8 cm). Deshalb hängt kein
+Wert von der Korridorbreite ab:
+
+- **Kollision** prüft MPPI mit dem echten Umriss (`footprint`, Abschnitt 1).
+  Eine Trajektorie ist verboten, wenn der Umriss eine Linienzelle oder ein
+  Hindernis berührt, und erlaubt, wenn er dazwischen passt, egal wie breit der
+  Bereich ist.
+- **Inflation** ist kein Kollisionskriterium mehr, nur ein Kostengefälle. In
+  einem schmalen Korridor überlappen sich die Säume beider Linien. Die Mitte
+  bleibt trotzdem die günstigste Stelle, und MPPI wird zu ihr gezogen. Eine
+  „Zelle mit Kosten 0“ ist dafür nicht nötig.
+
+### Warum der `lane_layer` vor dem `inflation_layer` steht
+
+MPPI prüft den Umriss aus Rechenzeitgründen nur dort, wo die Kosten am
+Mittelpunkt schon erhöht sind, also im Saum einer belegten Zelle. Stünde der
+`lane_layer` hinter dem `inflation_layer`, hätten die Linien keinen Saum.
+MPPI würde dann an den Linien gar nicht mit dem Umriss prüfen, und die Räder
+könnten unbemerkt über eine Linie fahren.
+
 ### `inflation_radius`
-- **Was er bewirkt:** Um jede belegte Zelle (LiDAR-Hindernis, Enclosure-Wand,
-  Eingangssperre) zieht der `inflation_layer` einen Kostengradienten. Ohne ihn
-  hätte die Zelle direkt neben einer Wand noch Kosten 0, und der Regler wiche
-  erst im letzten Moment aus.
-- **Woher:** gewählt, nicht vermessen. Local 0.20 m ergibt ~10 cm weichen
-  Abstand jenseits `robot_radius`. Global 0.3 m für `planner_server`.
-- **Was kaputtgeht:** Ist der Wert zu klein, fährt der Bot dicht an Wänden
-  entlang. Ist er zu groß, werden enge Durchfahrten in der Enclosure teuer und
-  MPPI zögert. **In der Enclosure testen.**
+- **Was er bewirkt:** Um jede belegte Zelle (LiDAR-Hindernis, Spurlinie,
+  Enclosure-Wand, Eingangssperre) zieht der `inflation_layer` einen
+  Kostengradienten. Ohne ihn hätte die Zelle direkt neben einer Wand noch
+  Kosten 0, und der Regler wiche erst im letzten Moment aus.
+- **Woher:** gewählt, nicht vermessen. Global 0.3 m für `planner_server`.
+- **Bedingung:** `inflation_radius` > Umkreis des Footprints (0,122 m +
+  `footprint_padding`). Sonst beginnt der Saum zu weit innen, und die Prüfung
+  mit dem Umriss setzt zu spät ein (siehe oben).
+- **Was kaputtgeht:** Ist der Wert zu klein, fährt der Bot dicht an Wänden und
+  Linien entlang. Ist er zu groß, werden enge Durchfahrten teuer und MPPI
+  zögert. **Im Hindernisbereich und in der Enclosure testen.**
 - Nav2 rundet den Inflationsradius auf ganze Zellen auf. Werte, die kein
   Vielfaches von `resolution` (0.05) sind, wirken wie das nächste größere
   Vielfache.
 
-### Warum der `lane_layer` beim Fahren leer bleibt
+### Auf der normalen 20-cm-Spur
 
-Für Spurwände, zwischen denen MPPI fahren soll, gelten zwei Regeln:
-
-```
-robot_radius      <  Korridorbreite / 2      (sonst keine kollisionsfreie Zelle)
-inflation_radius  <  Korridorbreite / 2      (sonst keine Zelle mit Kosten 0)
-```
-
-`Korridorbreite` ist der Abstand zwischen den Innenkanten der beiden Linien.
-Laut Reglement ist die Spur ~20 cm breit. Ob die Linien darin enthalten sind,
-ist nicht gemessen.
-
-| | Wert | Bedingung erfüllt? |
-|---|---|---|
-| halbe Korridorbreite | ≤ 0,10 m | |
-| `robot_radius` | 0,105 m | **nein** |
-| `inflation_radius` | 0,20 m | **nein** |
-| halbe Breite des Burger | 0,089 m | Luft pro Seite: ≤ 1,1 cm |
-| Zellgröße | 0,05 m | 1 cm Luft ist im Raster nicht darstellbar |
-
-Zwischen zwei Spurwänden gibt es also keine Zelle, auf der der Mittelpunkt
-des Bots stehen darf, und MPPI fände im Obstacle-Modus keinen Weg. Ein
-`robot_radius` unter 0,10 m würde das lösen, ließe den Bot aber in der
-Enclosure Wände streifen. Deshalb gilt:
-- Im **Obstacle-Modus** weicht MPPI ohne Spurgrenze aus. Auf einer 20-cm-Spur
-  verlässt der Bot beim Ausweichen die Spur, was laut Reglement einen
-  Punktabzug kostet.
-- Im **Tunnel-Modus** ist die Kamera ohnehin verboten.
-
-Ändert sich das (breitere Spur, feineres Raster), zuerst die beiden Regeln oben
-nachrechnen und erst dann `lane_costmap_node` wieder außerhalb des Lane-Modus
-senden lassen.
+Dort fährt im Normalfall der PID, nicht Nav2. Löst der Obstacle-Modus trotzdem
+aus, bleibt zwischen Umriss und Linienzellen nur ~1 cm Luft pro Seite, weniger
+als eine Zelle. Erwartbar findet MPPI dann keine kollisionsfreie Trajektorie,
+und der Bot bleibt stehen, statt die Spur zu verlassen. Das ist aus der
+Konfiguration abgeleitet und nicht auf dem Bot beobachtet.
 
 ---
 
@@ -212,7 +231,7 @@ senden lassen.
 | `pixel_stride` | 2 |
 | `frame_id` | `base_footprint` |
 
-Der Node sendet nur im Lane-Modus und nur zur Anzeige (siehe Abschnitt 3). Die
+Der Node sendet in jedem Modus außer Tunnel. Die
 Pixel aus dem entzerrten Kamerabild werden über die Homographie
 `H_image_to_ground` in Bodenkoordinaten umgerechnet: X vorwärts ab Radachse,
 Y nach links, in Metern. Das entspricht genau `base_footprint`. Die Homographie
@@ -256,8 +275,8 @@ bis 0,70 m, seitlich bis ±0,20 m.
   weit über den am weitesten entfernten Marker hinausgehen.** Wer weiter
   hinaus will, legt beim nächsten `ground-calib.py`-Lauf Marker weiter
   draußen aus.
-- **Was kaputtgeht:** Ist der Wert zu groß, liegen ferne Spurpunkte in RViz
-  neben den echten Linien, und die Sichtkontrolle wird unzuverlässig.
+- **Was kaputtgeht:** Ist der Wert zu groß, stehen ferne Spurpunkte an
+  falschen Stellen in der Karte und verengen oder verschieben den Korridor.
 
 ### `pixel_stride`
 - **Was er bewirkt:** Nur Pixel, deren x und y Vielfache von `pixel_stride`
@@ -345,6 +364,8 @@ ergibt das:
 
 - **`CostCritic`** (20.0, höchstes Gewicht): bewertet die Costmap-Kosten. Das
   Ausweichen soll dominieren. `critical_cost` 600, `collision_cost` 1e6.
+  `consider_footprint: true`: Kollision prüft er mit dem Umriss des Burger
+  (Abschnitt 3).
 - **`PathFollowCritic` Schwelle 0.5:** Vorher stand 1.4 m. Bei 1,0 m Pfadlänge
   griff die Kritik damit nie, ausgerechnet die, die den Vorwärtsdrang halten
   soll.
@@ -401,14 +422,14 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
 
 | Display | zeigt |
 |---|---|
-| `/local_costmap/costmap` | alle Layer der local_costmap zusammen, dazu die Inflation. Im Lane-Modus auch die Spurwände. |
+| `/local_costmap/costmap` | alle Layer der local_costmap zusammen, dazu die Inflation. Außerhalb des Tunnels auch die Spurwände. |
 | `/global_costmap/costmap` | die Tunnelkarte (LiDAR + Eingangssperre, keine Spur), 7×7 m um den Bot |
 | `/scan` | LiDAR-Rohdaten, unabhängig von Nav2 |
-| `/detect/lane_obstacles` (PointCloud2) | die Spurpunkte in Metern, nur im Lane-Modus. Hier prüft man, ob die Homographie stimmt. |
+| `/detect/lane_obstacles` (PointCloud2) | die Spurpunkte in Metern, außerhalb des Tunnels. Hier prüft man, ob die Homographie stimmt. |
 
 **Der Test, mit dem wir den Fehler gefunden haben:** Eine Wand vor den LiDAR
 halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
-- **Sie taucht auf, die Spurlinien aber nicht** (im Lane-Modus): Der Fehler
+- **Sie taucht auf, die Spurlinien aber nicht** (außerhalb des Tunnels): Der Fehler
   liegt in der Spurkette (`detect_lane` → `/detect/lane_mask` →
   `lane_costmap_node` → `/detect/lane_obstacles`). Prüfen, ob
   `/detect/lane_obstacles` Punkte enthält und ob `lane_costmap_node` einen
@@ -423,8 +444,8 @@ halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
 
 ## Was nach einer Streckenänderung nachgezogen werden muss
 
-- **Spurbreite gemessen** → die beiden Regeln in Abschnitt 3 nachrechnen. Nur
-  wenn sie erfüllt sind, können Spurwände beim Fahren genutzt werden.
+- **Andere Spurbreite oder anderer Hindernisbereich** → nichts. Kollision prüft
+  der Umriss, nicht ein auf die Breite abgestimmter Wert (Abschnitt 3).
 - **Kamera verstellt** (Neigung, Höhe, Halterung) → Homographie mit
   `scripts/tb/ground-calib.py` neu erzeugen. Danach `ground_x_min` (unterste
   Bildzeile) und `ground_x_max` (weitester Marker) prüfen.
