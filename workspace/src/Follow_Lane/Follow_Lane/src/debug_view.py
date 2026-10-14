@@ -215,7 +215,6 @@ class debug_view(Node):
 
     # Farbe je Mux-Quelle, passend zum Mode-Farbschema darueber.
     SOURCE_COLOR = {
-        'safe':  (60, 60, 255),      # rot    -- Not-Aus
         'avoid': (0, 165, 255),      # orange -- avoid_node
         'lane':  (135, 250, 159),    # gruen  -- PID
         'none':  (120, 120, 120),    # grau   -- Nullbefehl
@@ -224,8 +223,9 @@ class debug_view(Node):
     def draw_cmd_source_status(self, panel):
         """Welche Quelle der Mux gerade durchlaesst, plus der Ausweich-Offset.
 
-        Der Mode sagt nur, wer fahren duerfte -- der Not-Aus greift quer dazu
-        durch, ohne den Mode zu aendern. Beim Testen ist genau das die Frage:
+        Der Mode sagt nur, wer fahren duerfte -- ob von dort auch aktuelle
+        Befehle kommen, zeigt erst die Mux-Quelle ('none' = Nullbefehl, z.B.
+        weil detect_lane ausgefallen ist). Beim Testen ist genau das die Frage:
         "warum faehrt er nicht, obwohl Lane steht?"
         """
         cv2.putText(panel, 'Mux-Quelle:', (8,215),

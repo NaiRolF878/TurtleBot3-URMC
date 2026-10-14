@@ -1,6 +1,6 @@
 # Zonen-Ausweichen (Branch `Zone`)
 
-Spurverfolgung mit zonenbasierter Hindernisvermeidung und LiDAR-Not-Aus.
+Spurverfolgung mit zonenbasierter Hindernisvermeidung.
 
 Der Branch ist bewusst auf das reduziert, was zum Fahren gebraucht wird: der
 komplette Nav2-Zweig (Costmaps, MPPI, Planner, Tunnel-Exploration) ist hier
@@ -17,7 +17,6 @@ Start: `ros2 launch Follow_Lane zone_avoid.launch.py`
 | `detect_lane`     | Spurerkennung (HSV + CLAHE + Perspektivtransformation)|
 | `control_driving` | PID auf den Spur-Error, + Ausweich-Offset             |
 | `avoid_node`      | Zoneneinteilung, Offset bzw. komplettes Ausweichen    |
-| `safety_node`     | LiDAR-Not-Aus                                         |
 | `switch_control`  | Fahrmodus + Prioritaets-Mux                           |
 | `debug_view`      | Debugbild auf `/lokal/debug_view`                     |
 
@@ -32,8 +31,6 @@ detect_lane --/detect/lane--------------------> control_driving --/cmd_lane--.
 /scan --> avoid_node -+--/avoid/takeover--> switch_control                   |
           |                                   (Mux)                          |
           '--/cmd_avoid-------------------------+<-------------------------- '
-                                                |
-/scan --> safety_node --/cmd_safe-------------->|
                                                 v
                                         /control/cmd_vel --(remap)--> /cmd_vel
 ```
@@ -42,16 +39,14 @@ Prioritaet im Mux (hoechste zuerst):
 
 | Prio | Topic        | Node            | Wann                             |
 |------|--------------|-----------------|----------------------------------|
-| 1    | `/cmd_safe`  | safety_node     | Hindernis < `emergency_distance` |
-| 2    | `/cmd_avoid` | avoid_node      | Frontzone < `takeover_distance`  |
-| 3    | `/cmd_lane`  | control_driving | Normalbetrieb                    |
+| 1    | `/cmd_avoid` | avoid_node      | Frontzone < `takeover_distance`  |
+| 2    | `/cmd_lane`  | control_driving | Normalbetrieb                    |
 
 Der Mux waehlt die hoechste Prioritaet, von der noch **aktuelle** Nachrichten
-kommen (`cmd_timeout_*`). safety_node und avoid_node senden deshalb nur, wenn
-sie tatsaechlich zustaendig sind -- hoert eine Quelle auf, faellt der Mux von
-selbst zurueck. Kommt von gar keiner Quelle etwas, geht ein Nullbefehl raus
-statt des letzten Fahrbefehls. Damit ist auch der Fall "control_driving
-abgestuerzt" abgedeckt.
+kommen (`cmd_timeout_*`). avoid_node sendet deshalb nur, wenn er tatsaechlich
+zustaendig ist -- hoert eine Quelle auf, faellt der Mux von selbst zurueck.
+Kommt von gar keiner Quelle etwas, geht ein Nullbefehl raus statt des letzten
+Fahrbefehls. Damit ist auch der Fall "control_driving abgestuerzt" abgedeckt.
 
 ## Zonen
 
@@ -119,24 +114,10 @@ Begrenzung.
 | `Obstacle` | 2    | avoid_node   |
 | `Stop`     | 3    | niemand      |
 
-Der Modus sagt nur, wer fahren **duerfte**. Der Not-Aus greift quer dazu durch,
-ohne den Modus zu aendern -- beim Testen ist `/control/cmd_source` deshalb die
-aussagekraeftigere Anzeige, und sie steht auch im Debugbild.
-
-## Not-Aus (safety_node)
-
-Loest aus, sobald mindestens `min_hits` Messpunkte unter `emergency_distance`
-liegen, und haelt ueber `min_stop_duration` und `release_distance`.
-
-> **Sensorgrenze:** verbaut ist ein LDS-03 (Messbereich 0,05-12 m, +/-10 mm bis
-> 1 m, +/-20 mm darueber, 0,9 Grad Winkelaufloesung, 10 Hz). Er meldet
-> `range_min = 0.05 m`; alles darunter wird verworfen. Bei
-> `emergency_distance: 0.15` bleibt also ein 10 cm breites Band, in dem der
-> Not-Aus ausloesen kann -- bei 0,22 m/s und 10 Hz faehrt der Bot pro Scan
-> 2,2 cm, ein Hindernis liegt damit in mehreren Scans im Band.
-> safety_node warnt beim Start, wenn dieses Band unter 5 cm liegt (etwa wenn
-> `emergency_distance` gesenkt wird oder ein Sensor mit groesserem `range_min`
-> verbaut ist); `range_min` liest er dafuer aus der Scan-Nachricht.
+Der Modus sagt nur, wer fahren **duerfte** -- ob von dort auch aktuelle
+Befehle kommen, zeigt erst `/control/cmd_source` (`none` = Nullbefehl). Beim
+Testen ist das deshalb die aussagekraeftigere Anzeige, und sie steht auch im
+Debugbild.
 
 ## Diagnose
 
@@ -145,7 +126,6 @@ ros2 topic echo /avoid/zones          # Zonendistanzen + Betriebsart
 ros2 topic echo /control/cmd_source   # welche Quelle gerade faehrt
 ros2 topic echo /control/mode         # Fahrmodus (1 Lane, 2 Obstacle, 3 Stop)
 ros2 topic echo /avoid/offset         # aktueller Offset
-ros2 topic echo /safety/emergency     # Not-Aus aktiv?
 bash scripts/tb/launchers/rqt_params.sh    # Parameter live nachziehen
 ```
 
@@ -156,7 +136,6 @@ bash scripts/tb/launchers/rqt_params.sh    # Parameter live nachziehen
 | `Parameter/Follow_Lane_ROI_PI_CAM2_V3.yaml` | detect_lane |
 | `Parameter/Control_driving_PID.yaml` | control_driving |
 | `Parameter/Avoid_Node.yaml`       | avoid_node      |
-| `Parameter/Safety_Node.yaml`      | safety_node     |
 | `Parameter/Switch_Control.yaml`   | switch_control  |
 
 Flaches Format (`name: wert`) wie die uebrigen Dateien, damit die

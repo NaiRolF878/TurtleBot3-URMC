@@ -144,7 +144,6 @@ Für jede Zone wird der kleinste gemessene Abstand ermittelt — der nächste Pu
 | Frontzone < 0.35 m, Links frei | Nach links drehen |
 | Frontzone < 0.35 m, Rechts frei | Nach rechts drehen |
 | Alles unter 0.35 m | Rückwärts und drehen |
-| Irgendetwas unter 0.15 m | **Notstopp** |
 
 ### Drei Schwierigkeitsstufen
 
@@ -166,30 +165,26 @@ Das zentrale Designprinzip ist die **Subsumption-Architektur**: Mehrere Verhalte
 
 ```mermaid
 flowchart TB
-    P1[🔴 Prio 1 — Notstopp\nLiDAR: Objekt unter 0.15 m → sofort stoppen]
-    P2[🟠 Prio 2 — Hindernisvermeidung\nLiDAR: Objekt unter 0.35 m → ausweichen]
-    P3[🟡 Prio 3 — Spurerkennung\nKamera: Spur folgen, Kurven fahren]
-    P4[🟢 Prio 4 — Spezialmanöver\nEinparken, Tunnel, Stoppschild]
+    P1[🟠 Prio 1 — Hindernisvermeidung\nLiDAR: Objekt unter 0.35 m → ausweichen]
+    P2[🟡 Prio 2 — Spurerkennung\nKamera: Spur folgen, Kurven fahren]
+    P3[🟢 Prio 3 — Spezialmanöver\nEinparken, Tunnel, Stoppschild]
 
-    P1 --> P2 --> P3 --> P4
+    P1 --> P2 --> P3
 
-    style P1 fill:#FCEBEB,stroke:#A32D2D,color:#501313
-    style P2 fill:#FAECE7,stroke:#993C1D,color:#4A1B0C
-    style P3 fill:#FAEEDA,stroke:#854F0B,color:#412402
-    style P4 fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    style P1 fill:#FAECE7,stroke:#993C1D,color:#4A1B0C
+    style P2 fill:#FAEEDA,stroke:#854F0B,color:#412402
+    style P3 fill:#E1F5EE,stroke:#0F6E56,color:#04342C
 ```
 
 Höhere Priorität überschreibt niedrigere. Jede Schicht ist ein eigener ROS2-Node und kann unabhängig getestet werden.
 
 ### Wie es zusammenspielt
 
-Im **Normalbetrieb** folgt der Roboter der Spur (Prio 3). Die Kamera erkennt die Fahrbahnmarkierungen und der PID-Regler lenkt den Roboter entlang der Spurmitte.
+Im **Normalbetrieb** folgt der Roboter der Spur (Prio 2). Die Kamera erkennt die Fahrbahnmarkierungen und der PID-Regler lenkt den Roboter entlang der Spurmitte.
 
-Sobald der **LiDAR ein Hindernis** unter 0.35 m erkennt, übernimmt die Hindernisvermeidung (Prio 2) und überschreibt den Spurfolge-Befehl. Der Roboter weicht aus.
+Sobald der **LiDAR ein Hindernis** unter 0.35 m erkennt, übernimmt die Hindernisvermeidung (Prio 1) und überschreibt den Spurfolge-Befehl. Der Roboter weicht aus.
 
-Kommt etwas **gefährlich nah** (unter 0.15 m), greift der Notstopp (Prio 1) und der Roboter steht sofort still.
-
-Für **Spezialmanöver** wie Einparken oder Tunnel wird Prio 4 aktiviert. Diese laufen nur, wenn kein höherpriorisiertes Verhalten aktiv ist.
+Für **Spezialmanöver** wie Einparken oder Tunnel wird Prio 3 aktiviert. Diese laufen nur, wenn kein höherpriorisiertes Verhalten aktiv ist.
 
 ---
 
@@ -202,7 +197,6 @@ flowchart LR
     CAM[Kamera] --> DL[detect_lane_node]
     CAM --> DET[detect_node\nYOLO]
     LIDAR[LiDAR] --> AV[avoid_node]
-    LIDAR --> SAF[safety_node]
     LIDAR --> TUN[tunnel_node]
     LIDAR --> PAR[parking_node]
     ODOM[Odom] --> PAR
@@ -211,7 +205,6 @@ flowchart LR
     DL -->|/cmd_lane| SW[switch_node]
     DET -->|/detect/event| SW
     AV -->|/cmd_avoid| SW
-    SAF -->|/cmd_safe| SW
     TUN -->|/cmd_tunnel| SW
     PAR -->|/cmd_park| SW
     TEL -->|/cmd_teleop| SW
@@ -220,7 +213,7 @@ flowchart LR
     SW -->|/cmd_vel| MOT[Motoren]
 
 ```
-Der `switch_node` ist das Herzstück: Er empfängt die Fahrbefehle aller Nodes und leitet nur den richtigen an `/cmd_vel` weiter. Der `util_node` sagt ihm, welcher Modus gerade aktiv ist (Lane, Parking, Tunnel, Teleop). Safety und Avoid können den aktiven Modus jederzeit überstimmen.
+Der `switch_node` ist das Herzstück: Er empfängt die Fahrbefehle aller Nodes und leitet nur den richtigen an `/cmd_vel` weiter. Der `util_node` sagt ihm, welcher Modus gerade aktiv ist (Lane, Parking, Tunnel, Teleop). Avoid kann den aktiven Modus jederzeit überstimmen.
 
 ---
 
@@ -228,12 +221,12 @@ Der `switch_node` ist das Herzstück: Er empfängt die Fahrbefehle aller Nodes u
 
 | Disziplin | Hauptsensor | Algorithmus | Prio |
 |-----------|-------------|-------------|------|
-| Spurhalten (Gerade) | Kamera | HSV + PID | 3 |
-| Spurhalten (Kurve) | Kamera | HSV + PID (angepasst) | 3 |
-| Hindernisvermeidung | LiDAR | Zonenlogik | 2 |
-| Einparken | LiDAR + Odom | Sequenz-Steuerung | 4 |
-| Tunnel | LiDAR | Wandfolge-Algorithmus | 4 |
-| Stoppschild / Schilder | Kamera (YOLO) | Objekterkennung | 4 |
+| Spurhalten (Gerade) | Kamera | HSV + PID | 2 |
+| Spurhalten (Kurve) | Kamera | HSV + PID (angepasst) | 2 |
+| Hindernisvermeidung | LiDAR | Zonenlogik | 1 |
+| Einparken | LiDAR + Odom | Sequenz-Steuerung | 3 |
+| Tunnel | LiDAR | Wandfolge-Algorithmus | 3 |
+| Stoppschild / Schilder | Kamera (YOLO) | Objekterkennung | 3 |
 
 ---
 

@@ -8,16 +8,15 @@ Zwei Aufgaben:
    geht es auf Obstacle und control_driving verstummt von selbst.
 
 2. Prioritaets-Mux fuer die Fahrbefehle:
-       1. /cmd_safe  -- Not-Aus aus safety_node
-       2. /cmd_avoid -- komplettes Ausweichen aus avoid_node
-       3. /cmd_lane  -- Spurfolge aus control_driving
+       1. /cmd_avoid -- komplettes Ausweichen aus avoid_node
+       2. /cmd_lane  -- Spurfolge aus control_driving
    Es gewinnt die hoechste Prioritaet, von der noch aktuelle Nachrichten
    eintreffen. Der Ausgang liegt auf /control/cmd_vel und wird im Launch auf
    /cmd_vel gemappt -- so bleibt der Node auch in Gazebo o.ae. nutzbar.
 
-Die Aktualitaetspruefung ist der Kern: safety_node und avoid_node senden nur,
-solange sie zustaendig sind. Hoert eine Quelle auf, faellt der Mux von selbst
-auf die naechste zurueck, ohne dass jemand ihn umschalten muesste. Kommt von
+Die Aktualitaetspruefung ist der Kern: avoid_node sendet nur, solange er
+zustaendig ist. Hoert eine Quelle auf, faellt der Mux von selbst auf die
+naechste zurueck, ohne dass jemand ihn umschalten muesste. Kommt von
 gar keiner Quelle etwas, geht ein Nullbefehl raus statt des letzten
 Fahrbefehls.
 """
@@ -53,12 +52,11 @@ class switch_control(Node):
         # --- Fahrbefehl-Mux ---
         self.declare_parameter('cmd_mux_rate', 20.0, frange(1.0, 100.0))
         # Aktualitaetsfenster je Quelle: aeltere Nachrichten zaehlen nicht mehr.
-        self.declare_parameter('cmd_timeout_safe',  0.5, frange(0.05, 5.0))
         self.declare_parameter('cmd_timeout_avoid', 0.5, frange(0.05, 5.0))
         self.declare_parameter('cmd_timeout_lane',  0.5, frange(0.05, 5.0))
 
         self._param_names = [
-            'cmd_timeout_safe', 'cmd_timeout_avoid', 'cmd_timeout_lane',
+            'cmd_timeout_avoid', 'cmd_timeout_lane',
         ]
 
         # --- Subscriber ---
@@ -117,7 +115,6 @@ class switch_control(Node):
     def _setup_mux(self):
         # (Name, Topic, Timeout-Parameter) in Prioritaetsreihenfolge.
         self._mux_sources = [
-            ('safe',  '/cmd_safe',  'cmd_timeout_safe'),
             ('avoid', '/cmd_avoid', 'cmd_timeout_avoid'),
             ('lane',  '/cmd_lane',  'cmd_timeout_lane'),
         ]
@@ -135,7 +132,7 @@ class switch_control(Node):
         rate = self.get_parameter('cmd_mux_rate').value
         self.mux_timer = self.create_timer(1.0 / rate, self.cbMux)
         self.get_logger().info(
-            f'Fahrbefehl-Mux aktiv ({rate:.0f} Hz): safe > avoid > lane -> /control/cmd_vel')
+            f'Fahrbefehl-Mux aktiv ({rate:.0f} Hz): avoid > lane -> /control/cmd_vel')
 
     def _make_mux_cb(self, name):
         def cb(twist):

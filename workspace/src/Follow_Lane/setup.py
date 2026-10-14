@@ -41,7 +41,6 @@ setup(
             'debug_view           = Follow_Lane.src.debug_view:main',
             'detect_lane          = Follow_Lane.src.detect_lane:main',
             'ingress_node         = Follow_Lane.src.ingress_node:main',
-            'safety_node          = Follow_Lane.src.safety_node:main',
             'switch_control       = Follow_Lane.src.switch_control:main',
         ],
     },

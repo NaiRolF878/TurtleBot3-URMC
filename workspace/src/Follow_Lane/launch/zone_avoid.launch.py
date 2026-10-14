@@ -1,9 +1,9 @@
-"""Spurfolge + zonenbasiertes Ausweichen + LiDAR-Not-Aus.
+"""Spurfolge + zonenbasiertes Ausweichen.
 
 Aufbau (Prioritaet im Mux von switch_control absteigend):
 
-    safety_node    --/cmd_safe --.
-    avoid_node     --/cmd_avoid--+--> switch_control (Mux) --/control/cmd_vel--> /cmd_vel
+    avoid_node     --/cmd_avoid--.
+                                 +--> switch_control (Mux) --/control/cmd_vel--> /cmd_vel
     control_driving--/cmd_lane --'
 
 Im Normalbetrieb faehrt control_driving. avoid_node schickt dabei nur einen
@@ -63,7 +63,6 @@ def launch_setup(context, *args, **kwargs):
     control_params = params('control_params')
     switch_params = params('switch_control_params')
     avoid_params = params('avoid_params')
-    safety_params = params('safety_params')
 
     return [
         # Kamera entzerren + /scan spiegeln
@@ -74,7 +73,7 @@ def launch_setup(context, *args, **kwargs):
             parameters=[detect_params],
         ),
 
-        # Prioritaet 3: Spurfolge. Der Regler-Ausgang geht hier NICHT direkt an
+        # Prioritaet 2: Spurfolge. Der Regler-Ausgang geht hier NICHT direkt an
         # den Roboter, sondern als /cmd_lane in den Mux.
         Node(
             package='Follow_Lane', executable='control_driving', name='control_driving',
@@ -82,16 +81,10 @@ def launch_setup(context, *args, **kwargs):
             remappings=[('/control/cmd_vel', '/cmd_lane')],
         ),
 
-        # Prioritaet 2: Zonen-Ausweichen (+ /avoid/offset im Normalbetrieb)
+        # Prioritaet 1: Zonen-Ausweichen (+ /avoid/offset im Normalbetrieb)
         Node(
             package='Follow_Lane', executable='avoid_node', name='avoid_node',
             parameters=[avoid_params],
-        ),
-
-        # Prioritaet 1: Not-Aus
-        Node(
-            package='Follow_Lane', executable='safety_node', name='safety_node',
-            parameters=[safety_params],
         ),
 
         # Modus-Zustandsmaschine + Mux. Erst hier wird auf /cmd_vel gemappt,
@@ -128,8 +121,6 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
         DeclareLaunchArgument('avoid_params',
             default_value=os.path.join(PARAM_DIR, 'Avoid_Node.yaml')),
-        DeclareLaunchArgument('safety_params',
-            default_value=os.path.join(PARAM_DIR, 'Safety_Node.yaml')),
         DeclareLaunchArgument('image_view', default_value='true'),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
