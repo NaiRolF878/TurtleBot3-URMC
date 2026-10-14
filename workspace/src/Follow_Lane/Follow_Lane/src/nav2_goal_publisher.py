@@ -26,8 +26,10 @@ _GOAL_STATUS_TEXT = {
 class nav2_goal_publisher(Node):
     """Einziger FollowPath-Action-Client. Pfadquelle je nach Modus:
 
-    - Obstacle: selbst gebaute Gerade "goal_distance geradeaus", MPPI weicht
-      anhand der Local Costmap davon ab.
+    - Obstacle: Spurmitte von lane_costmap_node (center_path_topic), damit MPPI
+      auch in Kurven der Spur folgt. Ist sie aelter als center_path_max_age --
+      Linien seit einer Weile nicht gesehen --, die Gerade "goal_distance
+      geradeaus". MPPI weicht in beiden Faellen anhand der Local Costmap ab.
     - Tunnel: Pfad von tunnel_explorer_node auf /tunnel/explore_path.
 
     Jeder Moduswechsel bricht ein laufendes Ziel ab.
@@ -44,6 +46,12 @@ class nav2_goal_publisher(Node):
         self.declare_parameter('goal_frame_id', 'base_footprint')
         self.declare_parameter('num_waypoints', 5,
             ParameterDescriptor(integer_range=[IntegerRange(from_value=2, to_value=50, step=1)]))
+        self.declare_parameter('center_path_topic', '/lane/center_path')
+        # Gemessen an der Empfangszeit, nicht am Bildstempel -- die Uhren von Bot
+        # und Rechner muessen dafuer nicht synchron laufen.
+        self.declare_parameter('center_path_max_age', 1.0,
+            ParameterDescriptor(floating_point_range=[
+                FloatingPointRange(from_value=0.1, to_value=10.0, step=0.0)]))
         # Nur Wiederanlauf-Pruefung; neue Ziele kommen ereignisgetrieben aus cb_goal_result.
         self.declare_parameter('watchdog_rate', 1.0,
             ParameterDescriptor(floating_point_range=[
@@ -53,11 +61,15 @@ class nav2_goal_publisher(Node):
             UInt8, '/control/mode', self.cbGetControlMode, 1)
         self.sub_explore_path = self.create_subscription(
             Path, '/tunnel/explore_path', self.cbExplorePath, 1)
+        self.sub_center_path = self.create_subscription(
+            Path, self.get_parameter('center_path_topic').value, self.cbCenterPath, 1)
 
         self._action_client = ActionClient(self, FollowPath, 'follow_path')
         self._goal_handle = None
         self._goal_active = False
         self._latest_explore_path = None
+        self._latest_center_path = None
+        self._center_path_received = None
 
         self.current_control_mode = ControlType.Lane
 
@@ -89,6 +101,10 @@ class nav2_goal_publisher(Node):
     def cbExplorePath(self, path):
         self._latest_explore_path = path
 
+    def cbCenterPath(self, path):
+        self._latest_center_path = path
+        self._center_path_received = self.get_clock().now()
+
     def cbWatchdog(self):
         if self.current_control_mode in _ACTIVE_MODES and not self._goal_active:
             self.try_start_chain()
@@ -110,6 +126,14 @@ class nav2_goal_publisher(Node):
     def build_path(self):
         if self.current_control_mode == ControlType.Tunnel:
             return self._latest_explore_path
+
+        if self._center_path_received is not None:
+            age = (self.get_clock().now() - self._center_path_received).nanoseconds / 1e9
+            if age <= self.get_parameter('center_path_max_age').value:
+                return self._latest_center_path
+        self.get_logger().info(
+            'Keine aktuelle Spurmitte -- Ziel ist die Gerade geradeaus.',
+            throttle_duration_sec=2.0)
 
         goal_distance = self.get_parameter('goal_distance').value
         frame_id = self.get_parameter('goal_frame_id').value

@@ -1,7 +1,7 @@
 /lane_costmap_node:
   ros__parameters:
-    # Spurwaende fuer den lane_layer, in jedem Modus ausser Tunnel (Kamera dort
-    # verboten), siehe Docstring in lane_costmap_node.py.
+    # Spurwaende fuer den lane_layer und Spurmitte als Pfad, in jedem Modus ausser
+    # Tunnel (Kamera dort verboten), siehe Docstring in lane_costmap_node.py.
     # Pixel -> Meter kommt aus Parameter/camera_info/ground_homography_800x600.yaml.
     # Wurde die Kamera verstellt, die Datei mit scripts/tb/ground-calib.py neu
     # erzeugen und ground_x_min/ground_x_max pruefen.
@@ -16,8 +16,19 @@
     output_topic: /detect/lane_obstacles
     pixel_stride: 2
 
+    # Spurmitte: keine Spurbreite einstellen -- sie wird laufend gemessen.
+    odom_frame: odom
+    center_path_topic: /lane/center_path
+    center_bin_size: 0.05        # = Zellgroesse der local_costmap
+    center_min_points: 3
+    center_width_history: 20     # Bilder; Median der gemessenen Breite
+
 /nav2_goal_publisher:
   ros__parameters:
+    # Obstacle-Modus: Ziel ist die Spurmitte, solange sie juenger ist als
+    # center_path_max_age (Empfangszeit). Sonst die Gerade goal_distance geradeaus.
+    center_path_topic: /lane/center_path
+    center_path_max_age: 1.0
     goal_distance: 1.0
     goal_frame_id: base_footprint
     num_waypoints: 5

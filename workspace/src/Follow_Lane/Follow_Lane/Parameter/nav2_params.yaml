@@ -23,13 +23,14 @@
 #    die Eingangssperre, der lane_layer bleibt leer.
 #
 # Warum MPPI statt DWB: Ohne echten globalen Pfad bekommt der Local Controller
-# hier nur ein kurzes, staendig neu gesetztes "fahr geradeaus"-Ziel von
-# nav2_goal_publisher (siehe FollowPath-Ziel). MPPIs Sampling-Ansatz bewertet
-# viele moegliche Kurzfrist-Trajektorien direkt gegen die Costmap und diese
-# grobe Zielrichtung und kombiniert beides robust. DWBs Kritiken (PathDist,
-# Oscillation, ...) sind dagegen auf einen von einem echten Planer stammenden,
-# sinnvoll geformten Pfad ausgelegt -- mit unserem synthetischen Kurzpfad
-# waere das Verhalten deutlich unruhiger.
+# hier nur einen kurzen, staendig neu gesetzten Pfad von nav2_goal_publisher --
+# die Spurmitte aus der Kamera, ersatzweise "fahr geradeaus". Beide fuehren mitten
+# durch das Hindernis. MPPIs Sampling-Ansatz bewertet viele moegliche
+# Kurzfrist-Trajektorien direkt gegen die Costmap und diese grobe Zielrichtung
+# und kombiniert beides robust. DWBs Kritiken (PathDist, Oscillation, ...) sind
+# dagegen auf einen von einem echten Planer stammenden, um Hindernisse herum
+# geformten Pfad ausgelegt -- mit unserem Kurzpfad waere das Verhalten deutlich
+# unruhiger.
 #
 # TurtleBot3 Burger: footprint/robot_radius/vx_max/wz_max unten an die
 # Burger-Spezifikation angelehnt (138 x 178 mm, 0.22 m/s, ~2.84 rad/s max).
@@ -64,9 +65,9 @@ controller_server:
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
       # 56 -> 90: 56 * model_dt 0.05 = 2,8 s, bei vx_max 0.22 nur 0,62 m Vorausschau --
-      # das Ziel von nav2_goal_publisher (goal_distance 1.0 m) war nie im Blick.
-      # 90 * 0.05 = 4,5 s, * 0.22 m/s ~ 0,99 m. Regel: time_steps * model_dt * vx_max
-      # soll mindestens goal_distance abdecken.
+      # das Ziel von nav2_goal_publisher war nie im Blick (Spurmitte bis ~0,8 m,
+      # Ersatz-Gerade goal_distance 1.0 m). 90 * 0.05 = 4,5 s, * 0.22 m/s ~ 0,99 m.
+      # Regel: time_steps * model_dt * vx_max soll mindestens goal_distance abdecken.
       time_steps: 90
       model_dt: 0.05
       batch_size: 1000
@@ -110,11 +111,12 @@ controller_server:
         cost_power: 1
         cost_weight: 5.0
         threshold_to_consider: 1.4
-      # true -> false: jeder rollierende Pfad endet mit orientation.w = 1.0, also
+      # true -> false: die Ersatz-Gerade endet mit orientation.w = 1.0, also
       # "geradeaus, gemessen im Moment der Pfaderzeugung". Ab 0,5 m vor dem Ziel zog
       # die Kritik den Bot in genau diese Ausgangsrichtung zurueck, waehrend er am
       # Hindernis vorbei sollte. goal_checker laesst das Ziel mit yaw_goal_tolerance
-      # 3.15 ohnehin durchgehen, die Endausrichtung ist irrelevant.
+      # 3.15 ohnehin durchgehen, die Endausrichtung ist irrelevant -- auch bei der
+      # Spurmitte, deren Ende in Spurrichtung zeigt.
       GoalAngleCritic:
         enabled: false
         cost_power: 1
@@ -126,8 +128,8 @@ controller_server:
         cost_weight: 5.0
         threshold_to_consider: 0.5
       # Gewichte weichen bewusst von Nav2s Beispiel ab: dort kommt der Pfad von
-      # einem Planer, der schon um Hindernisse herumfuehrt. Unsere Gerade "1 m
-      # geradeaus" zeigt mitten durch das Hindernis -- mit PathAlign 14.0 hat
+      # einem Planer, der schon um Hindernisse herumfuehrt. Unser Pfad (Spurmitte
+      # oder Gerade) zeigt mitten durch das Hindernis -- mit PathAlign 14.0 hat
       # MPPI es deshalb vor sich hergeschoben statt auszuweichen (Test 02.09.).
       # Also: Ausweichen dominiert, "auf der Linie bleiben" ist nur ein Hinweis.
       CostCritic:
