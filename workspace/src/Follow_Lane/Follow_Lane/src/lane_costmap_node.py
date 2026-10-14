@@ -3,18 +3,22 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange
-from std_msgs.msg import UInt8, Header
+from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 
 from follow_lane_msg.msg import LaneMask
-from Follow_Lane.src.switch_control import ControlType
 
 
 class lane_costmap_node(Node):
     """Spurlinien-Pixel von /detect/lane_mask als PointCloud2 fuer Nav2s
-    obstacle_layer -- virtuelle Waende in der Local Costmap. Nur im
-    Obstacle-Modus aktiv.
+    obstacle_layer -- virtuelle Waende in der Local Costmap.
+
+    Laeuft unabhaengig vom Control-Mode durchgehend: der Node ist reine
+    Wahrnehmung und sendet keine Fahrbefehle. Gesperrt wird in dieser
+    Architektur nur, wer faehrt (control_driving, nav2_goal_publisher).
+    Durchgehender Betrieb heisst, dass der lane_layer beim Umschalten auf
+    Obstacle schon einen Korridor enthaelt, statt erst dann leer anzufangen.
 
     x_near/x_far/y_left/y_right sagen, wo die vier Kanten des Bird's-Eye-Bildes
     real liegen (Meter, in frame_id). Per Massband kalibrieren.
@@ -47,24 +51,11 @@ class lane_costmap_node(Node):
 
         self.sub_lane_mask = self.create_subscription(
             LaneMask, '/detect/lane_mask', self.cbLaneMask, 1)
-        self.sub_control_mode = self.create_subscription(
-            UInt8, '/control/mode', self.cbGetControlMode, 1)
 
         output_topic = self.get_parameter('output_topic').value
         self.pub_lane_obstacles = self.create_publisher(PointCloud2, output_topic, 1)
 
-        self.current_control_mode = ControlType.Lane
-
-    def cbGetControlMode(self, msg):
-        try:
-            self.current_control_mode = ControlType(msg.data)
-        except ValueError:
-            self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {msg.data}')
-
     def cbLaneMask(self, lane_mask):
-        if self.current_control_mode != ControlType.Obstacle:
-            return
-
         for name in self._param_names:
             setattr(self, name, self.get_parameter(name).value)
 
