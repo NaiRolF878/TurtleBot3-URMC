@@ -1,12 +1,14 @@
 /lane_costmap_node:
   ros__parameters:
-    # Kalibrierung Bird's-Eye-Pixel -> Meter, siehe Docstring in lane_costmap_node.py.
-    # Muss am Wettbewerbstag mit Massband gegen die tatsaechliche Kameramontage
-    # kalibriert werden -- die Werte hier sind nur Platzhalter.
-    x_near: 0.15
-    x_far: 0.60
-    y_left: 0.35
-    y_right: -0.35
+    # Pixel -> Meter kommt aus Parameter/camera_info/ground_homography_800x600.yaml,
+    # siehe Docstring in lane_costmap_node.py. Wurde die Kamera verstellt, die Datei mit
+    # scripts/tb/ground-calib.py neu erzeugen und ground_x_min/ground_x_max pruefen.
+    ground_homography_file: ground_homography_800x600.yaml
+    # Gueltigkeitsbereich der Homographie (X vorwaerts ab Radachse, Meter).
+    # ground_x_max: die Marker beim Fit reichten nur bis 0.70 m, darueber hinaus
+    # wird extrapoliert und die Fehler wachsen stark.
+    ground_x_min: 0.15
+    ground_x_max: 0.80
 
     frame_id: base_footprint
     output_topic: /detect/lane_obstacles

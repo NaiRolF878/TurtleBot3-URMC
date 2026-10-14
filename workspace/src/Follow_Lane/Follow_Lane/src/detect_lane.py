@@ -201,6 +201,9 @@ class detect_lane(Node):
             cv_image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
             self.raw_img = cv_image
             img = self.apply_clahe(cv_image)
+            # Entzerrtes Vollbild nach CLAHE, vor dem Warp: daraus rechnet publish_lane_mask
+            # die Masken fuer die Costmap (Bodenhomographie gilt fuer das Vollbild).
+            img_full = img
             img = self.crop_img(img)
 
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -263,10 +266,9 @@ class detect_lane(Node):
             self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image)
             self.publish_mask_debug(mask_yellow, mask_white,
                                     center_yellow_x, center_yellow_y, center_white_x, center_white_y)
-            # Gefilterte Weissmaske: die links der gelben Linie ausgeblendeten Pixel
-            # haelt der Detektor selbst fuer unzuverlaessig -- als virtuelle Waende in
-            # der Costmap wuerden sie den freien Korridor blockieren.
-            self.publish_lane_mask(mask_yellow, mask_white_filtered, source_stamp)
+            # Eigene Masken auf dem Vollbild statt der gewarpten oben: der Warp schneidet
+            # auf das RoI-Trapez zu, die Costmap soll den ganzen sichtbaren Boden sehen.
+            self.publish_lane_mask(img_full, source_stamp)
 
         except Exception as e:
             self.get_logger().error(f"cbFindLane failed: {e}")
@@ -301,10 +303,23 @@ class detect_lane(Node):
         msg.data = encoded.tobytes()
         self.pub_mask_debug.publish(msg)
 
-    def publish_lane_mask(self, mask_yellow, mask_white, source_stamp):
+    def publish_lane_mask(self, img_full, source_stamp):
         # Nur berechnen, wenn jemand zuschaut -- gleiche Begruendung wie bei publish_mask_debug.
         if self.pub_lane_mask.get_subscription_count() == 0:
             return
+
+        # Gleiche HSV-Schwellen und Erosion wie in cbFindLane, nur auf dem entzerrten
+        # Vollbild. Bei Aenderungen dort hier mitziehen.
+        hsv = cv2.cvtColor(img_full, cv2.COLOR_BGR2HSV)
+        mask_yellow = cv2.inRange(hsv,
+                           (self.hue_yellow_l, self.saturation_yellow_l, self.lightness_yellow_l),
+                           (self.hue_yellow_h, self.saturation_yellow_h, self.lightness_yellow_h))
+        mask_white = cv2.inRange(hsv,
+                           (self.hue_white_l, self.saturation_white_l, self.lightness_white_l),
+                           (self.hue_white_h, self.saturation_white_h, self.lightness_white_h))
+        kernel = np.ones((5, 5), np.uint8)
+        mask_yellow = cv2.erode(mask_yellow, kernel, iterations=1)
+        mask_white = cv2.erode(mask_white, kernel, iterations=1)
 
         # Schon hier ausduennen: lane_costmap_node verwirft ohnehin die meisten Punkte
         # wieder, in voller Aufloesung waeren es zehntausende int32 pro Frame.
@@ -316,7 +331,7 @@ class detect_lane(Node):
 
         msg = LaneMask()
         msg.header.stamp = source_stamp
-        msg.crop_im_size = self._crop_im_size
+        msg.image_height, msg.image_width = img_full.shape[:2]
         msg.yellow_x = yellow_xs.astype(np.int32).tolist()
         msg.yellow_y = yellow_ys.astype(np.int32).tolist()
         msg.white_x = white_xs.astype(np.int32).tolist()
