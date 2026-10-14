@@ -11,7 +11,8 @@
 # liegt damit in mehreren Scans im Band.
 # safety_node warnt beim Start, wenn das Band unter 5 cm liegt (z.B. falls
 # emergency_distance gesenkt wird oder ein Sensor mit groesserem range_min
-# verbaut ist). 0.15 ist der geforderte Wert.
+# verbaut ist). 0.15 kommt aus docs/URMC–Technisches_Konzept.md (Notstopp unter
+# 0.15 m), das Reglement schreibt keinen Abstand vor.
 emergency_distance:  0.15
 # Hysterese: erst darueber gilt die Lage wieder als sicher. Muss groesser als
 # emergency_distance sein, sonst flattert der Not-Aus an der Schwelle.
