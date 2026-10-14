@@ -128,13 +128,15 @@ aussagekraeftigere Anzeige, und sie steht auch im Debugbild.
 Loest aus, sobald mindestens `min_hits` Messpunkte unter `emergency_distance`
 liegen, und haelt ueber `min_stop_duration` und `release_distance`.
 
-> **Sensorgrenze:** der LDS-01 meldet `range_min = 0.12 m`; alles darunter ist
-> unbrauchbar und wird verworfen. Bei `emergency_distance: 0.15` bleibt also nur
-> ein 3 cm breites Band, in dem der Not-Aus ueberhaupt ausloesen kann -- ein
-> Hindernis kann bei voller Fahrt zwischen zwei Scans hindurchrutschen.
-> safety_node warnt beim Start, wenn dieses Band unter 5 cm liegt. Fuer
-> verlaessliches Ausloesen eher 0.20-0.25 einstellen und `release_distance`
-> mit anheben.
+> **Sensorgrenze:** verbaut ist ein LDS-03 (Messbereich 0,05-12 m, +/-10 mm bis
+> 1 m, +/-20 mm darueber, 0,9 Grad Winkelaufloesung, 10 Hz). Er meldet
+> `range_min = 0.05 m`; alles darunter wird verworfen. Bei
+> `emergency_distance: 0.15` bleibt also ein 10 cm breites Band, in dem der
+> Not-Aus ausloesen kann -- bei 0,22 m/s und 10 Hz faehrt der Bot pro Scan
+> 2,2 cm, ein Hindernis liegt damit in mehreren Scans im Band.
+> safety_node warnt beim Start, wenn dieses Band unter 5 cm liegt (etwa wenn
+> `emergency_distance` gesenkt wird oder ein Sensor mit groesserem `range_min`
+> verbaut ist); `range_min` liest er dafuer aus der Scan-Nachricht.
 
 ## Diagnose
 

@@ -4,13 +4,14 @@
 
 # Alles naeher als das loest den Not-Aus aus (Meter).
 #
-# ACHTUNG Sensorgrenze: der LDS-01 des Burger meldet range_min = 0.12 m, alles
-# darunter ist unbrauchbar und wird verworfen. Bei 0.15 m bleibt also nur ein
-# 3 cm breites Band, in dem der Not-Aus ueberhaupt ausloesen kann -- ein
-# Hindernis kann bei voller Fahrt zwischen zwei Scans hindurchrutschen.
-# safety_node warnt beim Start, wenn das Band unter 5 cm liegt.
-# 0.15 ist der geforderte Wert; fuer verlaessliches Ausloesen im Fahrbetrieb
-# eher 0.20-0.25 einstellen (dann auch release_distance mit anheben).
+# Sensorgrenze: verbaut ist ein LDS-03 (Messbereich 0.05-12 m, +/-10 mm bis 1 m,
+# 0,9 Grad, 10 Hz). Er meldet range_min = 0.05 m, alles darunter wird verworfen.
+# Bei 0.15 m bleibt also ein 10 cm breites Band, in dem der Not-Aus ausloesen
+# kann -- bei 0,22 m/s und 10 Hz faehrt der Bot pro Scan 2,2 cm, ein Hindernis
+# liegt damit in mehreren Scans im Band.
+# safety_node warnt beim Start, wenn das Band unter 5 cm liegt (z.B. falls
+# emergency_distance gesenkt wird oder ein Sensor mit groesserem range_min
+# verbaut ist). 0.15 ist der geforderte Wert.
 emergency_distance:  0.15
 # Hysterese: erst darueber gilt die Lage wieder als sicher. Muss groesser als
 # emergency_distance sein, sonst flattert der Not-Aus an der Schwelle.

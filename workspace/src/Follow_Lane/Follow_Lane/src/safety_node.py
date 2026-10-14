@@ -111,12 +111,14 @@ class safety_node(Node):
         """Einmalig warnen, wenn zwischen range_min und emergency_distance kaum
         Platz bleibt.
 
-        Der LDS-01 des Burger meldet range_min = 0.12 m. Alles darunter ist
+        Der verbaute LDS-03 meldet range_min = 0.05 m. Alles darunter ist
         unbrauchbar und wird verworfen -- bei emergency_distance = 0.15 m bleibt
-        also nur ein 3 cm breites Band, in dem der Not-Aus ueberhaupt ausloesen
-        kann. Ein Hindernis, das schneller als eine Scan-Umdrehung durch dieses
-        Band faehrt, wird nicht gesehen. Das ist keine Fehlfunktion dieses
-        Nodes, muss aber beim Einstellen bekannt sein.
+        also ein 10 cm breites Band, in dem der Not-Aus ausloesen kann. Wird das
+        Band schmal (emergency_distance gesenkt, Sensor mit groesserem
+        range_min), kann ein Hindernis, das schneller als eine Scan-Umdrehung
+        hindurchfaehrt, uebersehen werden. Das ist keine Fehlfunktion dieses
+        Nodes, muss aber beim Einstellen bekannt sein. range_min wird zur
+        Laufzeit aus der Scan-Nachricht gelesen, nicht angenommen.
         """
         if self._band_warned:
             return
