@@ -42,6 +42,9 @@
     entrance_wall_width: 0.6
     entrance_wall_points: 9
     publish_rate: 5.0
+    # Wand erst senden, wenn der Bot so weit von der Eintrittslinie weg ist:
+    # Heck 0.101 + footprint_padding 0.01 + eine Zelle 0.05. Vorher stuende er in ihr.
+    entrance_wall_delay: 0.16
 
 /tunnel_explorer_node:
   ros__parameters:

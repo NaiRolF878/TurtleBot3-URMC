@@ -22,6 +22,13 @@ class keepout_zone_node(Node):
     im odom-Frame, damit sie ortsfest bleibt und wieder in die mitfahrende
     Costmap rutscht, sobald sich der Bot dem Eingang naehert.
 
+    Die Wand bleibt an der gemerkten Stelle, wird aber erst gesendet, wenn der
+    Bot sich entrance_wall_delay weit in Einfahrtrichtung davon entfernt hat.
+    Sonst stuende er im ersten Moment selbst in ihr, und MPPI saehe jede
+    Bewegung als Kollision. Die Wand nach hinten zu verschieben waere keine
+    Loesung: dann entstuende eine Luecke, durch die er seitlich wieder hinaus
+    koennte.
+
     Bei jedem neuen Tunnel wird die Pose ueberschrieben und global_costmap
     geleert. Ausserhalb des Tunnel-Modus passiert nichts.
     """
@@ -42,8 +49,14 @@ class keepout_zone_node(Node):
         self.declare_parameter('publish_rate', 5.0,
             ParameterDescriptor(floating_point_range=[
                 FloatingPointRange(from_value=0.5, to_value=20.0, step=0.0)]))
+        # Heck des Footprints 0.101 m hinter der Radachse + footprint_padding 0.01
+        # + eine Zelle 0.05: erst dann liegt keine Wandzelle mehr unter dem Bot.
+        self.declare_parameter('entrance_wall_delay', 0.16,
+            ParameterDescriptor(floating_point_range=[
+                FloatingPointRange(from_value=0.0, to_value=2.0, step=0.0)]))
 
-        self._param_names = ['frame_id', 'robot_frame', 'entrance_wall_width', 'entrance_wall_points']
+        self._param_names = ['frame_id', 'robot_frame', 'entrance_wall_width',
+                             'entrance_wall_points', 'entrance_wall_delay']
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -61,6 +74,7 @@ class keepout_zone_node(Node):
 
         self.current_control_mode = ControlType.Lane
         self.entrance_pose = None  # (x, y, yaw) im odom-Frame, oder None
+        self._wall_active = False
 
         publish_rate = self.get_parameter('publish_rate').value
         self.timer = self.create_timer(1.0 / publish_rate, self.cbPublish)
@@ -81,9 +95,11 @@ class keepout_zone_node(Node):
 
         if entering_tunnel:
             self.entrance_pose = None
+            self._wall_active = False
             self._clear_global_costmap()
         elif leaving_tunnel:
             self.entrance_pose = None
+            self._wall_active = False
 
     def _clear_global_costmap(self):
         if not self.clear_global_costmap.service_is_ready():
@@ -101,18 +117,35 @@ class keepout_zone_node(Node):
             setattr(self, name, self.get_parameter(name).value)
 
         if self.entrance_pose is None:
-            self.entrance_pose = self._capture_entrance_pose()
+            self.entrance_pose = self._lookup_robot_pose()
             if self.entrance_pose is None:
                 return  # TF noch nicht verfuegbar -- naechster Timer-Tick versucht's erneut
+            x, y, _ = self.entrance_pose
+            self.get_logger().info(f'Tunnel-Eingang gemerkt bei x={x:.2f} y={y:.2f} (odom).')
 
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = self.frame_id
 
+        # tunnel_explorer_node braucht die Eingangspose sofort, nicht erst mit der Wand.
+        self._publish_entrance_pose(header)
+
+        if not self._wall_active:
+            if self._distance_past_entrance() < self.entrance_wall_delay:
+                return
+            self._wall_active = True
+            self.get_logger().info('Bot ist vom Eingang weg -- Eingangssperre aktiv.')
+
         cloud = point_cloud2.create_cloud_xyz32(header, self._wall_points())
         self.pub_entrance.publish(cloud)
 
-        self._publish_entrance_pose(header)
+    def _distance_past_entrance(self):
+        """Wie weit der Bot in Einfahrtrichtung vor der Eintrittslinie steht (m)."""
+        robot = self._lookup_robot_pose()
+        if robot is None:
+            return 0.0
+        x, y, yaw = self.entrance_pose
+        return (robot[0] - x) * math.cos(yaw) + (robot[1] - y) * math.sin(yaw)
 
     def _publish_entrance_pose(self, header):
         x, y, yaw = self.entrance_pose
@@ -125,21 +158,20 @@ class keepout_zone_node(Node):
         pose.pose.orientation.w = math.cos(yaw / 2.0)
         self.pub_entrance_pose.publish(pose)
 
-    def _capture_entrance_pose(self):
+    def _lookup_robot_pose(self):
+        """Aktuelle Pose (x, y, yaw) im frame_id, oder None ohne TF."""
         try:
             tf = self.tf_buffer.lookup_transform(
                 self.frame_id, self.robot_frame, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.get_logger().warn(
-                f'TF-Lookup fuer Eingangs-Pose fehlgeschlagen: {e}', throttle_duration_sec=2.0)
+                f'TF-Lookup fuer Roboterpose fehlgeschlagen: {e}', throttle_duration_sec=2.0)
             return None
 
         x = tf.transform.translation.x
         y = tf.transform.translation.y
         q = tf.transform.rotation
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-
-        self.get_logger().info(f'Tunnel-Eingang gemerkt bei x={x:.2f} y={y:.2f} (odom).')
         return (x, y, yaw)
 
     def _wall_points(self):

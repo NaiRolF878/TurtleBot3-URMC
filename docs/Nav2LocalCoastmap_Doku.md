@@ -9,7 +9,7 @@ Dokumentation für alle, die nicht direkt am Code gearbeitet haben, aber versteh
 Neben der bestehenden PID-Spurregelung (`Lane`-Modus, unverändert) haben wir eine zweite, parallele Fahr-Pipeline auf Basis von **Nav2** (dem Standard-Navigationsframework von ROS2) gebaut. Diese eine Pipeline deckt **zwei unterschiedliche Situationen** ab, die sich beide Infrastruktur teilen (dieselbe Costmap, derselbe MPPI-Regler, derselbe Übergabe-Node), sich aber in ihrem Zweck unterscheiden:
 
 - **Obstacle-Modus:** liegt im Hindernisbereich außerhalb des Tunnels ein Hindernis in der per Kamera erkannten Fahrbahn, übernimmt Nav2 kurzzeitig, weicht aus und bleibt dabei zwischen den Spurlinien. Läuft automatisch, ohne Zeitdruck, mitten im normalen Rennen.
-- **Tunnel-Modus:** eigener, per Schild ausgelöster Streckenabschnitt (im Reglement „Enclosure“): der Roboter fährt in einen geschlossenen Raum mit Hindernissen, muss ihnen ausweichen und **innerhalb eines Zeitlimits** einen Ausgang finden — aber nicht den, durch den er reingefahren ist. **Die Kamera ist dort laut Reglement verboten**, es zählt nur der LiDAR.
+- **Tunnel-Modus:** eigener Streckenabschnitt (im Reglement „Enclosure“), ausgelöst per Schild oder per Button im Debugbild: der Roboter fährt in einen geschlossenen Raum mit Hindernissen, muss ihnen ausweichen und **innerhalb eines Zeitlimits** einen Ausgang finden — aber nicht den, durch den er reingefahren ist. **Die Kamera ist dort laut Reglement verboten**, es zählt nur der LiDAR.
 
 Beide Modi laufen über dieselben Nodes, aktivieren sich aber unabhängig voneinander und nutzen teils unterschiedliche Zusatz-Nodes (siehe Abschnitt 3/4). Die Pipeline läuft die ganze Zeit mit, wird aber nur aktiv, wenn der Roboter tatsächlich im Obstacle- oder Tunnel-Modus ist.
 
@@ -27,14 +27,18 @@ flowchart LR
 
     Lane -- "LiDAR erkennt Hindernis in der Fahrbahn" --> Obstacle
     Obstacle -- "Hindernis laenger weg (entprellt)" --> Lane
-    Lane -- "Tunnel-Schild erkannt" --> Tunnel
-    Obstacle -- "Tunnel-Schild erkannt" --> Tunnel
+    Lane -- "Tunnel-Schild erkannt\noder Button" --> Tunnel
+    Obstacle -- "Tunnel-Schild erkannt\noder Button" --> Tunnel
     Tunnel -- "LiDAR sieht offenen Raum (entprellt)" --> Lane
 ```
 
 - **Lane**: der normale Betrieb, PID-Regler folgt der Spur (unverändert, wie bisher).
 - **Obstacle**: sobald der LiDAR etwas direkt vor dem Roboter erkennt, übernimmt Nav2 kurzzeitig und weicht aus — automatisch, ohne Schild.
-- **Tunnel**: eigener Modus für den geschlossenen Raum, ausgelöst durch ein erkanntes Schild (Erkennung selbst folgt später, sobald klar ist, wie die Schilder aussehen).
+- **Tunnel**: eigener Modus für den geschlossenen Raum. Ausgelöst wird er auf zwei Wegen:
+  - **Schild:** ein Erkennungsmodell sendet `6` (`std_msgs/UInt8`) auf `/detect/sign`. Das Modell ist noch nicht gebaut.
+  - **Button „TUNNEL STARTEN“ im Debugbild:** Jede Challenge läuft einzeln, vor Ort gibt es also keinen Auslöser für die Zustandsmaschine. Der Bot steht dabei direkt vor oder in der Öffnung. Im Tunnel wird daraus „TUNNEL ABBRECHEN“. Nach dem automatischen Austritt springt der Button von selbst zurück.
+
+  Wer ausgelöst hat, steht im Debugbild unter dem Modus: „(von Hand)“ oder „(Schild)“.
 
 `switch_control` merkt sich beim Eintritt in den Tunnel, welcher Modus vorher aktiv war, und stellt genau den beim Verlassen wieder her (nicht stur "zurück zu Lane").
 
@@ -62,10 +66,12 @@ flowchart TB
         SCAN["/scan\nLiDAR 360 Grad"]
         LANE["/detect/lane_mask\nSpur-Pixel (Kamera)"]
         SIGN["/detect/sign\nSchild-Erkennung (noch nicht gebaut)"]
+        BTN["/control/tunnel_request\nButton im Debugbild"]
     end
 
     SCAN --> SC[switch_control]
     SIGN --> SC
+    BTN --> SC
     SC -->|"/control/mode"| ALL[alle anderen Nodes]
 
     LANE --> LCM[lane_costmap_node]
@@ -95,13 +101,16 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet in jedem Modus außer Tun
 ## 4. Die Nodes im Einzelnen
 
 ### `switch_control` — die Zustandsmaschine
-Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern.
+Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer).
+
+### `debug_view` — das Debugbild mit Tunnel-Button
+Zeichnet das Debugbild auf `/lokal/debug_view`, angezeigt in `rqt_image_view`. Unten im Mode-Panel liegt der Tunnel-Button. Ein Klick darauf kommt als Klickposition von `rqt_image_view` auf `/lokal/debug_view_mouse_left` an. Dafür muss in `rqt_image_view` einmal die Checkbox **„Publish click location“** angehakt sein.
 
 ### `lane_costmap_node` — Spurlinien als virtuelle Wände (nicht im Tunnel)
 Wandelt die von der Kamera erkannten Spurlinien-Pixel über die vermessene Bodenhomographie in Meter um und speist sie als virtuelle Wände in den `lane_layer` der local_costmap ein, damit Nav2 beim Ausweichen nicht über die Linien fährt. Außerdem berechnet er die Spurmitte und sendet sie als Pfad (`/lane/center_path`), mit laufend gemessener Spurbreite. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Im Tunnel sendet er nichts und leert beim Eintritt die local_costmap.
 
 ### `keepout_zone_node` — die Eingangs-Sperrzone (nur Tunnel-Modus)
-Merkt sich einmalig, wo der Roboter in den Tunnel eingefahren ist, und blockiert diese Stelle dauerhaft als virtuelle Wand — damit der Roboter nicht durch den Eingang wieder rausfährt. Setzt außerdem bei jedem neuen Tunnel-Eintritt die Explorationskarte (`global_costmap`) zurück, damit sich mehrere Tunnel auf derselben Strecke nicht gegenseitig stören.
+Merkt sich einmalig, wo der Roboter in den Tunnel eingefahren ist, und blockiert diese Stelle dauerhaft als virtuelle Wand — damit der Roboter nicht durch den Eingang wieder rausfährt. Die Wand bleibt an dieser Stelle, wird aber erst gesendet, wenn der Bot `entrance_wall_delay` weit davon weggefahren ist. Vorher stünde er selbst in ihr. Die Wand nach hinten zu verschieben wäre keine Lösung, weil dann eine Lücke zum Eingang entstünde. Setzt außerdem bei jedem neuen Tunnel-Eintritt die Explorationskarte (`global_costmap`) zurück, damit sich mehrere Tunnel auf derselben Strecke nicht gegenseitig stören.
 
 ### `tunnel_explorer_node` — die Ausgangssuche (nur Tunnel-Modus)
 Der "Kopf" der Exploration: sucht auf der Explorationskarte nach unerkundeten Bereichen, wählt den vielversprechendsten aus (weit weg vom Eingang, aber noch schnell erreichbar) und lässt dorthin einen echten Pfad berechnen. Details siehe Abschnitt 7.
@@ -151,6 +160,7 @@ Sendet in jedem Modus außer Tunnel. Details: `docs/Nav2_Costmap_Werte.md`, Absc
 | `entrance_wall_width` | 0.6 m | Wie breit die virtuelle Sperrwand am Tunneleingang ist | **An die reale Breite der Tunnelöffnung anpassen** — zu schmal = Roboter kann seitlich noch vorbei; zu breit = blockiert unnötig viel vom Raum |
 | `entrance_wall_points` | 9 | Wie viele Einzelpunkte die Wand hat | Mehr = dichtere, lückenlosere Wand; braucht kaum mehr Rechenzeit |
 | `publish_rate` | 5.0 Hz | Wie oft die Wand neu veröffentlicht wird | Niedriger reicht meist (die Wand bewegt sich ja nicht), höher schadet aber auch nicht |
+| `entrance_wall_delay` | 0.16 m | Wie weit der Bot von der Eintrittslinie weg sein muss, bevor die Wand erscheint. Abgeleitet: Heck 0,101 m (Footprint) + `footprint_padding` 0,01 m + eine Zelle 0,05 m | Kleiner = Bot steht im ersten Moment in der Wand und MPPI blockiert |
 
 ### 5.4 `tunnel_explorer_node.py` → Block `/tunnel_explorer_node` in `Lane_Costmap.yaml`
 
@@ -249,6 +259,7 @@ Das ist bewusst **kein SLAM** (keine Positions-Korrektur, keine "Loop Closure") 
 - [ ] `inflation_radius` der local_costmap in der Enclosure testen (Abstand zu Wänden vs. enge Durchfahrten)
 - [ ] `tunnel_exit_open_distance`/`tunnel_exit_open_ratio` mit dem echten Roboter/der echten Strecke testen
 - [ ] Kompletten Tunnel-Durchlauf auf echter Hardware testen (bisher nur am Schreibtisch entworfen, nicht gelaufen)
+- [ ] In `rqt_image_view` „Publish click location“ anhaken und prüfen, ob der Tunnel-Button umschaltet
 - [ ] Schild-Erkennung bauen, sobald klar ist, wie die Schilder aussehen (aktuell manuell testbar per `ros2 topic pub /detect/sign std_msgs/msg/UInt8 "{data: 6}"`)
 
 **Allgemein:**

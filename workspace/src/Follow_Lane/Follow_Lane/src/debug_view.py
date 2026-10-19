@@ -13,7 +13,8 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from follow_lane_msg.msg import FollowLaneDebug
 from sensor_msgs.msg import Image, BatteryState, PointCloud2
-from std_msgs.msg import UInt8
+from std_msgs.msg import Bool, String, UInt8
+from geometry_msgs.msg import Point
 
 from Follow_Lane.src.switch_control import ControlType
 
@@ -21,6 +22,13 @@ from Follow_Lane.src.switch_control import ControlType
 
 BATT_FULL_V = 12.6    # 4.2 V/Zelle
 BATT_EMPTY_V = 11.0
+
+# Kopfzeile ueber dem Kamerabild und Breite der beiden Panels daneben -- daraus
+# ergibt sich, wo der Tunnel-Button im fertigen Bild liegt.
+HEAD_H = 40
+PANEL_W = 230
+# Tunnel-Button im Mode-Panel (Panel-Koordinaten: x0, y0, x1, y1).
+TUNNEL_BUTTON = (8, 290, PANEL_W - 10, 345)
 
 # Farbe pro Fahrmodus (BGR), damit auf einen Blick erkennbar ist, wer gerade faehrt.
 MODE_COLOR = {
@@ -60,9 +68,18 @@ class debug_view(Node):
         # detect_lane -> lane_costmap_node -> Costmap wirklich Daten liefert.
         self.sub_lane_obstacles = self.create_subscription(
             PointCloud2, '/detect/lane_obstacles', self.cb_get_lane_obstacles, 1)
+        self.sub_tunnel_source = self.create_subscription(
+            String, '/control/tunnel_source', self.cb_get_tunnel_source, 1)
+        # Klicks ins Debugbild: rqt_image_view sendet die Position in Bildpixeln,
+        # wenn dort "Publish click location" angehakt ist (Standard-Topic:
+        # <Bildtopic>_mouse_left).
+        self.declare_parameter('click_topic', '/lokal/debug_view_mouse_left')
+        self.sub_click = self.create_subscription(
+            Point, self.get_parameter('click_topic').value, self.cb_click, 1)
 
         #Publisher
         self.pub_debug_image = self.create_publisher(Image,'/lokal/debug_view',1)
+        self.pub_tunnel_request = self.create_publisher(Bool, '/control/tunnel_request', 1)
 
         #Variablen
         self.follow_lane_debug = None
@@ -72,6 +89,10 @@ class debug_view(Node):
         self.battery_level = None
 
         self.control_mode = None
+        self.tunnel_source = ''
+        # Lage des Tunnel-Buttons im zuletzt gesendeten Bild (x0, y0, x1, y1), None
+        # solange noch kein Bild gebaut wurde.
+        self._tunnel_button = None
         self.lane_obstacle_points = 0
         self.lane_obstacle_stamp = None
 
@@ -93,6 +114,22 @@ class debug_view(Node):
             self.control_mode = ControlType(msg.data)
         except ValueError:
             self.control_mode = None
+
+    def cb_get_tunnel_source(self, msg):
+        self.tunnel_source = msg.data
+
+    def cb_click(self, point):
+        if self._tunnel_button is None or self.control_mode is None:
+            return
+        x0, y0, x1, y1 = self._tunnel_button
+        if not (x0 <= point.x <= x1 and y0 <= point.y <= y1):
+            return
+        # Ausdruecklich Start oder Abbruch statt Umschalten: ein doppelt gezaehlter
+        # Klick darf den Tunnel nicht sofort wieder beenden.
+        req = Bool()
+        req.data = self.control_mode != ControlType.Tunnel
+        self.pub_tunnel_request.publish(req)
+        self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
 
     def cb_get_lane_obstacles(self, cloud):
         # width * height = Punktanzahl, ohne die Punkte dekodieren zu muessen.
@@ -158,7 +195,7 @@ class debug_view(Node):
         lane_center_y = (self.follow_lane_debug.center_yellow_y + self.follow_lane_debug.center_white_y) / 2
         cv2.circle(raw, proj(self.follow_lane_debug.lane_center, lane_center_y), 6, (255, 255, 255), -1, cv2.LINE_AA)
 
-        panel_w = 230
+        panel_w = PANEL_W
 
         panelGeneric = np.zeros((raw_h, panel_w, 3), dtype=np.uint8)
         cv2.line(panelGeneric,(panel_w-2,5),(panel_w-2,raw_h-5),thickness= 1 ,color=(90,90,90),lineType=cv2.LINE_AA)
@@ -173,7 +210,7 @@ class debug_view(Node):
         panelMode = self.build_mode_panel(raw_h, panel_w)
 
         total_w = raw_w + panel_w * 2
-        head_panel = np.full((40, total_w, 3), (220,220,220) ,dtype=np.uint8)
+        head_panel = np.full((HEAD_H, total_w, 3), (220,220,220) ,dtype=np.uint8)
         now = dt.datetime.now()
         cv2.putText(head_panel,now.strftime("%d.%m.%Y"),(10,28),cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(0,0,0)    ,2  ,cv2.LINE_AA)
         cv2.putText(head_panel,now.strftime("%H:%M"),(200,28),cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(0,0,0)    ,2  ,cv2.LINE_AA)
@@ -182,6 +219,11 @@ class debug_view(Node):
 
         final_debug_image = np.hstack([raw, panelGeneric, panelMode])
         final_debug_image = np.vstack([head_panel,final_debug_image])
+
+        if self.control_mode is not None:
+            bx0, by0, bx1, by1 = TUNNEL_BUTTON
+            off_x, off_y = raw_w + panel_w, HEAD_H
+            self._tunnel_button = (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1)
 
         msg = self.bridge.cv2_to_imgmsg(final_debug_image, encoding='bgr8')
         msg.header = self.follow_lane_debug.raw_image.header
@@ -202,6 +244,11 @@ class debug_view(Node):
         color = MODE_COLOR.get(self.control_mode, (200,200,200))
         cv2.putText(panel, self.control_mode.name, (8,85),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 2, cv2.LINE_AA)
+        if self.control_mode == ControlType.Tunnel and self.tunnel_source:
+            # Wer den Tunnel ausgeloest hat: Schildmodell oder Button.
+            label = 'von Hand' if self.tunnel_source == 'Hand' else 'Schild'
+            cv2.putText(panel, f'({label})', (8,106),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
         # Wer gerade /cmd_vel bespielt -- im Obstacle/Tunnel-Modus ist der PID aus.
         driver = MODE_DRIVER.get(self.control_mode, 'kein Regler')
@@ -211,7 +258,23 @@ class debug_view(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
         self.draw_lane_obstacle_status(panel)
+        self.draw_tunnel_button(panel)
         return panel
+
+    def draw_tunnel_button(self, panel):
+        """Button zum Starten/Abbrechen des Tunnelmodus. Springt nach dem
+        automatischen Austritt von selbst zurueck, weil er nur den Modus zeigt."""
+        x0, y0, x1, y1 = TUNNEL_BUTTON
+        in_tunnel = self.control_mode == ControlType.Tunnel
+        fill = (60, 60, 200) if in_tunnel else MODE_COLOR[ControlType.Tunnel]
+        ink = (255, 255, 255) if in_tunnel else (0, 0, 0)
+        text = 'TUNNEL ABBRECHEN' if in_tunnel else 'TUNNEL STARTEN'
+
+        cv2.rectangle(panel, (x0, y0), (x1, y1), fill, -1)
+        cv2.rectangle(panel, (x0, y0), (x1, y1), (230, 230, 230), 1)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        cv2.putText(panel, text, (x0 + (x1 - x0 - tw) // 2, y0 + (y1 - y0 + th) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, ink, 2, cv2.LINE_AA)
 
     def draw_lane_obstacle_status(self, panel):
         cv2.putText(panel, 'Spur -> Costmap:', (8,215),

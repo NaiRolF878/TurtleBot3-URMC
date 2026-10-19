@@ -12,5 +12,8 @@ echo ""
 echo "Not-Aus bereithalten -- der Bot faehrt eigenstaendig, sobald Bilder ankommen:"
 echo "  ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist \"{}\""
 echo ""
+echo "Tunnel von Hand: im Fenster rqt_image_view einmal \"Publish click location\""
+echo "anhaken, dann im Debugbild auf TUNNEL STARTEN klicken."
+echo ""
 
 ros2 launch Follow_Lane nav2_obstacle.launch.py

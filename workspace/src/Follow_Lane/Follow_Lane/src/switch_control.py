@@ -7,7 +7,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange
-from std_msgs.msg import UInt8
+from std_msgs.msg import Bool, String, UInt8
 from sensor_msgs.msg import LaserScan
 
 
@@ -26,12 +26,13 @@ class switch_control(Node):
     Lane <-> Obstacle: per LiDAR, sobald etwas im Pruefkegel naeher als
     obstacle_trigger_distance liegt (mit Entprellung zurueck).
 
-    -> Tunnel: per Schild auf /detect/sign. Der Detektor dafuer fehlt noch,
-    manuell testbar mit
-      ros2 topic pub /detect/sign std_msgs/msg/UInt8 "{data: 6}"
-    Zurueck, sobald der LiDAR freien Raum sieht; wiederhergestellt wird der
-    Modus von vor dem Tunnel. Bewusst ohne Kamera: in der Enclosure ist sie laut
-    Reglement verboten.
+    -> Tunnel: per Schild auf /detect/sign (UInt8, Wert 6) oder von Hand ueber
+    den Button im Debugbild (/control/tunnel_request, True). Von Hand ist noetig,
+    weil jede Challenge einzeln laeuft und es vor Ort keinen Ausloeser fuer die
+    Zustandsmaschine gibt. Wer ausgeloest hat, steht auf /control/tunnel_source.
+    Zurueck, sobald der LiDAR freien Raum sieht, oder von Hand (False);
+    wiederhergestellt wird der Modus von vor dem Tunnel. Bewusst ohne Kamera: in
+    der Enclosure ist sie laut Reglement verboten.
     """
 
     def __init__(self):
@@ -63,14 +64,18 @@ class switch_control(Node):
             LaserScan, '/scan', self.cbScan, qos_profile_sensor_data)
         # Publisher folgt mit der Schild-Detektor-Node
         self.sub_sign = self.create_subscription(UInt8, '/detect/sign', self.cbSign, 1)
+        self.sub_tunnel_request = self.create_subscription(
+            Bool, '/control/tunnel_request', self.cbTunnelRequest, 1)
 
         self.pub_control = self.create_publisher(UInt8, '/control/mode', 1)
+        self.pub_tunnel_source = self.create_publisher(String, '/control/tunnel_source', 1)
 
         # Zyklisch senden, damit auch spaeter startende Nodes den Mode bekommen.
         self.timer = self.create_timer(0.5, self.cbPubControlMode)
 
         self.current_control_mode = ControlType.Lane
         self._mode_before_tunnel = None
+        self._tunnel_source = ''          # 'Schild' oder 'Hand', solange im Tunnel
         self._obstacle_clear_since = None
         self._tunnel_exit_since = None
 
@@ -83,6 +88,10 @@ class switch_control(Node):
         msg.data = self.current_control_mode.value
         self.pub_control.publish(msg)
 
+        source = String()
+        source.data = self._tunnel_source
+        self.pub_tunnel_source.publish(source)
+
     def cbSign(self, msg):
         try:
             sign = ControlType(msg.data)
@@ -91,14 +100,28 @@ class switch_control(Node):
             return
 
         if sign == ControlType.Tunnel:
-            if self.current_control_mode != ControlType.Tunnel:
-                self._mode_before_tunnel = self.current_control_mode
-                self.current_control_mode = ControlType.Tunnel
-                self._tunnel_exit_since = None
-                self.get_logger().info('Tunnel-Schild erkannt -> wechsle zu Tunnel-Modus.')
+            self._enter_tunnel('Schild')
         else:
             self.get_logger().debug(
                 f'Schild {sign.name} erkannt, dafuer ist noch keine Aktion definiert.')
+
+    def cbTunnelRequest(self, msg):
+        if msg.data:
+            self._enter_tunnel('Hand')
+        elif self.current_control_mode == ControlType.Tunnel:
+            self.get_logger().info('Tunnel von Hand abgebrochen.')
+            self._leave_tunnel()
+
+    def _enter_tunnel(self, source):
+        if self.current_control_mode == ControlType.Tunnel:
+            return
+        self._mode_before_tunnel = self.current_control_mode
+        self.current_control_mode = ControlType.Tunnel
+        self._tunnel_source = source
+        self._tunnel_exit_since = None
+        self.get_logger().info(f'Tunnel ausgeloest ({source}) -> wechsle zu Tunnel-Modus.')
+        # Sofort senden statt bis zu 0.5 s auf den Timer zu warten.
+        self.cbPubControlMode()
 
     def cbScan(self, scan):
         self._read_params()
@@ -177,7 +200,9 @@ class switch_control(Node):
         self.get_logger().info(f'Tunnel verlassen -> zurueck zu {restored.name}.')
         self.current_control_mode = restored
         self._mode_before_tunnel = None
+        self._tunnel_source = ''
         self._tunnel_exit_since = None
+        self.cbPubControlMode()
 
 
 def main(args=None):
