@@ -245,6 +245,7 @@ def main():
     # Gegenprobe gegen die bisherige, aus cx/Neigung/Roll gerechnete Projektion.
     if os.path.isfile(INTRINSICS):
         K, D, cw, ch = cg.load_intrinsics(INTRINSICS)
+        K = cg.undistorted_camera_matrix(K, D, cw, ch, cg.intrinsics_model(INTRINSICS))
         print(f'\n  Zum Vergleich: die bisherige Modell-Projektion setzt "geradeaus" auf '
               f'Spalte u = cx = {K[0, 2]:.1f} (Bildmitte {w / 2:.0f}).')
         gy = cv2.perspectiveTransform(

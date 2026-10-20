@@ -116,6 +116,21 @@ class debug_view(Node):
         lane_center_y = (self.follow_lane_debug.center_yellow_y + self.follow_lane_debug.center_white_y) / 2
         cv2.circle(raw, proj(self.follow_lane_debug.lane_center, lane_center_y), 6, (255, 255, 255), -1, cv2.LINE_AA)
 
+
+        # Polygone aus detect_lane liegen schon im Koordinatensystem von raw -- kein proj() noetig.
+        # poly ist ein geometry_msgs/Polygon, OpenCV braucht ein int32-Array der Form (N, 2).
+        for poly in self.follow_lane_debug.polygons:
+            pts = np.array([[pt.x, pt.y] for pt in poly.points], dtype=np.int32)
+            cv2.polylines(raw,[pts],isClosed=True, color=(0, 0, 255), thickness=2, lineType=cv2.LINE_AA)
+
+        # Waagerechte Kanten hellgruen, senkrechte neonpink (BGR)
+        for lines, color in ((self.follow_lane_debug.horizontal_lines, (144, 238, 144)),
+                             (self.follow_lane_debug.vertical_lines,   (240, 16, 255))):
+            for line in lines:
+                a, b = line.points[0], line.points[1]
+                cv2.line(raw, (int(a.x), int(a.y)), (int(b.x), int(b.y)), color, 3, cv2.LINE_AA)
+
+
         panel_w = 230
 
         panelGeneric = np.zeros((raw_h, panel_w, 3), dtype=np.uint8)

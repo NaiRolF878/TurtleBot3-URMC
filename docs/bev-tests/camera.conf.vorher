@@ -1,0 +1,41 @@
+# Kameraeinstellungen fuer die Pi Cam 2 (IMX219). Wird von bot-up.sh und cam-mode.sh gesourct --
+# hier aendern, nicht in den Skripten.
+
+# --- Fahren (bot-up.sh, cam-mode.sh lane). Die Kalibrierung gilt NUR fuer 800x600. ---
+# 4:3 beibehalten -- 16:9 landet beim IMX219 im beschnittenen Sensormodus (docs/MEMORY.md).
+CAM_W=800
+CAM_H=600
+CAM_Q=80
+# Bilddauer in Mikrosekunden, min und max gleich = feste Rate. 33333 us = 30 Hz.
+# Ohne diesen Wert waehlt libcamera selbst und laesst die Rate je nach Belichtung sinken.
+CAM_FRAME_US=33333
+
+# --- Datensatz (cam-mode.sh full, dataset_capture.sh) ---
+CAM_FULL_W=1600
+CAM_FULL_H=1200
+CAM_FULL_Q=90
+CAM_FULL_FRAME_US=200000     # 5 Hz
+
+# Sensormodus festnageln: 1640x1232 = 2x2-Binning ueber die VOLLE Sensorflaeche.
+# libcamera waehlt den bisher auch von selbst, koennte das nach einem Update aber still
+# aendern. Startet die Kamera damit nicht, startet _camera-start.sh sie ohne neu.
+CAM_SENSOR_MODE="1640:1232"
+
+# Fester Weissabgleich gegen springende Farben (HSV-Schwellen!). Format "rot,blau",
+# IMMER mit Dezimalpunkt (sonst wird es ein int-Array und camera_ros lehnt es ab).
+# Leer = automatischer Weissabgleich. Messen mit: python3 scripts/tb/awb-calib.py --write
+# Gilt fuer genau dieses Licht -- in einer anderen Halle neu messen.
+CAM_COLOUR_GAINS=""
+
+# Drehung des Bildes im Sensor (camera_ros-Parameter "orientation", 0/90/180/270), in Hardware.
+# 0 = keine Drehung. Das alte Modul brauchte 180; das Weitwinkel-Modul (Okt. 2026) sitzt so, dass
+# das Bild ohne Drehung aufrecht ist.
+# ACHTUNG: Intrinsik, Extrinsik und Bodenhomographie gelten fuer die jeweilige Einbaulage.
+CAM_ORIENTATION=0
+
+# libcamera-Tuning-Datei (Farbschattierung der Linse, Farbmatrix, Weissabgleich, Belichtung).
+# Liegt in scripts/tb/tuning/, wird bei jedem Kamerastart nach ~/tuning/ auf den Bot kopiert und per
+# LIBCAMERA_RPI_TUNING_FILE benutzt. Die Standarddatei auf dem Bot bleibt unangetastet.
+# imx219_weitwinkel.json: fuer das Weitwinkel-Modul -- Standard-Tuning machte die Bildraender magenta
+# (gemessen Farbabweichung Rand/Mitte 28.2 -> 2.1). Leer = Standard-Tuning von libcamera.
+CAM_TUNING="imx219_weitwinkel.json"

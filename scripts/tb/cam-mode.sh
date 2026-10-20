@@ -52,17 +52,17 @@ echo "  Sensor: \$SENSOR"
 case "$MODE-\$SENSOR" in
     lane-imx708)
         CAM_W=800;  CAM_H=600;  CAM_Q=80; CAM_FRAME_US=33333;  CAM_REL=best_effort
-        CAM_SENSOR_MODE=""; CAM_COLOUR_GAINS=""
+        CAM_SENSOR_MODE=""; CAM_COLOUR_GAINS=""; CAM_ORIENTATION=""; CAM_TUNING=""
         echo "  WARNUNG: 800x600 ist bei der IMX708 ein Crop (nur 50 % Bildwinkel)." ;;
     full-imx708)
         CAM_W=1920; CAM_H=1080; CAM_Q=90; CAM_FRAME_US=200000; CAM_REL=reliable
-        CAM_SENSOR_MODE=""; CAM_COLOUR_GAINS="" ;;
+        CAM_SENSOR_MODE=""; CAM_COLOUR_GAINS=""; CAM_ORIENTATION=""; CAM_TUNING="" ;;
     lane-*)
         CAM_W=$CAM_W; CAM_H=$CAM_H; CAM_Q=$CAM_Q; CAM_FRAME_US=$CAM_FRAME_US; CAM_REL=best_effort
-        CAM_SENSOR_MODE='$CAM_SENSOR_MODE'; CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS' ;;
+        CAM_SENSOR_MODE='$CAM_SENSOR_MODE'; CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS'; CAM_ORIENTATION='$CAM_ORIENTATION'; CAM_TUNING='$CAM_TUNING' ;;
     full-*)
         CAM_W=$CAM_FULL_W; CAM_H=$CAM_FULL_H; CAM_Q=$CAM_FULL_Q; CAM_FRAME_US=$CAM_FULL_FRAME_US; CAM_REL=reliable
-        CAM_SENSOR_MODE='$CAM_SENSOR_MODE'; CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS' ;;
+        CAM_SENSOR_MODE='$CAM_SENSOR_MODE'; CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS'; CAM_ORIENTATION='$CAM_ORIENTATION'; CAM_TUNING='$CAM_TUNING' ;;
 esac
 EOF
 )
@@ -71,4 +71,10 @@ $(cat "$SCRIPT_DIR/_camera-start.sh")
 pgrep -f camera_node >/dev/null"
 
 echo "=== Kamera auf '$MODE' umstellen ($BOT_IP) ==="
+# Tuning-Datei mitschicken (Details in camera.conf)
+if [ -n "$CAM_TUNING" ]; then
+    ssh "$BOT_USER@$BOT_IP" "mkdir -p ~/tuning" && \
+        scp -q "$SCRIPT_DIR/tuning/$CAM_TUNING" "$BOT_USER@$BOT_IP:tuning/$CAM_TUNING" || \
+        echo "  WARNUNG: Tuning-Datei $CAM_TUNING konnte nicht auf den Bot kopiert werden."
+fi
 ssh "$BOT_USER@$BOT_IP" "bash -s" <<< "$REMOTE"

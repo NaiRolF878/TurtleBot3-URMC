@@ -96,10 +96,16 @@ EOF
 # Ersatztext in Anfuehrungszeichen: sonst wuerde bash >= 5.2 jedes & darin als
 # "gefundener Text" interpretieren (patsub_replacement).
 CAMERA_START="CAM_W=$CAM_W CAM_H=$CAM_H CAM_Q=$CAM_Q CAM_FRAME_US=$CAM_FRAME_US CAM_REL=best_effort
-CAM_SENSOR_MODE='$CAM_SENSOR_MODE' CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS'
+CAM_SENSOR_MODE='$CAM_SENSOR_MODE' CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS' CAM_ORIENTATION='$CAM_ORIENTATION' CAM_TUNING='$CAM_TUNING'
 $(cat "$SCRIPT_DIR/_camera-start.sh")"
 REMOTE="${REMOTE/__CAMERA_START__/"$CAMERA_START"}"
 REMOTE=${REMOTE//__DOMAIN_ID__/$BOT_DOMAIN_ID}
+# Tuning-Datei mitschicken (Details in camera.conf)
+if [ -n "$CAM_TUNING" ]; then
+    ssh "$BOT_USER@$BOT_IP" "mkdir -p ~/tuning" && \
+        scp -q "$SCRIPT_DIR/tuning/$CAM_TUNING" "$BOT_USER@$BOT_IP:tuning/$CAM_TUNING" || \
+        echo "  WARNUNG: Tuning-Datei $CAM_TUNING konnte nicht auf den Bot kopiert werden."
+fi
 ssh "$BOT_USER@$BOT_IP" "bash -s" <<< "$REMOTE" || exit 1
 
 echo ""
@@ -107,13 +113,26 @@ echo "=== Gegenprobe vom Laptop ==="
 # Der Daemon cacht nach Bot-Neustart oder IP-Wechsel falsch -> hier bewusst --no-daemon.
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
 export ROS_DOMAIN_ID=$BOT_DOMAIN_ID
-sleep 3
-FOUND=$(timeout 25 ros2 topic list --no-daemon 2>/dev/null | grep -cE "^/(scan|odom|battery_state|camera/image_raw/compressed)$")
+# Bis zu 3 Versuche: nach dem Start (und mit WLAN + Kabel gleichzeitig) tauchen nicht alle
+# Topics sofort auf -- einmal pruefen meldete sonst Fehler, obwohl kurz darauf alles da war.
+EXPECTED="/scan /odom /battery_state /camera/image_raw/compressed"
+for attempt in 1 2 3; do
+    sleep 3
+    TOPICS=$(timeout 25 ros2 topic list --no-daemon 2>/dev/null)
+    MISSING=""
+    for t in $EXPECTED; do
+        grep -qx "$t" <<< "$TOPICS" || MISSING="$MISSING $t"
+    done
+    FOUND=$(( 4 - $(wc -w <<< "$MISSING") ))
+    [ -z "$MISSING" ] && break
+    [ "$attempt" -lt 3 ] && echo "  Versuch $attempt: $FOUND von 4, fehlt:$MISSING -- warte kurz ..."
+done
 echo "  $FOUND von 4 erwarteten Topics sichtbar (scan, odom, battery_state, camera compressed)"
-if [ "$FOUND" -lt 4 ]; then
-    echo "  Fehlt etwas, Logs auf dem Bot pruefen:"
-    echo "    botssh 'tail -30 ~/logs/bringup.log'"
-    echo "    botssh 'tail -30 ~/logs/camera.log'"
+if [ -n "$MISSING" ]; then
+    echo "  FEHLT:$MISSING"
+    echo "  Logs auf dem Bot pruefen:"
+    case "$MISSING" in *camera*) echo "    botssh 'tail -30 ~/logs/camera.log'    (Kamera)";; esac
+    case "$MISSING" in *scan*|*odom*|*battery*) echo "    botssh 'tail -30 ~/logs/bringup.log'   (LiDAR / OpenCR)";; esac
 fi
 
 # Hoerbare Rueckmeldung: alles da -> SOUND_OK, sonst SOUND_FAIL.

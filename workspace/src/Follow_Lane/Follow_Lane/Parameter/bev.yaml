@@ -1,0 +1,10 @@
+# Metrische Vogelperspektive (BEV) -- gemeinsame Definition fuer ingress_node (erzeugt /lokal/bev)
+# und alle Nodes, die sie lesen. Hier aendern, nicht im Code.
+#
+# Bodenkoordinaten: X vorwaerts ab RADACHSE, Y nach links, in Metern.
+# Bildlage: oben = x_max (fern), unten = x_min (nah), Bildmitte (Spalte) = Y 0 = Fahrtrichtung.
+# Pixel (u, v) -> Boden:  X = x_max - (v + 0.5) * res_m,   Y = y_half - (u + 0.5) * res_m
+x_min_m: 0.05      # naeher sieht die Kamera nichts (Linse 5,8 cm vor der Achse)
+x_max_m: 0.60      # dahinter wird es in Fahrtrichtung sehr unscharf (docs/bev-tests/README.md)
+y_half_m: 0.40     # volle sichtbare Breite bei ~60 cm
+res_m: 0.0025      # 2,5 mm pro Pixel -> 320 x 220 px

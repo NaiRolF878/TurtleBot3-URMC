@@ -19,3 +19,7 @@ int32 center_white_y
 int32 lane_center
 
 int32 crop_im_size
+
+geometry_msgs/Polygon[] polygons
+geometry_msgs/Polygon[] horizontal_lines
+geometry_msgs/Polygon[] vertical_lines

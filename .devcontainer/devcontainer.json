@@ -19,9 +19,26 @@
         "Ranch-Hand-Robotics.urdf-editor",
         "ms-vscode.cpptools",
         "ms-python.python",
+        // Statt Pylance: Pylance meldete in diesem Container immer wieder Builtins
+        // (int, len, super ...) als "not defined"; reines Pyright mit gleichem Kern nicht.
+        "ms-pyright.pyright",
         "anthropic.claude-code",
         "ms-azuretools.vscode-containers"
-      ]
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.languageServer": "None",
+        "python.analysis.typeCheckingMode": "off",
+        // ROS-Pakete fuer Autovervollstaendigung (rclpy, Nachrichtentypen, eigenes follow_lane_msg).
+        // OpenCV-Stubs liegen in ./typings -- Pyright findet den Ordner von selbst.
+        "python.analysis.extraPaths": [
+          "/opt/ros/humble/lib/python3.10/site-packages",
+          "/opt/ros/humble/local/lib/python3.10/dist-packages",
+          "/root/turtlebot3_ws/install/turtlebot3_msgs/local/lib/python3.10/dist-packages",
+          "/workspaces/TurtleBot3-URMC/workspace/install/follow_lane_msg/local/lib/python3.10/dist-packages",
+          "/workspaces/TurtleBot3-URMC/workspace/install/Follow_Lane/lib/python3.10/site-packages"
+        ]
+      }
     }
   },
   "containerEnv": { "ROS_DOMAIN_ID": "33" },
@@ -30,5 +47,5 @@
   // der X-Socket gehoert aber dem Host-User. xhost ist nicht persistent, daher bei
   // jedem Containerstart neu. "|| true": auf Hosts ohne X (z.B. SSH) nicht abbrechen.
   "initializeCommand": "xhost +local:root || true",
-  "postCreateCommand": "mkdir -p ~/turtlebot3_ws/src && cd ~/turtlebot3_ws/src && git clone -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git && cd ~/turtlebot3_ws && colcon build --symlink-install && echo 'source ~/turtlebot3_ws/install/setup.bash' >> ~/.bashrc && echo '[ -f /workspaces/TurtleBot3-URMC/workspace/install/setup.bash ] && source /workspaces/TurtleBot3-URMC/workspace/install/setup.bash' >> ~/.bashrc && echo \"alias tb='bash /workspaces/TurtleBot3-URMC/scripts/tb/launch.sh'\" >> ~/.bashrc && echo \"alias botssh='bash /workspaces/TurtleBot3-URMC/scripts/tb/ssh-bot.sh'\" >> ~/.bashrc && echo \"alias botcheck='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-check.sh'\" >> ~/.bashrc && echo \"alias botup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-up.sh'\" >> ~/.bashrc && echo \"alias botdown='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-down.sh'\" >> ~/.bashrc"
+  "postCreateCommand": "mkdir -p ~/turtlebot3_ws/src && cd ~/turtlebot3_ws/src && git clone -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git && cd ~/turtlebot3_ws && colcon build --symlink-install && echo 'source ~/turtlebot3_ws/install/setup.bash' >> ~/.bashrc && echo '[ -f /workspaces/TurtleBot3-URMC/workspace/install/setup.bash ] && source /workspaces/TurtleBot3-URMC/workspace/install/setup.bash' >> ~/.bashrc && echo \"alias tb='bash /workspaces/TurtleBot3-URMC/scripts/tb/launch.sh'\" >> ~/.bashrc && echo \"alias botssh='bash /workspaces/TurtleBot3-URMC/scripts/tb/ssh-bot.sh'\" >> ~/.bashrc && echo \"alias botcheck='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-check.sh'\" >> ~/.bashrc && echo \"alias botup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-up.sh'\" >> ~/.bashrc && echo \"alias botdown='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-down.sh'\" >> ~/.bashrc && echo \"alias lanup='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh up'\" >> ~/.bashrc && echo \"alias landown='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh down'\" >> ~/.bashrc && echo \"alias lanstatus='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh status'\" >> ~/.bashrc && echo \"alias lansetup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-lan-setup.sh'\" >> ~/.bashrc"
 }

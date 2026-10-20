@@ -39,18 +39,58 @@ def load_intrinsics(path):
     return K, D, int(d['image_width']), int(d['image_height'])
 
 
+def intrinsics_model(path):
+    """'equidistant' (Fisheye, Weitwinkel-Modul) oder 'plumb_bob' (normales Modell)."""
+    with open(path) as f:
+        return yaml.safe_load(f).get('distortion_model', 'plumb_bob')
+
+
+def is_fisheye(model):
+    return model in ('equidistant', 'fisheye')
+
+
+def undistorted_camera_matrix(K, D, w, h, model, balance=0.0):
+    """Kameramatrix des ENTZERRTEN Bildes -- genau so, wie ingress_node.undistort() es erzeugt.
+
+    plumb_bob: ingress_node entzerrt mit newK = K, also bleibt K.
+    Fisheye:   ingress_node erzeugt ein NEUES K (estimateNewCameraMatrixForUndistortRectify,
+               abhaengig von balance; bei 0.0 etwa fx 294 statt 385). Wer auf /lokal/raw_image
+               misst und das rohe K nimmt, rechnet mit falscher Brennweite -> Hoehe/Neigung falsch.
+    balance MUSS zum Parameter von ingress_node passen (Default beider: 0.0).
+    """
+    if not is_fisheye(model):
+        return K
+    return cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+        K, np.asarray(D, dtype=np.float64).reshape(4, 1), (w, h), np.eye(3), balance=balance)
+
+
 def load_extrinsics(path):
     with open(path) as f:
         return yaml.safe_load(f)
 
 
-def check_intrinsics(K, D, w, h):
+def check_intrinsics(K, D, w, h, model='plumb_bob'):
     """Plausibilitaet der Intrinsik. Gibt (ok, zeilen) zurueck; Aufrufer druckt selbst.
     Haeufigste Fehlerquelle: zu wenig Pose-Vielfalt -> Hauptpunkt und tangentiale
     Verzeichnung werden gegeneinander verrechnet.
     """
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     d = D.ravel()
+    if is_fisheye(model):
+        # Weitwinkel-Modul (Okt. 2026): aufgeschraubte Linse, Hauptpunkt sitzt ein paar Prozent
+        # neben der Mitte -- das ist echt, kein Kalibrierfehler. Kein p1/p2 im Fisheye-Modell.
+        off_x, off_y = (cx - w / 2) / w, (cy - h / 2) / h
+        hfov = math.degrees(w / fx)            # equidistant: theta_rand = (w/2) / fx
+        info = (f'Fisheye, HFOV {hfov:.0f}deg   Hauptpunkt {off_x * 100:+.1f}% x / '
+                f'{off_y * 100:+.1f}% y von der Bildmitte')
+        warn = []
+        if abs(off_x) > 0.05 or abs(off_y) > 0.05:
+            warn.append(f'Hauptpunkt ({cx:.0f}, {cy:.0f}) liegt mehr als 5 % neben der Bildmitte.')
+        if abs(fx - fy) / fx > 0.02:
+            warn.append(f'fx = {fx:.1f} vs fy = {fy:.1f} weichen > 2 % ab -- Kalibrierung pruefen.')
+        if not 90 <= hfov <= 200:
+            warn.append(f'HFOV {hfov:.0f}deg unplausibel fuer das Weitwinkel-Modul (~120deg).')
+        return (not warn), [info] + warn
     p1, p2 = float(d[2]), float(d[3])
     off_x = (cx - w / 2) / w
     off_y = (cy - h / 2) / h
@@ -79,9 +119,19 @@ def check_intrinsics(K, D, w, h):
     return (not warn), [info] + warn
 
 
-def _rot_ground_to_cam(pitch_deg, roll_deg):
-    """Rotationsmatrix Bodensystem -> Kamerasystem fuer die gegebene Kameralage."""
+def _rot_ground_to_cam(pitch_deg, roll_deg, yaw_deg=0.0):
+    """Rotationsmatrix Bodensystem -> Kamerasystem fuer die gegebene Kameralage.
+
+    yaw_deg: Kamera um die Senkrechte gedreht, positiv = schaut nach LINKS gegen die
+    Fahrtrichtung (gemessen per Fahrtest, docs/bev-tests/README.md). Ein Punkt genau
+    voraus erscheint dann rechts der Bildmitte. Auf den Horizont hat Yaw keinen Einfluss.
+    """
     th, ph = math.radians(pitch_deg), math.radians(roll_deg)
+    ps = math.radians(yaw_deg)
+    # Bodenpunkt erst ins "gedrehte" Bodensystem der Kamera (Drehung um -yaw um Z)
+    Ryaw = np.array([[math.cos(ps), math.sin(ps), 0.],
+                     [-math.sin(ps), math.cos(ps), 0.],
+                     [0., 0., 1.]])
     # Grunddrehung ohne Neigung: robot-x -> cam-z, robot-y -> -cam-x, robot-z -> -cam-y
     R0 = np.array([[0., -1., 0.],
                    [0., 0., -1.],
@@ -92,16 +142,17 @@ def _rot_ground_to_cam(pitch_deg, roll_deg):
     Rz = np.array([[math.cos(ph), -math.sin(ph), 0.],
                    [math.sin(ph), math.cos(ph), 0.],
                    [0., 0., 1.]])
-    return Rz @ Rx @ R0
+    return Rz @ Rx @ R0 @ Ryaw
 
 
-def ground_homography(K, height, pitch_deg, roll_deg, dx=0.0, dy=0.0):
+def ground_homography(K, height, pitch_deg, roll_deg, dx=0.0, dy=0.0, yaw_deg=0.0):
     """Homographie Bodenebene (X vorwaerts, Y links, Z=0) -> Bildpixel.
 
     dx/dy verschieben den Bodenursprung (z.B. auf die Radachse: dx = Linse vor der
-    Achse, dy = seitlicher Linsenversatz, positiv links).
+    Achse, dy = seitlicher Linsenversatz, positiv links). yaw_deg: siehe _rot_ground_to_cam.
+    X zeigt dann in die echte FAHRTRICHTUNG, nicht in die Blickrichtung der Kamera.
     """
-    R_gc = _rot_ground_to_cam(pitch_deg, roll_deg)
+    R_gc = _rot_ground_to_cam(pitch_deg, roll_deg, yaw_deg)
     t = -R_gc @ np.array([dx, dy, height])
     return K @ np.column_stack([R_gc[:, 0], R_gc[:, 1], t])
 

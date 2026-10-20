@@ -1,3 +1,4 @@
+import array
 import os
 
 import numpy as np
@@ -10,11 +11,15 @@ from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from std_msgs.msg import Float64
 from sensor_msgs.msg import Image, CompressedImage
+from geometry_msgs.msg import Polygon, Point32
 from cv_bridge import CvBridge
 
 from follow_lane_msg.msg import FollowLaneDebug
 
 EXTRINSICS = 'extrinsics_800x600.yaml'
+# Referenzaufloesung, fuer die alle Pixelwerte im Code und die RoI-Parameter gelten.
+# Andere Aufloesungen mit gleichem Seitenverhaeltnis werden darauf umgerechnet.
+REF_W, REF_H = 800, 600
 
 
 class detect_lane(Node):
@@ -102,7 +107,6 @@ class detect_lane(Node):
         self.pub_debug_image = self.create_publisher(FollowLaneDebug, '/detect/lane_debug', 1)
         # Muss auf /compressed enden: image_transport deutet das letzte Namenssegment als Transport
         self.pub_mask_debug = self.create_publisher(CompressedImage, '/detect/mask_debug/compressed', 1)
-
         #Andere Variablen:
 
         self.min_lane_width = None  #Anpassen
@@ -111,7 +115,13 @@ class detect_lane(Node):
 
         self._crop_im_size = 400
         self.raw_image = None
+        self.img_height = None   # Groesse des Kamerabilds, wird pro Frame in cbFindLane gesetzt
+        self.img_width  = None
 
+        self.intersection = False
+
+        self.px_scale = 1.0
+        self._metric_ref = (REF_W, REF_H)
         self._metric_M = self._load_metric_warp()
 
     def _load_metric_warp(self):
@@ -124,6 +134,9 @@ class detect_lane(Node):
             with open(path) as f:
                 d = yaml.safe_load(f)
             M = np.array(d['warp_matrix'], dtype=np.float64).reshape(3, 3)
+            # Die warp_matrix gilt fuer Bildpixel dieser Groesse -- bei anderer Kamera-
+            # aufloesung (gleiches Seitenverhaeltnis) werden die Eckpunkte mitskaliert.
+            self._metric_ref = (int(d.get('image_width', REF_W)), int(d.get('image_height', REF_H)))
             size = int(d.get('output_size_px', self._crop_im_size))
             if size != self._crop_im_size:
                 self.get_logger().warn(
@@ -137,14 +150,17 @@ class detect_lane(Node):
             self.get_logger().warn(f'Keine metrische Kalibrierung ({e}) -- RoI-Punkte werden genutzt.')
             return None
 
-    def _apply_metric_warp_corners(self):
+    def _apply_metric_warp_corners(self, w, h):
         """Setzt die vier top_/bottom_-Punkte auf die Bildecken, die die warp_matrix
         auf die Ecken des 400x400-Ausschnitts abbildet. crop_img() baut daraus per
         getPerspectiveTransform dieselbe Homographie wieder auf, und debug_view kann
-        sie unveraendert invertieren -- eine einzige Quelle der Wahrheit."""
+        sie unveraendert invertieren -- eine einzige Quelle der Wahrheit.
+        w, h: tatsaechliche Bildgroesse; die Punkte werden von der Kalibriergroesse
+        darauf skaliert (K skaliert linear mit, die Bodengeometrie bleibt gleich)."""
         size = self._crop_im_size
         out = np.float32([[0, 0], [size, 0], [size, size], [0, size]]).reshape(-1, 1, 2)
         src = cv2.perspectiveTransform(out, np.linalg.inv(self._metric_M)).reshape(-1, 2)
+        src = src * np.array([w / self._metric_ref[0], h / self._metric_ref[1]])
         (self.top_left_x, self.top_left_y) = (int(round(src[0][0])), int(round(src[0][1])))
         (self.top_right_x, self.top_right_y) = (int(round(src[1][0])), int(round(src[1][1])))
         (self.bottom_right_x, self.bottom_right_y) = (int(round(src[2][0])), int(round(src[2][1])))
@@ -178,17 +194,27 @@ class detect_lane(Node):
             for name in param_names:
                 setattr(self, name, self.get_parameter(name).value)
 
+            cv_image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
+            self.img_height, self.img_width = cv_image.shape[:2]
+            # Pixelgroessen im Code (Kernel, Mindestlaengen, RoI-Parameter) sind fuer
+            # REF_W x REF_H ausgelegt und werden mit diesem Faktor auf die echte
+            # Aufloesung umgerechnet (z.B. 1640x1232 -> 2.05).
+            self.px_scale = self.img_width / REF_W
+
             # Bei aktiver metrischer Vogelperspektive die vier RoI-Punkte aus der
             # warp_matrix ableiten -- ueberschreibt die eben gelesenen Parameterwerte.
             if self.get_parameter('use_metric_warp').value and self._metric_M is not None:
-                self._apply_metric_warp_corners()
+                self._apply_metric_warp_corners(self.img_width, self.img_height)
+            elif (self.img_width, self.img_height) != (REF_W, REF_H):
+                # Handgetunte RoI-Parameter sind Pixel im REF_W x REF_H-Bild
+                for name in ('top_left', 'top_right', 'bottom_left', 'bottom_right'):
+                    setattr(self, name + '_x', int(round(getattr(self, name + '_x') * self.img_width / REF_W)))
+                    setattr(self, name + '_y', int(round(getattr(self, name + '_y') * self.img_height / REF_H)))
 
             detection_row_factor = self.detection_row_factor
 
-            cv_image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
             self.raw_img = cv_image
             img = self.apply_clahe(cv_image)
-            img = self.crop_img(img)
 
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
@@ -201,54 +227,67 @@ class detect_lane(Node):
                                (self.hue_white_h,self.saturation_white_h, self.lightness_white_h),)
 
                 
-            kernel = np.ones((5, 5), np.uint8)    
+            k = max(3, int(round(5 * self.px_scale)) | 1)    # 5x5 bei 800x600, ungerade
+            kernel = np.ones((k, k), np.uint8)
 
             mask_yellow = cv2.erode(mask_yellow,kernel,iterations =1 )
 
-
-            kernel = np.ones((5, 5), np.uint8)    
-
             mask_white = cv2.erode(mask_white,kernel,iterations =1 )
 
-            white_alternative = int(len(img[0]) * 0.95)
-            yellow_alternative = int(len(img[0]) * 0.05)
+
+            cropped_white = self.crop_img(mask_white)
+            cropped_yellow = self.crop_img(mask_yellow)
+
+            white_alternative = int(len(cropped_white[0]) * 0.95)
+            yellow_alternative = int(len(cropped_yellow[0]) * 0.05)
 
             # Gelb fix am konfigurierten detection_row_factor
             yellow_row_factor = self.detection_row_factor
-            center_yellow_y = int(len(img)*yellow_row_factor)
-            center_yellow_x = self.get_x_for_driving(mask_yellow, center_yellow_y, yellow_alternative, left_line=True)
+            center_yellow_y = int(len(cropped_yellow)*yellow_row_factor)
+            center_yellow_x = self.get_x_for_driving(cropped_yellow, center_yellow_y, yellow_alternative, left_line=True)
 
             # Weiße Maske: alles links von gelb + min_lane_width ausblenden
-            mask_white_filtered = mask_white.copy()
+            mask_white_filtered = cropped_white.copy()
             corridor_start = max(0, int(center_yellow_x) + self.min_lane_width)
             mask_white_filtered[:, :corridor_start] = 0
 
             # Weiß sucht weiter unten falls nicht gefunden
-            center_white_y = int(len(img)*detection_row_factor)
+            center_white_y = int(len(cropped_white)*detection_row_factor)
             center_white_x = self.get_x_for_driving(mask_white_filtered, center_white_y, white_alternative, left_line=False)
 
             while center_white_x == white_alternative and detection_row_factor <= 0.95:
                 detection_row_factor += 0.05
-                center_white_y = int(len(img)*detection_row_factor)
+                center_white_y = int(len(cropped_white)*detection_row_factor)
                 center_white_x = self.get_x_for_driving(mask_white_filtered, center_white_y, white_alternative, left_line=False)
 
             
 
             if center_white_x <= center_yellow_x:
-                if center_white_x > int(len(img[0]) * 0.4):
+                if center_white_x > int(len(cropped_white[0]) * 0.4):
                     center_yellow_x = yellow_alternative
                 else:
                     center_white_x = white_alternative
 
             lane_center = (center_white_x + center_yellow_x) / 2
-            lane_error = 1-(lane_center / len(img[0]) * 2)
+            lane_error = 1-(lane_center / len(cropped_white[0]) * 2)
+
+            polies, horizontal, vertical, corners, intersection_corners = \
+                self.detect_intersection(mask_white,mask_yellow)
+            self.intersection = len(intersection_corners) > 0
+
+            if self.intersection:
+                intersection_distance = self.intersection_distance(intersection_corners)    
+
+            
+
 
             msg_error = Float64()
             msg_error.data = lane_error
 
             self.pub_lane_error.publish(msg_error)
-            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image)
-            self.publish_mask_debug(mask_yellow, mask_white,
+            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image, polies, horizontal, vertical,
+                                       corners, intersection_corners)
+            self.publish_mask_debug(cropped_yellow, cropped_white,
                                     center_yellow_x, center_yellow_y, center_white_x, center_white_y)
 
         except Exception as e:
@@ -258,7 +297,6 @@ class detect_lane(Node):
 
     def publish_mask_debug(self, mask_yellow, mask_white,
                            center_yellow_x, center_yellow_y, center_white_x, center_white_y):
-        # Nur encodieren, wenn jemand zuschaut -- das JPEG kostet sonst pro Frame Rechenzeit
         if self.pub_mask_debug.get_subscription_count() == 0:
             return
 
@@ -266,11 +304,8 @@ class detect_lane(Node):
         both = (mask_yellow > 0) & (mask_white > 0)
         overlay[mask_white > 0]  = (255, 255, 255)
         overlay[mask_yellow > 0] = (0, 255, 255)
-        # Rot = beide Masken treffen dasselbe Pixel, also ueberlappende HSV-Bereiche
         overlay[both] = (0, 0, 255)
 
-        # Gruen/Magenta, weil Gelb, Weiss und Rot hier schon belegt sind.
-        # Keine Ruecktransformation noetig: die center_* liegen bereits im entzerrten Bild.
         cv2.circle(overlay, (center_yellow_x, center_yellow_y), 6, (0, 255, 0),   -1, cv2.LINE_AA)
         cv2.circle(overlay, (center_white_x,  center_white_y),  6, (255, 0, 255), -1, cv2.LINE_AA)
 
@@ -281,10 +316,12 @@ class detect_lane(Node):
         msg = CompressedImage()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.format = 'jpeg'
-        msg.data = encoded.tobytes()
+        # array('B') statt bytes: rclpy prueft bytes sonst Byte fuer Byte in Python (~0,7 s/MB)
+        msg.data = array.array('B', encoded.tobytes())
         self.pub_mask_debug.publish(msg)
 
-    def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, lane_center, img):
+    def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, lane_center, img, polies, horizontal, vertical,
+                              corners=(), intersection_corners=()):
         follow_lane_debug_info = FollowLaneDebug()
         follow_lane_debug_info.center_white_x = center_white_x
         follow_lane_debug_info.center_white_y = center_white_y
@@ -297,7 +334,8 @@ class detect_lane(Node):
         success, encoded = cv2.imencode('.jpg', img)
         if success:
             follow_lane_debug_info.raw_image.format = 'jpeg'
-            follow_lane_debug_info.raw_image.data = encoded.tobytes()
+            # array('B') statt bytes: rclpy prueft bytes sonst Byte fuer Byte in Python (~0,7 s/MB)
+            follow_lane_debug_info.raw_image.data = array.array('B', encoded.tobytes())
 
         follow_lane_debug_info.top_left_x     = self.top_left_x
         follow_lane_debug_info.top_left_y     = self.top_left_y
@@ -308,7 +346,201 @@ class detect_lane(Node):
         follow_lane_debug_info.bottom_right_x = self.bottom_right_x
         follow_lane_debug_info.bottom_right_y = self.bottom_right_y
 
+        for poly in polies or []:
+            p = Polygon()
+            p.points = [Point32(x=float(x), y=float(y), z=0.0) for x, y in poly.reshape(-1, 2)]
+            follow_lane_debug_info.polygons.append(p)
+
+        for lines, field in ((horizontal, follow_lane_debug_info.horizontal_lines),
+                             (vertical, follow_lane_debug_info.vertical_lines)):
+            for p1, p2 in lines or []:
+                field.append(Polygon(points=[Point32(x=float(p1[0]), y=float(p1[1]), z=0.0),
+                                             Point32(x=float(p2[0]), y=float(p2[1]), z=0.0)]))
+
         self.pub_debug_image.publish(follow_lane_debug_info)
+
+    def intersection_distance(self,intersection_corners):
+        nearest_corner = 0
+        for corner in intersection_corners:
+            if corner[0][1] > nearest_corner:
+                nearest_corner = corner[0][1]
+        return nearest_corner
+
+
+    def get_x_beside(self, mask, y, x_start, direction, no_lane_value, min_gap=5):
+        """get_x_for_driving, aber nur auf einer Seite von x_start: direction=-1 sucht
+        links davon die naechste Kante, +1 rechts davon. Noetig bei der kombinierten
+        Maske, sonst findet die Suche den Streifen der Ecke selbst."""
+        x_start = int(x_start)
+        if direction < 0:
+            x_end = x_start - min_gap
+            if x_end <= 0:
+                return no_lane_value
+            return self.get_x_for_driving(mask[:, :x_end], int(y), no_lane_value, left_line=True)
+        x_begin = x_start + min_gap
+        if x_begin >= mask.shape[1]:
+            return no_lane_value
+        x = self.get_x_for_driving(mask[:, x_begin:], int(y), None, left_line=False)
+        return no_lane_value if x is None else x + x_begin
+
+    def is_intersection_free(self,intersection_corners,mask):
+        """mask = kombinierte Maske (weiss | gelb), Koordinaten wie die Ecken (volles Bild)."""
+        pts = np.array([p for p, b in intersection_corners]).reshape(-1, 2)
+        pts = pts[np.argsort(pts[:, 1])]
+        
+        shift_hor = np.array([30, 0])
+        shift_ver = np.array([30, 0])  
+        if len(pts) == 2:
+            if pts[0][0] >= self.img_width/2 and pts[1][0] >= self.img_width/2:
+                pt3_x = self.get_x_beside(mask, pts[1][1], pts[1][0], -1, None)
+                pt4_x = self.get_x_beside(mask, pts[0][1], pts[0][0], -1, None)
+                if pt3_x is not None and pt4_x is not None:
+                    straight_lane = np.array([pts[0],pts[1],[pt3_x,pts[1][1]], [pt4_x,pts[0][1]]],np.int32)
+                right_lane = [pts[0],pts[1],pts[1]-shift_hor,pts[0]-shift_hor]
+            elif pts[0][0] <= self.img_width/2 and pts[1][0] <= self.img_width/2:
+                pt3_x = self.get_x_beside(mask, pts[1][1], pts[1][0], +1, None)
+                pt4_x = self.get_x_beside(mask, pts[0][1], pts[0][0], +1, None)
+                if pt3_x is not None and pt4_x is not None:
+                    straight_lane = np.array([pts[0],pts[1],[pt3_x,pts[1][1]], [pt4_x,pts[0][1]]],np.int32)
+                left_lane = [pts[0],pts[1],pts[1]+shift_hor,pts[0]+shift_hor]
+            else:
+                bot_l, bot_r = pts[np.argsort(pts[:, 0])]
+                y_top = self.get_y_for_driving(mask, bot_l[0] + 10, bot_r[0] - 10,
+                                               min(bot_l[1], bot_r[1]), None)
+                if y_top is not None:
+                    top_l = np.array([bot_l[0], y_top])
+                    top_r = np.array([bot_r[0], y_top])
+                    straight_lane = np.array([top_l, top_r, bot_r, bot_l], np.int32)
+                    right_lane = [top_r, bot_r, bot_r-shift_hor, top_r-shift_hor]
+                    left_lane  = [top_l, bot_l, bot_l+shift_hor, top_l+shift_hor]
+        elif len(pts) == 4:
+            top_l, top_r = pts[:2][np.argsort(pts[:2, 0])]
+            bot_l, bot_r = pts[2:][np.argsort(pts[2:, 0])]
+            straight_lane = np.array([top_l, top_r, bot_r, bot_l], np.int32)
+            right_lane = [top_r, bot_r, bot_r-shift_hor, top_r-shift_hor]
+            left_lane  = [top_l, bot_l, bot_l+shift_hor, top_l+shift_hor]
+
+        left_lane = []
+        right_lane = []
+        straight_lane =[]
+
+    def detect_corners(self,img):
+        corners =cv2.cornerHarris(img,2,3,0.04)
+        return corners
+
+    def lines_to_poly(self,img, y_offset):
+        polies = []
+        contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE,
+                                   offset=(0, y_offset))       
+        for contour in contours:
+            if cv2.contourArea(contour) < 50 * self.px_scale ** 2:   # Rauschen/Fransen raus
+                continue
+            polies.append(cv2.approxPolyDP(contour, epsilon=3 * self.px_scale, closed=True))
+
+        return polies
+
+    def get_angle_of_line(self,p1,p2):
+        d = p2-p1
+        ang = abs(np.degrees(np.arctan2(d[1], d[0])))
+        return min(ang, 180 - ang)
+
+    def line_dir(self, p1, p2):
+        d = np.asarray(p2, float) - np.asarray(p1, float)
+        return np.degrees(np.arctan2(d[1], d[0])) % 180.0
+
+    def angle_diff(self, a, b):
+        d = abs(a - b) % 180.0
+        return min(d, 180.0 - d)
+
+    def corner_bisector(self, p_prev, p, p_next):
+        u1 = (p_prev - p) / np.linalg.norm(p_prev - p)
+        u2 = (p_next - p) / np.linalg.norm(p_next - p)
+        b = u1 + u2
+        n = np.linalg.norm(b)
+        return None if n < 1e-6 else b / n
+
+    def _on_border(self, p1, p2, y0):
+        return (p1[0] == 0 and p2[0] == 0) or (p1[0] == self.img_width - 1 and p2[0] == self.img_width - 1) or \
+               (p1[1] == y0 and p2[1] == y0) or (p1[1] == self.img_height - 1 and p2[1] == self.img_height - 1)
+    
+    def detect_intersection(self,img_white, img_yellow):
+        min_edge_len   = 30 * self.px_scale     # 30 px bei 800x600
+        parallel_tol   = 4.0    
+        corner_tol     = 10.0   
+        min_dot        = 0.7    
+
+        full_img = cv2.bitwise_or(img_white, img_yellow)
+        y0 = int(self.img_height * 0.30)
+        roi = full_img[int( y0):,:]
+        polies = self.lines_to_poly(roi,y0)
+
+        vertical = []
+        horizontal = []
+        corners_per_poly = []      # pro Fahrbahnlinie: [(eckpunkt, halbierende), ...]
+        for poly in polies:
+            pts = poly.reshape(-1,2).astype(float)
+            len_pts = len(pts)
+            if len_pts < 4:
+                continue
+
+            # Kanten sammeln (ohne Rand-Kanten und ohne kurze Fransen)
+            edge_dirs = []
+            for i in range(len_pts):
+                p1, p2 = pts[i], pts[(i+1)%len_pts]
+                if self._on_border(p1, p2, y0):
+                    continue
+                if np.linalg.norm(p2-p1) > min_edge_len:
+                    edge_dirs.append(self.line_dir(p1, p2))
+                    angle = self.get_angle_of_line(p1, p2)
+                    if angle < 10:
+                        horizontal.append((p1, p2))
+                    elif angle >= 80:
+                        vertical.append((p1, p2))
+
+            has_parallel = any(self.angle_diff(edge_dirs[a], edge_dirs[b]) <= parallel_tol
+                               for a in range(len(edge_dirs)) for b in range(a+1, len(edge_dirs)))
+            if not has_parallel:
+                continue
+
+            corners = []
+            for i in range(len_pts):
+                p_prev, p, p_next = pts[i-1], pts[i], pts[(i+1)%len_pts]
+                if min(np.linalg.norm(p_prev-p), np.linalg.norm(p_next-p)) < min_edge_len:
+                    continue
+                if self._on_border(p_prev, p, y0) or \
+                   self._on_border(p, p_next, y0):
+                    continue
+                if abs(self.angle_diff(self.line_dir(p_prev, p), self.line_dir(p, p_next)) - 90) > corner_tol:
+                    continue
+                b = self.corner_bisector(p_prev, p, p_next)
+                if b is not None:
+                    corners.append((p, b))
+            if corners:
+                corners_per_poly.append((poly, corners))
+
+        # Kreuzungsecke = Innen- und Aussenkante DESSELBEN Streifens knicken parallel ab,
+        # d.h. zwei Ecken im selben Polygon mit gleich gerichteter Halbierender.
+        # Pro Paar wird die konvexe Ecke behalten (Halbierende zeigt ins Polygon) --
+        # das ist die Ecke an der Fahrbahnseite (PT1/P2 in der Skizze).
+        intersection_corners = []
+        for poly, corners in corners_per_poly:
+            used = set()
+            for i in range(len(corners)):
+                for j in range(i+1, len(corners)):
+                    if i in used or j in used:
+                        continue
+                    (c1, b1), (c2, b2) = corners[i], corners[j]
+                    if np.dot(b1, b2) <= min_dot:
+                        continue
+                    used.update((i, j))
+                    for c, b in ((c1, b1), (c2, b2)):
+                        probe = c + 5.0 * b
+                        if cv2.pointPolygonTest(poly, (float(probe[0]), float(probe[1])), False) > 0:
+                            intersection_corners.append((c, b))
+                            break
+
+        corners = [c for _, cs in corners_per_poly for c in cs]
+        return polies, horizontal, vertical, corners, intersection_corners
 
     def apply_clahe(self, img):
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
@@ -352,6 +584,33 @@ class detect_lane(Node):
                     a.append(np.where(th1[row] == 255)[0][-1])
                 else:
                     a.append(np.where(th1[row] == 255)[0][0])
+
+        if len(a) > 10:
+            return int(np.median(a))
+        else:
+            return no_lane_value
+
+    def get_y_for_driving(self, mask, x_from, x_to, y_start, no_lane_value, min_gap=5):
+        """Gegenstueck zu get_x_for_driving, aber spaltenweise: sucht in den Spalten
+        x_from..x_to von y_start aus NACH OBEN die naechste waagerechte Kante
+        (z.B. die querliegende Linie am Ende einer ┴-Kreuzung).
+        min_gap: Zeilen direkt ueber y_start ignorieren, damit nicht die Kante
+        an der Ecke selbst gefunden wird."""
+        grad = cv2.Sobel(mask, cv2.CV_16S, 0, 1, ksize=3, scale=1, delta=0, borderType=cv2.BORDER_DEFAULT)
+        abs_grad = cv2.convertScaleAbs(grad)
+
+        _,th1 = cv2.threshold(abs_grad,127,255,cv2.THRESH_BINARY)
+
+        y_end = int(y_start) - min_gap
+        if y_end <= 0:
+            return no_lane_value
+
+        a = []
+        for col in range(max(0, int(x_from)), min(mask.shape[1], int(x_to))):
+            hits = np.where(th1[:y_end, col] == 255)[0]
+            if hits.size == 0:
+                continue
+            a.append(hits[-1])      # groesstes y oberhalb = naechste Kante ueber der Ecke
 
         if len(a) > 10:
             return int(np.median(a))
