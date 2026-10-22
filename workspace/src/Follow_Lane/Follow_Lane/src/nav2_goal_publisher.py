@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange
-from std_msgs.msg import UInt8
+from std_msgs.msg import String, UInt8
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import FollowPath
@@ -32,7 +32,10 @@ class nav2_goal_publisher(Node):
       geradeaus". MPPI weicht in beiden Faellen anhand der Local Costmap ab.
     - Tunnel: Pfad von tunnel_explorer_node auf /tunnel/explore_path.
 
-    Jeder Moduswechsel bricht ein laufendes Ziel ab.
+    Jeder Moduswechsel bricht ein laufendes Ziel ab. Was der Node gerade tut,
+    steht auf /nav2/status (fuer die Statuszeile in nav2_view); den Grund eines
+    Abbruchs kennt nur controller_server -- das Humble-FollowPath-Ergebnis
+    meldet nur "abgebrochen".
     """
 
     def __init__(self):
@@ -63,6 +66,10 @@ class nav2_goal_publisher(Node):
             Path, '/tunnel/explore_path', self.cbExplorePath, 1)
         self.sub_center_path = self.create_subscription(
             Path, self.get_parameter('center_path_topic').value, self.cbCenterPath, 1)
+
+        self.pub_status = self.create_publisher(String, '/nav2/status', 1)
+        self._status = ''
+        self._path_source = ''
 
         self._action_client = ActionClient(self, FollowPath, 'follow_path')
         self._goal_handle = None
@@ -106,11 +113,26 @@ class nav2_goal_publisher(Node):
         self._center_path_received = self.get_clock().now()
 
     def cbWatchdog(self):
-        if self.current_control_mode in _ACTIVE_MODES and not self._goal_active:
+        if self.current_control_mode not in _ACTIVE_MODES:
+            self._set_status(f'ruht ({self.current_control_mode.name})')
+        elif not self._goal_active:
             self.try_start_chain()
+        # Zyklisch, damit auch spaeter startende Anzeigen den Stand bekommen.
+        self._publish_status()
+
+    def _set_status(self, text):
+        if text != self._status:
+            self._status = text
+            self._publish_status()
+
+    def _publish_status(self):
+        msg = String()
+        msg.data = self._status
+        self.pub_status.publish(msg)
 
     def try_start_chain(self):
         if not self._action_client.server_is_ready():
+            self._set_status('controller_server nicht erreichbar')
             self.get_logger().warn(
                 'follow_path Action-Server nicht erreichbar -- laeuft/aktiviert '
                 'der Nav2 controller_server?', throttle_duration_sec=5.0)
@@ -119,18 +141,22 @@ class nav2_goal_publisher(Node):
         path = self.build_path()
         if path is None:
             # Tunnel-Modus ohne Pfad vom Explorer -- warten
+            self._set_status('wartet auf Explorer-Pfad')
             return
 
         self.send_rolling_goal(path)
 
     def build_path(self):
         if self.current_control_mode == ControlType.Tunnel:
+            self._path_source = 'Explorer-Pfad'
             return self._latest_explore_path
 
         if self._center_path_received is not None:
             age = (self.get_clock().now() - self._center_path_received).nanoseconds / 1e9
             if age <= self.get_parameter('center_path_max_age').value:
+                self._path_source = 'Spurmitte'
                 return self._latest_center_path
+        self._path_source = 'Gerade (keine aktuelle Spurmitte)'
         self.get_logger().info(
             'Keine aktuelle Spurmitte -- Ziel ist die Gerade geradeaus.',
             throttle_duration_sec=2.0)
@@ -157,6 +183,7 @@ class nav2_goal_publisher(Node):
         goal_msg.path = path
 
         self._goal_active = True
+        self._set_status(f'faehrt: {self._path_source}')
         send_future = self._action_client.send_goal_async(goal_msg)
         send_future.add_done_callback(self.cb_goal_response)
 
@@ -166,6 +193,7 @@ class nav2_goal_publisher(Node):
             self.get_logger().warn(
                 'Rolling-Goal wurde vom controller_server abgelehnt.',
                 throttle_duration_sec=5.0)
+            self._set_status('Ziel abgelehnt')
             self._goal_active = False
             return
 

@@ -109,6 +109,13 @@ Zeichnet das Debugbild auf `/lokal/debug_view`, angezeigt in `rqt_image_view`. U
 ### `lane_costmap_node` — Spurlinien als virtuelle Wände (nicht im Tunnel)
 Wandelt die von der Kamera erkannten Spurlinien-Pixel aus der metrischen Vogelperspektive `/lokal/bev` über `Parameter/bev.yaml` in Meter um und speist sie als virtuelle Wände in den `lane_layer` der local_costmap ein, damit Nav2 beim Ausweichen nicht über die Linien fährt. Außerdem berechnet er die Spurmitte und sendet sie als Pfad (`/lane/center_path`), mit laufend gemessener Spurbreite. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Im Tunnel sendet er nichts und leert beim Eintritt die local_costmap.
 
+### `nav2_view` — die Draufsicht mit Statuszeile
+Zeichnet auf `/nav2/view/compressed` ein Bild davon, was Nav2 sieht und plant: im Tunnel die `global_costmap`, sonst die `local_costmap` mit den Spurwänden. Weiß ist frei, rosa der Sicherheitsabstand, schwarz belegt, grau unbekannt. Rot der Umriss des Bots (`/local_costmap/published_footprint`) mit Fahrtrichtung, grün der Pfad mit Ziel (X), orange die Eingangssperre, blau die LiDAR-Punkte. Die Ausrichtung ist fest (odom-X nach rechts), sodass Wände stillstehen und nur der Bot sich bewegt.
+
+Oben steht die Statuszeile: Modus und Auslöser, was `nav2_goal_publisher` gerade tut (`/nav2/status`, z. B. „faehrt: Spurmitte“), und darunter die letzte Warnung bzw. der letzte Fehler der Nav2-Knoten aus `/rosout`, zum Beispiel „controller_server: Failed to make progress“. Das ist der Abbruchgrund: Das FollowPath-Ergebnis meldet in Humble nur „abgebrochen“, den Grund schreibt `controller_server` nur ins Log. Rot heißt jünger als 10 s.
+
+`nav2_obstacle` öffnet dafür ein zweites `rqt_image_view`-Fenster.
+
 ### `keepout_zone_node` — die Eingangs-Sperrzone (nur Tunnel-Modus)
 Merkt sich einmalig, wo der Roboter in den Tunnel eingefahren ist, und blockiert diese Stelle dauerhaft als virtuelle Wand — damit der Roboter nicht durch den Eingang wieder rausfährt. Die Wand bleibt an dieser Stelle, wird aber erst gesendet, wenn der Bot `entrance_wall_delay` weit davon weggefahren ist. Vorher stünde er selbst in ihr. Die Wand nach hinten zu verschieben wäre keine Lösung, weil dann eine Lücke zum Eingang entstünde. Setzt außerdem bei jedem neuen Tunnel-Eintritt die Explorationskarte (`global_costmap`) zurück, damit sich mehrere Tunnel auf derselben Strecke nicht gegenseitig stören.
 
@@ -258,6 +265,7 @@ Das ist bewusst **kein SLAM** (keine Positions-Korrektur, keine "Loop Closure") 
 - [ ] `tunnel_exit_open_distance`/`tunnel_exit_open_ratio` mit dem echten Roboter/der echten Strecke testen
 - [ ] Kompletten Tunnel-Durchlauf auf echter Hardware testen (bisher nur am Schreibtisch entworfen, nicht gelaufen)
 - [ ] In `rqt_image_view` „Publish click location“ anhaken und prüfen, ob der Tunnel-Button umschaltet
+- [ ] Draufsicht `nav2_view` prüfen: Erscheint der Umriss (`published_footprint`), und taucht ein Abbruchgrund von `controller_server` in der Statuszeile auf?
 - [ ] Schild-Erkennung bauen, sobald klar ist, wie die Schilder aussehen (aktuell manuell testbar per `ros2 topic pub /detect/sign std_msgs/msg/UInt8 "{data: 6}"`)
 
 **Allgemein:**
