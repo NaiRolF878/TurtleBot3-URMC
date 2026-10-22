@@ -101,6 +101,8 @@ class detect_lane(Node):
         # Situation, die es nicht mehr gibt. Fuer einen Live-Regelkreis ist das neueste
         # Bild immer besser als ein vollstaendiger, aber veralteter Verlauf.
         self.sub_raw_image = self.create_subscription(Image, '/lokal/raw_image', self.cbGetRawImage ,1)
+        self.sub_BEV = self.create_subscription(Image,'/lokal/bev', self.cbGetBEV,1)
+
 
         #--- Publisher ---
         self.pub_lane_error = self.create_publisher(Float64, '/detect/lane',1)
@@ -169,8 +171,125 @@ class detect_lane(Node):
     def cbGetRawImage(self,img):
         self.raw_image = img
 
-        self.cbFindLane(img)
+        # self.cbFindLane(img)
 
+    def cbGetBEV(self,img):
+        self.BEV=img
+
+        self.cbFindLaneBEV(img)
+
+    def cbFindLaneBEV(self, img):
+        if self.is_running:
+            return
+        self.is_running = True
+        # Alles ab hier im try: sonst wuerde eine Exception vor dem try das Flag
+        # dauerhaft auf True lassen (finally liefe nie) und der Node verarbeitet
+        # still keine Bilder mehr.
+        try:
+            # Alle oben deklarierten Parameter als self.<name>-Attribute verfügbar machen
+            param_names = [
+                'hue_white_l', 'hue_white_h', 'saturation_white_l', 'saturation_white_h',
+                'lightness_white_l', 'lightness_white_h',
+                'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
+                'lightness_yellow_l', 'lightness_yellow_h',
+                'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
+                'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
+                'detection_row_factor', 'min_lane_width',
+                'clahe_clip_limit', 'clahe_tile_grid_size',
+            ]
+            for name in param_names:
+                setattr(self, name, self.get_parameter(name).value)
+
+            cv_image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
+            self.img_height, self.img_width = cv_image.shape[:2]
+            
+            res_m= 0.00125
+            px_per_cm = 0.01/res_m
+            #min_edge_len = 5* pxpercm
+
+            detection_row_factor = self.detection_row_factor
+
+            self.raw_img = cv_image
+            img = self.apply_clahe(cv_image)
+
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+            mask_yellow = cv2.inRange(hsv,
+                               (self.hue_yellow_l,self.saturation_yellow_l, self.lightness_yellow_l),
+                               (self.hue_yellow_h,self.saturation_yellow_h, self.lightness_yellow_h),)
+
+            mask_white = cv2.inRange(hsv,
+                               (self.hue_white_l,self.saturation_white_l, self.lightness_white_l),
+                               (self.hue_white_h,self.saturation_white_h, self.lightness_white_h),)
+
+                
+            k = max(3, int(round(5 * self.px_scale)) | 1)    # 5x5 bei 800x600, ungerade
+            kernel = np.ones((k, k), np.uint8)
+
+            mask_yellow = cv2.erode(mask_yellow,kernel,iterations =1 )
+
+            mask_white = cv2.erode(mask_white,kernel,iterations =1 )
+
+
+            cropped_white = mask_white
+            cropped_yellow = mask_yellow
+
+            white_alternative = int(len(cropped_white[0]) * 0.95)
+            yellow_alternative = int(len(cropped_yellow[0]) * 0.05)
+
+            # Gelb fix am konfigurierten detection_row_factor
+            yellow_row_factor = self.detection_row_factor
+            center_yellow_y = int(len(cropped_yellow)*yellow_row_factor)
+            center_yellow_x = self.get_x_for_driving(cropped_yellow, center_yellow_y, yellow_alternative, left_line=True)
+
+            # Weiße Maske: alles links von gelb + min_lane_width ausblenden
+            mask_white_filtered = cropped_white.copy()
+            corridor_start = max(0, int(center_yellow_x) + self.min_lane_width)
+            mask_white_filtered[:, :corridor_start] = 0
+
+            # Weiß sucht weiter unten falls nicht gefunden
+            center_white_y = int(len(cropped_white)*detection_row_factor)
+            center_white_x = self.get_x_for_driving(mask_white_filtered, center_white_y, white_alternative, left_line=False)
+
+            while center_white_x == white_alternative and detection_row_factor <= 0.95:
+                detection_row_factor += 0.05
+                center_white_y = int(len(cropped_white)*detection_row_factor)
+                center_white_x = self.get_x_for_driving(mask_white_filtered, center_white_y, white_alternative, left_line=False)
+
+            
+
+            if center_white_x <= center_yellow_x:
+                if center_white_x > int(len(cropped_white[0]) * 0.4):
+                    center_yellow_x = yellow_alternative
+                else:
+                    center_white_x = white_alternative
+
+            lane_center = (center_white_x + center_yellow_x) / 2
+            lane_error = 1-(lane_center / len(cropped_white[0]) * 2)
+
+            polies, horizontal, vertical, corners, intersection_corners = \
+                self.detect_intersection(mask_white,mask_yellow)
+            self.intersection = len(intersection_corners) > 0
+
+            if self.intersection:
+                intersection_distance = self.intersection_distance(intersection_corners)    
+
+            
+
+
+            msg_error = Float64()
+            msg_error.data = lane_error
+
+            self.pub_lane_error.publish(msg_error)
+            self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image, polies, horizontal, vertical,
+                                       corners, intersection_corners)
+            self.publish_mask_debug(cropped_yellow, cropped_white,
+                                    center_yellow_x, center_yellow_y, center_white_x, center_white_y)
+
+        except Exception as e:
+            self.get_logger().error(f"cbFindLane failed: {e}")
+        finally:
+            self.is_running = False
 
     def cbFindLane(self, img):
         if self.is_running:

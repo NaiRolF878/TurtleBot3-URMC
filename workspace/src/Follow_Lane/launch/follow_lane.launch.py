@@ -47,15 +47,11 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='Follow_Lane', executable='control_driving', name='control_driving',
             parameters=[control_params],
-            # control_driving publiziert bewusst auf /control/cmd_vel -- das ist der
-            # Ausgang des Reglers, nicht zwingend der Eingang des Roboters. Der
-            # turtlebot3_node aus dem Bringup hoert aber ausschliesslich auf /cmd_vel.
-            # Ohne dieses Remapping laufen die Twist-Nachrichten ins Leere: der Regler
-            # rechnet korrekt, "ros2 topic echo /control/cmd_vel" zeigt Werte, aber
-            # "Subscription count" bleibt 0 und der Bot steht.
-            # Bewusst hier statt im Code: so bleibt der Regler wiederverwendbar (z.B.
-            # in Gazebo oder hinter einem Mux, der mehrere Regler arbitriert).
-            remappings=[('/control/cmd_vel', '/cmd_vel')],
+            # control_driving publiziert auf /control/cmd_vel. KEIN Remapping auf /cmd_vel mehr:
+            # dazwischen sitzt der Not-Aus (notaus.py), der nur nach Freigabe (Leertaste / rqt-
+            # Parameter drive / /notaus/set) durchreicht. Er laeuft NICHT in diesem Launch-File,
+            # weil er ein Terminal fuer die Leertaste braucht -- launchers/follow_lane.sh startet
+            # ihn im Vordergrund. Ohne notaus faehrt der Bot nicht (sicherer Zustand).
         ),
         Node(package='Follow_Lane', executable='switch_control',  name='switch_control'),
         Node(package='Follow_Lane', executable='debug_view',      name='debug_view'),

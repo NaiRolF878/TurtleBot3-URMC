@@ -7,4 +7,4 @@
 x_min_m: 0.05      # naeher sieht die Kamera nichts (Linse 5,8 cm vor der Achse)
 x_max_m: 0.60      # dahinter wird es in Fahrtrichtung sehr unscharf (docs/bev-tests/README.md)
 y_half_m: 0.40     # volle sichtbare Breite bei ~60 cm
-res_m: 0.0025      # 2,5 mm pro Pixel -> 320 x 220 px
+res_m: 0.00125     # 1,25 mm pro Pixel -> 640 x 440 px (Vergleich: docs/bev-tests/12_*)
