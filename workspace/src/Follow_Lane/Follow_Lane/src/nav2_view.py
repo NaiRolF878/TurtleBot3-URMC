@@ -90,6 +90,18 @@ class nav2_view(Node):
             ParameterDescriptor(integer_range=[IntegerRange(from_value=200, to_value=2000, step=1)]))
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('robot_frame', 'base_footprint')
+        # Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot. 2.4 m = 1.2 m je
+        # Richtung -- deckt den Obstacle-Ausloeser (1.0 m voraus) und die
+        # MPPI-Vorausschau (~1 m) mit Rand. Zentriert statt in Fahrtrichtung
+        # verschoben, sonst springt das Bild bei jedem Lenkausschlag mit.
+        self.declare_parameter('local_view_size_m', 2.4,
+            ParameterDescriptor(floating_point_range=[
+                FloatingPointRange(from_value=0.5, to_value=20.0, step=0.0)]))
+        # Im Tunnel: nur die schon gesehene Flaeche plus dieser Rand, damit das Bild
+        # anfangs gross ist und mit der Karte herauszoomt.
+        self.declare_parameter('tunnel_view_margin_m', 0.3,
+            ParameterDescriptor(floating_point_range=[
+                FloatingPointRange(from_value=0.0, to_value=5.0, step=0.0)]))
         # Nur Warnungen dieser Knoten zaehlen als Abbruchgrund. nav2_goal_publisher
         # fehlt bewusst: sein "Rolling-Goal beendet" wuerde den eigentlichen Grund
         # von controller_server ueberschreiben; was er tut, kommt ueber /nav2/status.
@@ -199,16 +211,22 @@ class nav2_view(Node):
                 throttle_duration_sec=10.0)
 
         cells = np.asarray(grid.data, dtype=np.int16).reshape(info.height, info.width)
+        r0, r1, c0, c1 = self.view_window(cells, info, in_tunnel)
+        cells = cells[r0:r1, c0:c1]
+        h, w = cells.shape
+        res = info.resolution
+        ox = info.origin.position.x + c0 * res
+        oy = info.origin.position.y + r0 * res
+
         img = self._lut[np.clip(cells, -1, 100) + 1]
         # Zeile 0 der Karte liegt bei origin.y (unten) -- im Bild nach unten.
         img = np.flipud(img)
-        scale = max(1, canvas_size // max(info.width, info.height))
-        body = cv2.resize(img, (info.width * scale, info.height * scale),
-                          interpolation=cv2.INTER_NEAREST)
+        scale = max(1, canvas_size // max(w, h))
+        body = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST)
 
         def px(x, y):
-            u = (x - info.origin.position.x) / info.resolution * scale
-            v = (info.height - (y - info.origin.position.y) / info.resolution) * scale
+            u = (x - ox) / res * scale
+            v = (h - (y - oy) / res) * scale
             return (int(round(u)), int(round(v)))
 
         self.draw_scan(body, px)
@@ -217,7 +235,33 @@ class nav2_view(Node):
         self.draw_path(body, px, path)
         self.draw_robot(body, px)
 
-        self.publish(self.compose(body, grid_name, (info.resolution, scale)))
+        self.publish(self.compose(body, grid_name, (res, scale)))
+
+    def view_window(self, cells, info, in_tunnel):
+        """Zeilen/Spalten (r0, r1, c0, c1) des gezeigten Ausschnitts der Karte."""
+        full = (0, info.height, 0, info.width)
+        res = info.resolution
+
+        if in_tunnel:
+            known = np.argwhere(cells >= 0)
+            if known.size == 0:
+                return full
+            m = int(round(self.get_parameter('tunnel_view_margin_m').value / res))
+            (r0, c0), (r1, c1) = known.min(axis=0) - m, known.max(axis=0) + 1 + m
+        else:
+            pose = self.lookup(self.get_parameter('robot_frame').value)
+            if pose is None:
+                return full
+            half = int(round(self.get_parameter('local_view_size_m').value / 2.0 / res))
+            rc = int((pose[1] - info.origin.position.y) / res)
+            cc = int((pose[0] - info.origin.position.x) / res)
+            r0, r1, c0, c1 = rc - half, rc + half, cc - half, cc + half
+
+        r0, c0 = max(0, r0), max(0, c0)
+        r1, c1 = min(info.height, r1), min(info.width, c1)
+        if r1 - r0 < 2 or c1 - c0 < 2:
+            return full
+        return int(r0), int(r1), int(c0), int(c1)
 
     def lookup(self, frame):
         """2D-Pose (x, y, yaw) von frame im odom-Frame, neueste TF, oder None."""
