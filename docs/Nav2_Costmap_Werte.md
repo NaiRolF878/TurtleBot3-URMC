@@ -147,8 +147,8 @@ ankommt.
   hält.
 - **`obstacle_max_range` / `raytrace_max_range` 2.0:** Gemessen ab
   `base_footprint`. *Woher:* nicht dokumentiert. Faktisch **begrenzen sie
-  nichts**: `lane_costmap_node` schickt nur Punkte bis `ground_x_max` (0.80 m)
-  voraus, seitlich sieht die Kamera dort etwa ±0,5 m (zusammen < 1 m Abstand).
+  nichts**: `lane_costmap_node` schickt nur Punkte aus der BEV, also bis 0,60 m
+  voraus und ±0,40 m seitlich (zusammen < 0,75 m Abstand).
 
 ### `entrance_layer` (Tunnel-Eingangssperre)
 - **`clearing: false`:** *Woher:* gewählt, siehe Kommentar in der Datei. Die
@@ -225,70 +225,58 @@ Konfiguration abgeleitet und nicht auf dem Bot beobachtet.
 
 | Wert | aktuell |
 |---|---|
-| `ground_homography_file` | `ground_homography_800x600.yaml` |
-| `ground_x_min` | 0.15 m |
-| `ground_x_max` | 0.80 m |
 | `pixel_stride` | 2 |
 | `frame_id` | `base_footprint` |
+| Umrechnung Pixel → Meter | aus `Parameter/bev.yaml` |
 
-Der Node sendet in jedem Modus außer Tunnel. Die
-Pixel aus dem entzerrten Kamerabild werden über die Homographie
-`H_image_to_ground` in Bodenkoordinaten umgerechnet: X vorwärts ab Radachse,
-Y nach links, in Metern. Das entspricht genau `base_footprint`. Die Homographie
-liegt in `Parameter/camera_info/ground_homography_800x600.yaml` und wird mit
-`scripts/tb/ground-calib.py` neu erzeugt.
+Der Node sendet in jedem Modus außer Tunnel. Die Linienpixel stammen aus der
+metrischen Vogelperspektive `/lokal/bev`, die `ingress_node` aus dem Rohbild
+und der vermessenen Extrinsik (`Parameter/camera_info/extrinsics_800x600.yaml`)
+erzeugt. `detect_lane` erkennt die Linien direkt in diesem Bild. In der BEV ist
+die Umrechnung in Meter linear. Sie steht in `Parameter/bev.yaml`, derselben
+Datei, mit der `ingress_node` die BEV baut:
 
-**Dokumentierte Genauigkeit** (aus der YAML):
+```
+X = x_max - (v + 0.5) * res        X vorwärts ab Radachse
+Y = y_half - (u + 0.5) * res       Y nach links
+```
 
-| | RMS | max |
-|---|---|---|
-| Fit-Restfehler (`fit_rms_mm` / `fit_max_mm`) | 2,99 mm | 7,72 mm |
-| Kreuzvalidierung (`crossval_rms_mm` / `crossval_max_mm`) | **4,11 mm** | **9,66 mm** |
+Das entspricht genau `base_footprint`. Aktuell (`bev.yaml`): 1,25 mm pro
+Pixel, X von 0,05 bis 0,60 m, Y ±0,40 m, also 640 × 440 px. Was die Kamera
+nicht sieht, ist in der BEV schwarz und liefert keine Linienpunkte. Real
+beginnt der sichtbare Boden erst bei etwa 0,19 m.
 
-Der Kreuzvalidierungswert ist der ehrliche, der Fit-Restfehler ist immer
-optimistisch. Beide gelten nur im Bereich der ausgelegten Marker: X von 0,20
-bis 0,70 m, seitlich bis ±0,20 m.
+**Genauigkeit:** hängt an der Extrinsik (Höhe, Neigung, Roll der Kamera). Wie
+genau die BEV am Boden ist, steht in `docs/bev-tests/`. In diesem Dokument ist
+das nicht nachgemessen.
 
-### `ground_homography_file`
-- **Was er bewirkt:** Dateiname in `Parameter/camera_info/`. Wird nur beim
-  Start des Nodes gelesen.
-- **Woher:** gemessen (Fit an abgemessene Bodenpunkte).
-- **Was kaputtgeht:** Die Datei gilt nur für das **entzerrte** Bild
-  (`ingress_node` mit `undistort:=true`) und nur für genau die eingetragene
-  Auflösung (`image_width`/`image_height`: 800×600). Weicht die Auflösung der
-  `LaneMask` ab, loggt der Node einmal einen Fehler und sendet keine Spurwände
-  mehr. Fehlt die Datei, sendet er ebenfalls nichts. Bei abgeschalteter
-  Entzerrung sind die Meter falsch, ohne dass es eine Warnung gibt.
+### Bildgröße
+- Weicht die Größe der `LaneMask` von dem ab, was `bev.yaml` beschreibt, loggt
+  der Node einmal einen Fehler und sendet keine Spurwände. Die Meter wären sonst
+  falsch. Wer `bev.yaml` ändert, muss `ingress_node` und `lane_costmap_node` neu
+  starten. Beide lesen die Datei nur beim Start.
 
-### `ground_x_min`
-- **Was er bewirkt:** Punkte näher als 0,15 m vor der Radachse werden verworfen.
-- **Woher:** gewählt. Sehr nah wird die Homographie unzuverlässig, und der
-  nächste Marker lag bei 0,20 m.
-- **Hinweis:** Mit der aktuellen Homographie entspricht die unterste Bildzeile
-  etwa X = 0,19 m. Der Wert greift im Moment also praktisch nie. Nach einer
-  Neukalibrierung erneut prüfen.
-
-### `ground_x_max`
-- **Was er bewirkt:** Punkte weiter als 0,80 m voraus werden verworfen.
-- **Woher:** abgeleitet. Die Marker reichten beim Fit nur bis 0,70 m, darüber
-  wird extrapoliert und die Fehler wachsen stark. **`ground_x_max` darf nicht
-  weit über den am weitesten entfernten Marker hinausgehen.** Wer weiter
-  hinaus will, legt beim nächsten `ground-calib.py`-Lauf Marker weiter
-  draußen aus.
-- **Was kaputtgeht:** Ist der Wert zu groß, stehen ferne Spurpunkte an
-  falschen Stellen in der Karte und verengen oder verschieben den Korridor.
+### Reichweite
+- Bestimmt durch `x_max_m` in `bev.yaml` (0,60 m). Laut Kommentar dort wird es
+  dahinter in Fahrtrichtung sehr unscharf. Ein eigener Grenzwert im Node ist
+  nicht nötig.
+- **Folge für breite Bereiche:** Bei 50 cm Spurbreite kommen beide Linien erst
+  ab etwa 0,45 m ins Bild. Bis 0,60 m bleibt dann nur ein schmaler Streifen,
+  in dem die Breite gemessen und die Mitte berechnet werden kann (siehe
+  „Spurmitte“).
 
 ### `pixel_stride`
 - **Was er bewirkt:** Nur Pixel, deren x und y Vielfache von `pixel_stride`
   sind, werden umgerechnet.
 - **Woher:** gewählt. Er wirkt zusammen mit `lane_mask_stride` (Default 2 in
   `detect_lane`, nicht in einer YAML gesetzt), das schon beim Senden ausdünnt.
-  Solange beide 2 sind, dünnt `pixel_stride` nichts weiter aus.
+  Solange beide 2 sind, dünnt `pixel_stride` nichts weiter aus. Bei 1,25 mm/px
+  sind das 2,5 mm Abstand, weit unter einer Costmap-Zelle.
 
 ### `frame_id`
 - `base_footprint` liegt in der TurtleBot3-URDF (burger) am Boden direkt unter
-  der Radachse und passt damit zur Konvention der Homographie. Nicht ändern,
-  solange die Homographie ab Radachse gemessen ist.
+  der Radachse und passt damit zur Konvention der BEV (X ab Radachse). Nicht
+  ändern, solange `bev.yaml` ab Radachse rechnet.
 
 ### Spurmitte als Pfad für MPPI
 
@@ -328,22 +316,25 @@ funktioniert.
 | `center_min_points` | 3 | gewählt; darunter kein Pfad |
 | `center_width_history` | 20 Bilder | gewählt; Median der gemessenen Breite |
 
-**Offline geprüft** (synthetische Spuren über die echte Homographie gerendert,
-gleiche Rasterung wie `detect_lane`, nicht auf dem Bot):
+**Offline geprüft** (synthetische Spuren direkt auf das BEV-Raster aus
+`bev.yaml` gelegt, Sichtfeld der echten Kamera ausgeblendet, `lane_mask_stride`
+2 wie in `detect_lane`, nicht auf dem Bot). Das prüft die Rechnung, nicht die
+Genauigkeit der Extrinsik:
 
-| Fall | Abweichung von der echten Mitte |
-|---|---|
-| gerade, 20 cm und 50 cm | ≤ 0,5 mm |
-| Kurve R = 1,2 m, 20 cm | 2,8 mm |
-| 50-cm-Lücke in Weiß | 0,8 mm |
-| nur eine Linie, gerade / Kurve R = 1,2 m | 1,8 / 2,4 mm |
-| nur Gelb, Kurve R = 0,7 m | 8,7 mm |
+| Fall | Pfad von–bis | Abweichung von der echten Mitte |
+|---|---|---|
+| gerade, 20 cm | 0,20–0,55 m | 0,9 mm |
+| gerade, 50 cm | **0,47–0,52 m** | 0,8 mm |
+| Kurve R = 1,2 m, 20 cm | 0,18–0,63 m | 1,3 mm |
+| Kurve R = 0,7 m, 20 cm, Breite gelernt | 0,17–0,47 m | 1,8 mm |
 
 **Grenzen:**
 - Die Kamera sieht nah am Bot nur ±11 cm. In engen Kurven (R ≈ 0,7 m) liegt
   die innere Linie dann außerhalb des Bildes, und es gilt die gelernte Breite.
-  Im 50 cm breiten Bereich beginnt der Pfad erst bei ~0,45 m, weil beide
-  Linien vorher außerhalb des Bildes liegen.
+- **Breiter Bereich:** Bei 50 cm Breite sind beide Linien erst ab ~0,45 m im
+  Bild, die BEV endet bei 0,60 m. Die Spurmitte ist dann nur wenige Zentimeter
+  lang. Mit `x_max_m` größer als 0,60 m in `bev.yaml` würde sie länger, aber
+  laut `bev.yaml` wird die BEV dort unscharf.
 - Gelbe oder weiße Linien, die quer durch den Hindernisbereich laufen, würden
   die Anpassung verfälschen. Das muss man vor Ort in RViz prüfen (Anzeige
   „Spurmitte“).
@@ -487,7 +478,7 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
 | `/local_costmap/costmap` | alle Layer der local_costmap zusammen, dazu die Inflation. Außerhalb des Tunnels auch die Spurwände. |
 | `/global_costmap/costmap` | die Tunnelkarte (LiDAR + Eingangssperre, keine Spur), 7×7 m um den Bot |
 | `/scan` | LiDAR-Rohdaten, unabhängig von Nav2 |
-| `/detect/lane_obstacles` (PointCloud2) | die Spurpunkte in Metern, außerhalb des Tunnels. Hier prüft man, ob die Homographie stimmt. |
+| `/detect/lane_obstacles` (PointCloud2) | die Spurpunkte in Metern, außerhalb des Tunnels. Hier prüft man, ob BEV und Extrinsik stimmen. |
 | `/lane/center_path` (Anzeige „Spurmitte“) | die berechnete Spurmitte, das Ziel für MPPI im Obstacle-Modus |
 
 **Der Test, mit dem wir den Fehler gefunden haben:** Eine Wand vor den LiDAR
@@ -509,12 +500,10 @@ halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
 
 - **Andere Spurbreite oder anderer Hindernisbereich** → nichts. Kollision prüft
   der Umriss, nicht ein auf die Breite abgestimmter Wert (Abschnitt 3).
-- **Kamera verstellt** (Neigung, Höhe, Halterung) → Homographie mit
-  `scripts/tb/ground-calib.py` neu erzeugen. Danach `ground_x_min` (unterste
-  Bildzeile) und `ground_x_max` (weitester Marker) prüfen.
-- **Andere Bildauflösung** → Die Homographie ist ungültig. `lane_costmap_node`
-  verweigert dann den Dienst (Fehler im Log, keine Spurwände), bis eine
-  Homographie für die neue Auflösung vorliegt.
+- **Kamera verstellt** (Neigung, Höhe, Halterung) → Extrinsik neu messen
+  (`scripts/tb/camera-extrinsics.py`). Daraus baut `ingress_node` die BEV.
+- **`bev.yaml` geändert** (Bereich oder Auflösung) → `ingress_node` und
+  `lane_costmap_node` neu starten. Beide lesen die Datei nur beim Start.
 - **Andere Höchstgeschwindigkeit** (`vx_max`) oder anderer `goal_distance` →
   `time_steps` nach der Formel in Abschnitt 5 nachrechnen.
 - **Enclosure-Öffnung gemessen** → `entrance_wall_width` (Block

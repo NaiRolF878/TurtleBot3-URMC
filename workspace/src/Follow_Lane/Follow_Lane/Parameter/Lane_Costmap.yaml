@@ -2,16 +2,9 @@
   ros__parameters:
     # Spurwaende fuer den lane_layer und Spurmitte als Pfad, in jedem Modus ausser
     # Tunnel (Kamera dort verboten), siehe Docstring in lane_costmap_node.py.
-    # Pixel -> Meter kommt aus Parameter/camera_info/ground_homography_800x600.yaml.
-    # Wurde die Kamera verstellt, die Datei mit scripts/tb/ground-calib.py neu
-    # erzeugen und ground_x_min/ground_x_max pruefen.
-    ground_homography_file: ground_homography_800x600.yaml
-    # Gueltigkeitsbereich der Homographie (X vorwaerts ab Radachse, Meter).
-    # ground_x_max: die Marker beim Fit reichten nur bis 0.70 m, darueber hinaus
-    # wird extrapoliert und die Fehler wachsen stark.
-    ground_x_min: 0.15
-    ground_x_max: 0.80
-
+    # Pixel -> Meter und Reichweite kommen aus Parameter/bev.yaml (dieselbe Datei,
+    # mit der ingress_node /lokal/bev erzeugt). Wurde die Kamera verstellt, die
+    # Extrinsik neu messen (scripts/tb/camera-extrinsics.py).
     frame_id: base_footprint
     output_topic: /detect/lane_obstacles
     pixel_stride: 2

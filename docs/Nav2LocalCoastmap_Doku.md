@@ -107,7 +107,7 @@ Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht da
 Zeichnet das Debugbild auf `/lokal/debug_view`, angezeigt in `rqt_image_view`. Unten im Mode-Panel liegt der Tunnel-Button. Ein Klick darauf kommt als Klickposition von `rqt_image_view` auf `/lokal/debug_view_mouse_left` an. Dafür muss in `rqt_image_view` einmal die Checkbox **„Publish click location“** angehakt sein.
 
 ### `lane_costmap_node` — Spurlinien als virtuelle Wände (nicht im Tunnel)
-Wandelt die von der Kamera erkannten Spurlinien-Pixel über die vermessene Bodenhomographie in Meter um und speist sie als virtuelle Wände in den `lane_layer` der local_costmap ein, damit Nav2 beim Ausweichen nicht über die Linien fährt. Außerdem berechnet er die Spurmitte und sendet sie als Pfad (`/lane/center_path`), mit laufend gemessener Spurbreite. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Im Tunnel sendet er nichts und leert beim Eintritt die local_costmap.
+Wandelt die von der Kamera erkannten Spurlinien-Pixel aus der metrischen Vogelperspektive `/lokal/bev` über `Parameter/bev.yaml` in Meter um und speist sie als virtuelle Wände in den `lane_layer` der local_costmap ein, damit Nav2 beim Ausweichen nicht über die Linien fährt. Außerdem berechnet er die Spurmitte und sendet sie als Pfad (`/lane/center_path`), mit laufend gemessener Spurbreite. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Im Tunnel sendet er nichts und leert beim Eintritt die local_costmap.
 
 ### `keepout_zone_node` — die Eingangs-Sperrzone (nur Tunnel-Modus)
 Merkt sich einmalig, wo der Roboter in den Tunnel eingefahren ist, und blockiert diese Stelle dauerhaft als virtuelle Wand — damit der Roboter nicht durch den Eingang wieder rausfährt. Die Wand bleibt an dieser Stelle, wird aber erst gesendet, wenn der Bot `entrance_wall_delay` weit davon weggefahren ist. Vorher stünde er selbst in ihr. Die Wand nach hinten zu verschieben wäre keine Lösung, weil dann eine Lücke zum Eingang entstünde. Setzt außerdem bei jedem neuen Tunnel-Eintritt die Explorationskarte (`global_costmap`) zurück, damit sich mehrere Tunnel auf derselben Strecke nicht gegenseitig stören.
@@ -147,11 +147,9 @@ Die Tunnelausfahrt läuft bewusst nur über den LiDAR — die Kamera ist in der 
 
 | Parameter | Wert | Bedeutung | Auswirkung |
 |---|---|---|---|
-| `ground_homography_file` | `ground_homography_800x600.yaml` | Vermessene Umrechnung Bildpixel → Boden (in `Parameter/camera_info/`), erzeugt mit `scripts/tb/ground-calib.py` | Gilt nur für das entzerrte 800×600-Bild; bei anderer Auflösung sendet der Node nichts |
-| `ground_x_min` / `ground_x_max` | 0.15 / 0.80 m | Gültigkeitsbereich der Homographie nach vorn | Die Marker reichten beim Fit bis 0,70 m — weiter draußen wird extrapoliert |
 | `pixel_stride` | 2 | Wie stark die Maskenpunkte ausgedünnt werden, bevor sie in die Costmap gehen | Größer = weniger Punkte, spart Rechenzeit, aber gröbere Wand |
 
-Sendet in jedem Modus außer Tunnel. Details: `docs/Nav2_Costmap_Werte.md`, Abschnitt 4.
+Sendet in jedem Modus außer Tunnel. Pixel → Meter und Reichweite (bis 0,60 m) kommen aus `Parameter/bev.yaml`, nicht aus dieser Datei. Details: `docs/Nav2_Costmap_Werte.md`, Abschnitt 4.
 
 ### 5.3 `keepout_zone_node.py` → Block `/keepout_zone_node` in `Lane_Costmap.yaml`
 
@@ -247,7 +245,7 @@ Das ist bewusst **kein SLAM** (keine Positions-Korrektur, keine "Loop Closure") 
 ## 8. Checkliste vor dem Wettkampf
 
 **Obstacle-Modus:**
-- [ ] In RViz prüfen, ob `/detect/lane_obstacles` auf den echten Linien liegt (Homographie)
+- [ ] In RViz prüfen, ob `/detect/lane_obstacles` auf den echten Linien liegt (BEV/Extrinsik)
 - [ ] In RViz prüfen, ob „Spurmitte“ (`/lane/center_path`) in Kurven und im Hindernisbereich mittig liegt
 - [ ] Prüfen, ob MPPI mit `consider_footprint: true` die 20 Hz hält (Rechenlast)
 - [ ] `inflation_radius` im Hindernisbereich testen (Zug zur Mitte vs. enge Durchfahrten)

@@ -3,7 +3,6 @@ import os
 from collections import deque
 
 import numpy as np
-import yaml
 
 import rclpy
 from rclpy.node import Node
@@ -20,6 +19,7 @@ from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 from follow_lane_msg.msg import LaneMask
+from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.switch_control import ControlType
 
 
@@ -146,11 +146,12 @@ class lane_costmap_node(Node):
     folgt. Im odom-Frame bleibt der Pfad liegen, wenn der Bot beim Ausweichen
     schraeg steht und die Linien kurz nicht sieht.
 
-    Pixel -> Meter ueber die vermessene Bodenhomographie H_image_to_ground aus
-    Parameter/camera_info/<ground_homography_file> (erzeugt mit
-    scripts/tb/ground-calib.py). Sie gilt nur fuer das entzerrte Vollbild in genau
-    der dort eingetragenen Aufloesung; bei abweichender Bildgroesse wird nichts
-    gesendet, weil die Meter sonst falsch waeren.
+    Die Linienpixel kommen aus der metrischen Vogelperspektive /lokal/bev, die
+    ingress_node aus der vermessenen Extrinsik erzeugt. Pixel -> Meter ist dort
+    linear und steht in Parameter/bev.yaml (gleiche Datei wie fuer ingress_node):
+        X = x_max - (v + 0.5) * res,   Y = y_half - (u + 0.5) * res
+    Kommt die LaneMask in einer anderen Groesse als bev.yaml beschreibt, wird
+    nichts gesendet, weil die Meter sonst falsch waeren.
 
     Ergebnis ist X vorwaerts ab Radachse, Y nach links, in Metern am Boden. Das
     ist genau base_footprint: in der TurtleBot3-URDF (burger) sitzen
@@ -168,15 +169,6 @@ class lane_costmap_node(Node):
         def frange(lo, hi):
             return ParameterDescriptor(floating_point_range=[
                 FloatingPointRange(from_value=lo, to_value=hi, step=0.0)])
-
-        # Dateiname in Parameter/camera_info/, wird nur beim Start gelesen.
-        self.declare_parameter('ground_homography_file', 'ground_homography_800x600.yaml')
-        # Gueltigkeitsbereich der Homographie in X (vorwaerts ab Radachse). Punkte
-        # ausserhalb werden verworfen. Naeher als ground_x_min wird sie unzuverlaessig;
-        # ground_x_max: die Marker beim Fit reichten nur bis 0.70 m, darueber hinaus
-        # wird extrapoliert und die Fehler wachsen stark.
-        self.declare_parameter('ground_x_min', 0.15, frange(0.0, 5.0))
-        self.declare_parameter('ground_x_max', 0.80, frange(0.0, 5.0))
 
         self.declare_parameter('frame_id', 'base_footprint')
         self.declare_parameter('output_topic', '/detect/lane_obstacles')
@@ -200,7 +192,7 @@ class lane_costmap_node(Node):
             ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=500, step=1)]))
 
         self._param_names = [
-            'ground_x_min', 'ground_x_max', 'frame_id', 'pixel_stride',
+            'frame_id', 'pixel_stride',
             'odom_frame', 'center_bin_size', 'center_min_points',
         ]
 
@@ -223,33 +215,22 @@ class lane_costmap_node(Node):
 
         self.current_control_mode = ControlType.Lane
 
-        self._H = None
-        self._H_size = None
+        self._bev = None
         self._size_error_logged = False
-        self._load_homography(self.get_parameter('ground_homography_file').value)
+        self._load_bev()
 
-    def _load_homography(self, filename):
-        path = os.path.join(get_package_share_directory('Follow_Lane'),
-                            'Parameter', 'camera_info', filename)
+    def _load_bev(self):
+        param_dir = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
         try:
-            with open(path) as f:
-                d = yaml.safe_load(f)
-            H = np.array(d['H_image_to_ground'], dtype=np.float64).reshape(3, 3)
-            width, height = int(d['image_width']), int(d['image_height'])
+            self._bev = bev_geometry.load_bev_spec(param_dir)
         except Exception as e:
             self.get_logger().error(
-                f'Bodenhomographie {path} nicht ladbar ({e}) -- es werden keine Spurwaende gesendet.')
+                f'{bev_geometry.BEV_FILE} nicht ladbar ({e}) -- es werden keine Spurwaende gesendet.')
             return
-
-        # Pixel oberhalb des Horizonts treffen den Boden nicht, w hat dort das andere
-        # Vorzeichen. Welches Vorzeichen "Boden" ist, haengt von der Skalierung des Fits
-        # ab -- daher an der unteren Bildmitte bestimmen, die sicher den Boden zeigt.
-        self._ground_w_sign = np.sign((H @ [width / 2.0, height - 1.0, 1.0])[2])
-        self._H = H
-        self._H_size = (width, height)
+        b = self._bev
         self.get_logger().info(
-            f'Bodenhomographie {filename} geladen ({width}x{height}, '
-            f'Kreuzvalidierung {d.get("crossval_rms_mm", float("nan")):.1f} mm RMS).')
+            f'BEV aus {bev_geometry.BEV_FILE}: {b["width"]}x{b["height"]} px, '
+            f'{b["res"] * 1000:.2f} mm/px, X {b["x_min"]:.2f}-{b["x_max"]:.2f} m.')
 
     def cbGetControlMode(self, msg):
         try:
@@ -276,14 +257,15 @@ class lane_costmap_node(Node):
     def cbLaneMask(self, lane_mask):
         if self.current_control_mode == ControlType.Tunnel:
             return
-        if self._H is None:
+        if self._bev is None:
             return
 
-        if (lane_mask.image_width, lane_mask.image_height) != self._H_size:
+        size = (self._bev['width'], self._bev['height'])
+        if (lane_mask.image_width, lane_mask.image_height) != size:
             if not self._size_error_logged:
                 self.get_logger().error(
                     f'LaneMask kommt mit {lane_mask.image_width}x{lane_mask.image_height}, '
-                    f'die Bodenhomographie gilt fuer {self._H_size[0]}x{self._H_size[1]} '
+                    f'{bev_geometry.BEV_FILE} beschreibt {size[0]}x{size[1]} '
                     '-- es werden keine Spurwaende gesendet.')
                 self._size_error_logged = True
             return
@@ -311,7 +293,7 @@ class lane_costmap_node(Node):
     def _publish_center_path(self, yellow, white, stamp):
         half_width = float(np.median(self._widths)) / 2.0 if self._widths else None
         xs, ys, widths = lane_center_points(
-            yellow, white, self.ground_x_min, self.ground_x_max,
+            yellow, white, self._bev['x_min'], self._bev['x_max'],
             self.center_bin_size, half_width)
         if widths:
             self._widths.append(float(np.median(widths)))
@@ -368,16 +350,11 @@ class lane_costmap_node(Node):
         if xs.size == 0:
             return empty
 
-        # Homogen: [u, v, 1] -> [X, Y, w], dann durch w teilen
-        uv1 = np.vstack([xs, ys, np.ones_like(xs)]).astype(np.float64)
-        ground = self._H @ uv1
-        w = ground[2]
-        on_ground = w * self._ground_w_sign > 1e-9
-        forward = ground[0, on_ground] / w[on_ground]
-        lateral = ground[1, on_ground] / w[on_ground]
-
-        in_range = (forward >= self.ground_x_min) & (forward <= self.ground_x_max)
-        return forward[in_range], lateral[in_range]
+        # Linear, Pixelmitte: siehe bev.yaml
+        b = self._bev
+        forward = b['x_max'] - (ys + 0.5) * b['res']
+        lateral = b['y_half'] - (xs + 0.5) * b['res']
+        return forward, lateral
 
 
 def main(args=None):
