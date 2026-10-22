@@ -27,6 +27,7 @@ from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool
 from std_srvs.srv import SetBool
 
@@ -111,32 +112,33 @@ def print_state(drive):
 
 
 def keyboard_loop(node, stop_event):
-    """Liest Einzeltasten aus dem Terminal (ohne Enter)."""
+    """Liest Einzeltasten aus dem Terminal (ohne Enter). Der Terminalmodus wird in main()
+    gesetzt UND dort wiederhergestellt -- nicht hier, damit er auch bei Fehlern zurueckkommt."""
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        print_state(node.drive)
-        while not stop_event.is_set():
-            r, _, _ = select.select([sys.stdin], [], [], 0.1)
-            if not r:
-                continue
-            ch = os.read(fd, 1)
-            if ch == b' ':
-                node.set_drive(not node.drive, 'Leertaste')
-            elif ch in (b'q', b'Q', b'\x03'):
-                stop_event.set()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write('\n')
+    print_state(node.drive)
+    while not stop_event.is_set():
+        r, _, _ = select.select([sys.stdin], [], [], 0.1)
+        if not r:
+            continue
+        ch = os.read(fd, 1)
+        if ch == b' ':
+            node.set_drive(not node.drive, 'Leertaste')
+        elif ch in (b'q', b'Q', b'\x03'):
+            stop_event.set()
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    # SIGINT selbst behandeln: so ist der ROS-Context beim Aufraeumen noch gueltig und der
+    # Stopp kommt sicher beim Bot an (mit dem rclpy-Handler war er schon ungueltig).
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = notaus()
     stop_event = threading.Event()
     kb = None
+    term = None
     if sys.stdin.isatty():
+        fd = sys.stdin.fileno()
+        term = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
         kb = threading.Thread(target=keyboard_loop, args=(node, stop_event), daemon=True)
         kb.start()
     else:
@@ -149,12 +151,21 @@ def main(args=None):
         pass
     finally:
         stop_event.set()
+        # 1. Terminal zurueck -- egal was danach schiefgeht
+        if term is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, term)
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+        # 2. Stopp an den Bot
         node.drive = False
-        node.send_stop(10)
-        node.publish_state()
+        try:
+            node.send_stop(10)
+            node.publish_state()
+            node.get_logger().info('Not-Aus beendet -- Stopp gesendet.')
+        except Exception as e:  # noqa: BLE001 -- beim Herunterfahren nur melden
+            print(f'Not-Aus: Stopp konnte nicht mehr gesendet werden ({e})')
         if kb is not None:
             kb.join(timeout=1.0)
-        node.get_logger().info('Not-Aus beendet -- Stopp gesendet.')
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -7,6 +7,7 @@ import cv2
 import datetime as dt
 
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from ament_index_python.packages import get_package_share_directory
@@ -75,6 +76,8 @@ class debug_view(Node):
     def build_debug_image(self):
 
         def proj(x, y):
+            if M_inv is None:                      # BEV: Punkte liegen schon im Bild
+                return (int(x), int(y))
             p = np.array([[[float(x), float(y)]]], dtype=np.float32)
             r = cv2.perspectiveTransform(p, M_inv)
             return (int(r[0][0][0]), int(r[0][0][1]))
@@ -95,21 +98,37 @@ class debug_view(Node):
 
         raw_h, raw_w = raw.shape[:2]
 
-        follow_lane_RoI = np.array([
-            [self.follow_lane_debug.top_left_x,     self.follow_lane_debug.top_left_y],
-            [self.follow_lane_debug.top_right_x,    self.follow_lane_debug.top_right_y],
-            [self.follow_lane_debug.bottom_right_x, self.follow_lane_debug.bottom_right_y],
-            [self.follow_lane_debug.bottom_left_x,  self.follow_lane_debug.bottom_left_y],
-        ], np.int32)
+        d = self.follow_lane_debug
+        # crop_im_size == 0: detect_lane arbeitet auf /lokal/bev -- das Bild IST schon die
+        # Vogelperspektive, die Punkte liegen direkt in seinen Pixeln. Kein RoI, keine Rueckrechnung.
+        bev = d.crop_im_size == 0
 
-        cv2.polylines(raw,[follow_lane_RoI],isClosed=True, color=(0, 255, 255), thickness=2, lineType=cv2.LINE_AA)
+        if bev:
+            M_inv = None
+            # Fahrtlinie (Bildmitte = echte Fahrtrichtung) und Suchzeile
+            cv2.line(raw, (raw_w // 2, 0), (raw_w // 2, raw_h - 1), (0, 200, 0), 1, cv2.LINE_AA)
+            for y, col in ((d.center_yellow_y, (0, 255, 255)), (d.center_white_y, (255, 255, 255))):
+                cv2.line(raw, (0, int(y)), (raw_w - 1, int(y)), col, 1, cv2.LINE_AA)
+            # Abweichung: von der Fahrtlinie zur Spurmitte
+            y_c = int((d.center_yellow_y + d.center_white_y) / 2)
+            cv2.arrowedLine(raw, (raw_w // 2, y_c), (int(d.lane_center), y_c), (0, 0, 255), 2,
+                            cv2.LINE_AA, tipLength=0.15)
+        else:
+            follow_lane_RoI = np.array([
+                [d.top_left_x,     d.top_left_y],
+                [d.top_right_x,    d.top_right_y],
+                [d.bottom_right_x, d.bottom_right_y],
+                [d.bottom_left_x,  d.bottom_left_y],
+            ], np.int32)
 
-        # center_*_x/y kommen aus detect_lane vom entzerrten Ausschnitt (crop_img()),
-        # nicht vom raw_image -- ohne Ruecktransformation ueber M_inv landen die
-        # Punkte an der falschen Stelle (falscher Massstab + falsche Perspektive).
-        size = self.follow_lane_debug.crop_im_size
-        pts_warped = np.float32([[0, 0], [size, 0], [size, size], [0, size]])
-        M_inv = cv2.getPerspectiveTransform(pts_warped, follow_lane_RoI.astype(np.float32))
+            cv2.polylines(raw,[follow_lane_RoI],isClosed=True, color=(0, 255, 255), thickness=2, lineType=cv2.LINE_AA)
+
+            # center_*_x/y kommen aus detect_lane vom entzerrten Ausschnitt (crop_img()),
+            # nicht vom raw_image -- ohne Ruecktransformation ueber M_inv landen die
+            # Punkte an der falschen Stelle (falscher Massstab + falsche Perspektive).
+            size = d.crop_im_size
+            pts_warped = np.float32([[0, 0], [size, 0], [size, size], [0, size]])
+            M_inv = cv2.getPerspectiveTransform(pts_warped, follow_lane_RoI.astype(np.float32))
 
         cv2.circle(raw, proj(self.follow_lane_debug.center_yellow_x, self.follow_lane_debug.center_yellow_y), 6, (0, 255, 255), -1, cv2.LINE_AA)
         cv2.circle(raw, proj(self.follow_lane_debug.center_white_x, self.follow_lane_debug.center_white_y), 6, (255, 255, 255), -1, cv2.LINE_AA)
@@ -141,6 +160,8 @@ class debug_view(Node):
         cv2.putText(panelGeneric,f"{self.target_v} m/s"    ,(8,155) ,cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(135, 250, 159)    ,2  ,cv2.LINE_AA)
         cv2.putText(panelGeneric,'Actual:'    ,(8,195) ,cv2.FONT_HERSHEY_SIMPLEX   ,0.55    ,(200, 200, 200)    ,1  ,cv2.LINE_AA)
         cv2.putText(panelGeneric,f"{self.actual_v} m/s"    ,(8,230) ,cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(250, 135, 223)    ,2  ,cv2.LINE_AA)
+        cv2.putText(panelGeneric,'Lane error:'    ,(8,280) ,cv2.FONT_HERSHEY_SIMPLEX   ,0.55    ,(200, 200, 200)    ,1  ,cv2.LINE_AA)
+        cv2.putText(panelGeneric,f"{self.follow_lane_debug.lane_error:+.3f}"    ,(8,315) ,cv2.FONT_HERSHEY_SIMPLEX   ,1    ,(80, 80, 255)    ,2  ,cv2.LINE_AA)
         
 
         panelMode = np.zeros((raw_h, panel_w, 3), dtype=np.uint8)
@@ -197,11 +218,16 @@ class debug_view(Node):
 
 
 def main(args=None):
-        rclpy.init(args=args)
+        # SIGINT selbst behandeln (KeyboardInterrupt), damit der Context beim Aufraeumen noch
+        # gilt -- sonst bei Strg+C ExternalShutdownException-/"context is invalid"-Tracebacks.
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
         node = debug_view()
 
         try:
-            rclpy.spin(node)
+            # spin_once mit Timeout statt spin(): spin() wartet in C auf die naechste Nachricht,
+            # Strg+C kaeme ohne Daten nie an (Knoten haengt beim Beenden).
+            while rclpy.ok():
+                rclpy.spin_once(node, timeout_sec=0.1)
         except KeyboardInterrupt:
             pass
         finally:

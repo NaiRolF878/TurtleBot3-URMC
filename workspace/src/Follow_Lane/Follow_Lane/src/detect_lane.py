@@ -7,6 +7,7 @@ from rcl_interfaces.msg import ParameterDescriptor, IntegerRange, FloatingPointR
 
 import cv2
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from std_msgs.msg import Float64
@@ -36,26 +37,42 @@ class detect_lane(Node):
         # ---------------------------------
 
         # --- Wiederverwendbare Ranges ---
-        hsv  = ParameterDescriptor(integer_range=[IntegerRange(from_value=0,    to_value=255,  step=1)])
+        byte = ParameterDescriptor(integer_range=[IntegerRange(from_value=0,    to_value=255,  step=1)])
         # Obergrenze deckt 1920x1080 ab, negativ weil RoI-Ecken ausserhalb des Bildes liegen duerfen
         crop = ParameterDescriptor(integer_range=[IntegerRange(from_value=-500, to_value=2200, step=1)])
 
-        # --- HSV-Parameter ---
-        # --- White ---
-        self.declare_parameter('hue_white_l',        0,   hsv)
-        self.declare_parameter('hue_white_h',        255, hsv)
-        self.declare_parameter('saturation_white_l', 0,   hsv)
-        self.declare_parameter('saturation_white_h', 75,  hsv)
-        self.declare_parameter('lightness_white_l',  161, hsv)
-        self.declare_parameter('lightness_white_h',  255, hsv)
+        # --- HSV-Parameter (VORUEBERGEHEND zum Testen, LAB-Stand in docs/bev-tests/backup_lab_20261022/) ---
+        self.declare_parameter('hue_white_l',        0,   byte)
+        self.declare_parameter('hue_white_h',        255, byte)
+        self.declare_parameter('saturation_white_l', 0,   byte)
+        self.declare_parameter('saturation_white_h', 75,  byte)
+        self.declare_parameter('lightness_white_l',  161, byte)
+        self.declare_parameter('lightness_white_h',  255, byte)
+        self.declare_parameter('hue_yellow_l',        13,  byte)
+        self.declare_parameter('hue_yellow_h',        60,  byte)
+        self.declare_parameter('saturation_yellow_l', 60,  byte)
+        self.declare_parameter('saturation_yellow_h', 255, byte)
+        self.declare_parameter('lightness_yellow_l',  120, byte)
+        self.declare_parameter('lightness_yellow_h',  255, byte)
 
-        # --- Yellow ---
-        self.declare_parameter('hue_yellow_l',        13,  hsv)
-        self.declare_parameter('hue_yellow_h',        60,  hsv)
-        self.declare_parameter('saturation_yellow_l', 60,  hsv)
-        self.declare_parameter('saturation_yellow_h', 255, hsv)
-        self.declare_parameter('lightness_yellow_l',  120, hsv)
-        self.declare_parameter('lightness_yellow_h',  255, hsv)
+        # --- LAB-Parameter (Farbfilter der Linien) ---
+        # L = Helligkeit, A = gruen(<128)..rot(>128), B = blau(<128)..gelb(>128); 128 = farblos.
+        # Startwerte gemessen auf BEV-Bildern nach CLAHE (docs/bev-tests/README.md, 22.10.):
+        #   Gelb       L 170-244  A 115-127  B 152-210   -> erkennbar am hohen B
+        #   Weiss      L 210-255  A 120-128  B 118-157   -> erkennbar am hohen L, A/B nahe 128
+        #   Matte      L  35-185  A 124-132  B 100-133
+        self.declare_parameter('lab_l_white_l', 200, byte)
+        self.declare_parameter('lab_l_white_h', 255, byte)
+        self.declare_parameter('lab_a_white_l', 112, byte)
+        self.declare_parameter('lab_a_white_h', 140, byte)
+        self.declare_parameter('lab_b_white_l', 110, byte)
+        self.declare_parameter('lab_b_white_h', 145, byte)
+        self.declare_parameter('lab_l_yellow_l', 140, byte)
+        self.declare_parameter('lab_l_yellow_h', 255, byte)
+        self.declare_parameter('lab_a_yellow_l', 100, byte)
+        self.declare_parameter('lab_a_yellow_h', 140, byte)
+        self.declare_parameter('lab_b_yellow_l', 150, byte)
+        self.declare_parameter('lab_b_yellow_h', 255, byte)
 
         # --- Crop-Image-Parameter ---
         # --- Perspektiv-Punkte ---
@@ -84,8 +101,8 @@ class detect_lane(Node):
             ParameterDescriptor(integer_range=[IntegerRange(from_value=0, to_value=300, step=1)]))
 
         # --- CLAHE-Parameter ---
-        # Gleicht ueber-/unterbelichtete Bildbereiche vor der HSV-Filterung an, damit
-        # wechselnde Lichtverhaeltnisse die festen HSV-Schwellwerte nicht verfaelschen.
+        # Gleicht ueber-/unterbelichtete Bildbereiche vor der LAB-Farbfilterung an, damit
+        # wechselnde Lichtverhaeltnisse die festen Schwellwerte nicht verfaelschen.
         self.declare_parameter('clahe_clip_limit', 2.0,
             ParameterDescriptor(floating_point_range=[
                 FloatingPointRange(from_value=0.1, to_value=40.0, step=0.0)]))
@@ -192,6 +209,10 @@ class detect_lane(Node):
                 'lightness_white_l', 'lightness_white_h',
                 'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
                 'lightness_yellow_l', 'lightness_yellow_h',
+                'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
+                'lab_b_white_l', 'lab_b_white_h',
+                'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
+                'lab_b_yellow_l', 'lab_b_yellow_h',
                 'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
                 'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
                 'detection_row_factor', 'min_lane_width',
@@ -205,22 +226,13 @@ class detect_lane(Node):
             
             res_m= 0.00125
             px_per_cm = 0.01/res_m
+            lane_error_scale = 20
             #min_edge_len = 5* pxpercm
 
             detection_row_factor = self.detection_row_factor
 
             self.raw_img = cv_image
-            img = self.apply_clahe(cv_image)
-
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-            mask_yellow = cv2.inRange(hsv,
-                               (self.hue_yellow_l,self.saturation_yellow_l, self.lightness_yellow_l),
-                               (self.hue_yellow_h,self.saturation_yellow_h, self.lightness_yellow_h),)
-
-            mask_white = cv2.inRange(hsv,
-                               (self.hue_white_l,self.saturation_white_l, self.lightness_white_l),
-                               (self.hue_white_h,self.saturation_white_h, self.lightness_white_h),)
+            mask_yellow, mask_white = self.color_masks(cv_image)
 
                 
             k = max(3, int(round(5 * self.px_scale)) | 1)    # 5x5 bei 800x600, ungerade
@@ -234,8 +246,8 @@ class detect_lane(Node):
             cropped_white = mask_white
             cropped_yellow = mask_yellow
 
-            white_alternative = int(len(cropped_white[0]) * 0.95)
-            yellow_alternative = int(len(cropped_yellow[0]) * 0.05)
+            white_alternative = int(len(cropped_white[0]) * 0.65)
+            yellow_alternative = int(len(cropped_yellow[0]) * 0.35)
 
             # Gelb fix am konfigurierten detection_row_factor
             yellow_row_factor = self.detection_row_factor
@@ -264,7 +276,12 @@ class detect_lane(Node):
                 else:
                     center_white_x = white_alternative
 
+
             lane_center = (center_white_x + center_yellow_x) / 2
+            offset_px = len(cropped_white[0]) / 2 - lane_center
+            offset_cm = offset_px / px_per_cm
+            lane_error = offset_cm / lane_error_scale
+
             lane_error = 1-(lane_center / len(cropped_white[0]) * 2)
 
             polies, horizontal, vertical, corners, intersection_corners = \
@@ -282,7 +299,7 @@ class detect_lane(Node):
 
             self.pub_lane_error.publish(msg_error)
             self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, int(lane_center), cv_image, polies, horizontal, vertical,
-                                       corners, intersection_corners)
+                                       corners, intersection_corners, bev=True)
             self.publish_mask_debug(cropped_yellow, cropped_white,
                                     center_yellow_x, center_yellow_y, center_white_x, center_white_y)
 
@@ -305,6 +322,10 @@ class detect_lane(Node):
                 'lightness_white_l', 'lightness_white_h',
                 'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
                 'lightness_yellow_l', 'lightness_yellow_h',
+                'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
+                'lab_b_white_l', 'lab_b_white_h',
+                'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
+                'lab_b_yellow_l', 'lab_b_yellow_h',
                 'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
                 'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
                 'detection_row_factor', 'min_lane_width',
@@ -333,17 +354,7 @@ class detect_lane(Node):
             detection_row_factor = self.detection_row_factor
 
             self.raw_img = cv_image
-            img = self.apply_clahe(cv_image)
-
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-            mask_yellow = cv2.inRange(hsv,
-                               (self.hue_yellow_l,self.saturation_yellow_l, self.lightness_yellow_l),
-                               (self.hue_yellow_h,self.saturation_yellow_h, self.lightness_yellow_h),)
-
-            mask_white = cv2.inRange(hsv,
-                               (self.hue_white_l,self.saturation_white_l, self.lightness_white_l),
-                               (self.hue_white_h,self.saturation_white_h, self.lightness_white_h),)
+            mask_yellow, mask_white = self.color_masks(cv_image)
 
                 
             k = max(3, int(round(5 * self.px_scale)) | 1)    # 5x5 bei 800x600, ungerade
@@ -440,7 +451,7 @@ class detect_lane(Node):
         self.pub_mask_debug.publish(msg)
 
     def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x, center_white_y, lane_error, lane_center, img, polies, horizontal, vertical,
-                              corners=(), intersection_corners=()):
+                              corners=(), intersection_corners=(), bev=False):
         follow_lane_debug_info = FollowLaneDebug()
         follow_lane_debug_info.center_white_x = center_white_x
         follow_lane_debug_info.center_white_y = center_white_y
@@ -448,7 +459,9 @@ class detect_lane(Node):
         follow_lane_debug_info.center_yellow_y = center_yellow_y
         follow_lane_debug_info.lane_center = lane_center
         follow_lane_debug_info.lane_error = lane_error
-        follow_lane_debug_info.crop_im_size = self._crop_im_size
+        # 0 = das Bild ist schon die BEV (cbFindLaneBEV): debug_view zeichnet die Punkte direkt,
+        # ohne RoI-Viereck und ohne Rueckrechnung ueber die alte Perspektive.
+        follow_lane_debug_info.crop_im_size = 0 if bev else self._crop_im_size
 
         success, encoded = cv2.imencode('.jpg', img)
         if success:
@@ -661,7 +674,20 @@ class detect_lane(Node):
         corners = [c for _, cs in corners_per_poly for c in cs]
         return polies, horizontal, vertical, corners, intersection_corners
 
-    def apply_clahe(self, img):
+    def color_masks(self, img):
+        """Gelb- und Weiss-Maske aus dem BGR-Bild nach CLAHE.
+        VORUEBERGEHEND HSV zum Testen -- die LAB-Version steht in docs/bev-tests/backup_lab_20261022/."""
+        bgr = self.apply_clahe(img)
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        mask_yellow = cv2.inRange(hsv,
+            (self.hue_yellow_l, self.saturation_yellow_l, self.lightness_yellow_l),
+            (self.hue_yellow_h, self.saturation_yellow_h, self.lightness_yellow_h))
+        mask_white = cv2.inRange(hsv,
+            (self.hue_white_l, self.saturation_white_l, self.lightness_white_l),
+            (self.hue_white_h, self.saturation_white_h, self.lightness_white_h))
+        return mask_yellow, mask_white
+
+    def apply_clahe(self, img, return_lab=False):
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l_channel, a_channel, b_channel = cv2.split(lab)
 
@@ -671,6 +697,8 @@ class detect_lane(Node):
         l_channel = clahe.apply(l_channel)
 
         lab = cv2.merge((l_channel, a_channel, b_channel))
+        if return_lab:
+            return lab
         return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     def crop_img(self,img):
@@ -739,10 +767,15 @@ class detect_lane(Node):
     
     #NOCHMAL Überarbeiten
 def main(args=None):    
-    rclpy.init(args=args)
+    # SIGINT selbst behandeln (KeyboardInterrupt), damit der Context beim Aufraeumen noch
+    # gilt -- sonst bei Strg+C ExternalShutdownException-/"context is invalid"-Tracebacks.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = detect_lane()
     try:
-        rclpy.spin(node)
+        # spin_once mit Timeout statt spin(): spin() wartet in C auf die naechste Nachricht,
+        # Strg+C kaeme ohne Daten nie an (Knoten haengt beim Beenden).
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:

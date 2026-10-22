@@ -61,6 +61,9 @@ Der Bot fährt **nie von selbst** los. Freigabe und Stopp, jeweils umschalten:
 
 Zustand: `ros2 topic echo /notaus/drive`. Kommt vom Regler 0,5 s nichts, sendet der Not-Aus selbst Stopp.
 Läuft der Not-Aus nicht, kommt **kein** Fahrbefehl zum Bot (kein direkter Weg mehr).
+Läuft schon eine Pipeline (z. B. in einem anderen Terminal), fragt `follow_lane.sh`, ob sie beendet werden soll –
+zwei gleichzeitig führen zu flackernden Debug-Bildern und einem Not-Aus, der dauernd Stopp sendet.
+Uhrzeiten im Container und im Debug-Bild sind **UTC** (2 h hinter deutscher Sommerzeit).
 
 Parameter dauerhaft machen bzw. laden:
 
@@ -70,6 +73,15 @@ bash scripts/tb/load-params.sh detect_lane     # Datei in den laufenden Node lad
 ```
 
 ---
+
+## Logs (Ordner `logs/` im Repo)
+
+| Datei | Inhalt |
+|---|---|
+| `logs/follow_lane-<Zeit>.log` / `follow_lane-latest.log` | Ausgaben aller Knoten der Pipeline (Fehler, Tracebacks) |
+| `logs/tb-status-<Zeit>.log` | alle 10 s Knoten/Topic-Raten/Netz, wenn bei `tb` „mitloggen“ = j |
+
+Zeiten in Dateinamen sind UTC (2 h hinter deutscher Sommerzeit).
 
 ## Wichtige Topics
 

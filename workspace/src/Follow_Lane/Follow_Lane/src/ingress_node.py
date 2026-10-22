@@ -3,6 +3,7 @@ import os
 import cv2
 import numpy as np
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
@@ -167,10 +168,15 @@ class ingress_node(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    # SIGINT selbst behandeln (KeyboardInterrupt), damit der Context beim Aufraeumen noch
+    # gilt -- sonst bei Strg+C ExternalShutdownException-/"context is invalid"-Tracebacks.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = ingress_node()
     try:
-        rclpy.spin(node)
+        # spin_once mit Timeout statt spin(): spin() wartet in C auf die naechste Nachricht,
+        # Strg+C kaeme ohne Daten nie an (Knoten haengt beim Beenden).
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
