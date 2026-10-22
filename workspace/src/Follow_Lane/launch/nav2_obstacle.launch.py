@@ -15,7 +15,9 @@ RVIZ_CONFIG = os.path.join(SHARE, 'rviz', 'urmc.rviz')
 
 
 def generate_launch_description():
-    """Startet alles: Spurverfolgung, Nav2-Zweig, RViz und Debug-Fenster.
+    """Startet alles: Spurverfolgung, Nav2-Zweig, RViz und Debug-Fenster -- ausser dem
+    Not-Aus (notaus.py), der ein Terminal fuer die Leertaste braucht. launchers/nav2_obstacle.sh
+    startet ihn im Vordergrund; ohne ihn faehrt der Bot nicht.
 
     Die Fahrzweige schliessen sich ueber /control/mode gegenseitig aus --
     control_driving faehrt bei Lane, der Nav2-Zweig bei Obstacle bzw. Tunnel.
@@ -54,11 +56,15 @@ def generate_launch_description():
             parameters=[LaunchConfiguration('lane_costmap_params')],
         ),
 
-        # Local Costmap + MPPI
+        # Local Costmap + MPPI. Fahrbefehle auf /control/cmd_vel statt /cmd_vel: wie bei
+        # control_driving sitzt dazwischen der Not-Aus (notaus.py), der nur nach Freigabe
+        # durchreicht. Beide Regler teilen sich das Topic ohne Konflikt -- control_driving
+        # sendet nur im Lane-Modus, Nav2 hat nur in Obstacle/Tunnel ein Ziel.
         Node(
             package='nav2_controller', executable='controller_server', name='controller_server',
             output='screen',
             parameters=[LaunchConfiguration('nav2_params')],
+            remappings=[('cmd_vel', '/control/cmd_vel')],
         ),
         # Global Planner + Tunnelkarte, liefert nur Pfade
         Node(
