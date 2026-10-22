@@ -53,3 +53,6 @@ dataset/
 
 # Lokales Allerlei, das nicht zum eigentlichen Projekt gehoert (z.B. Bot-Melodien) -- nicht ins Repo.
 misc/
+
+# Von VS Code/Pylance erzeugte Typ-Stubs (z.B. cv2), lokal erzeugbar
+typings/
