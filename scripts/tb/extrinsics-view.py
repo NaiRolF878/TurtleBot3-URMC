@@ -18,6 +18,9 @@ Was das Bild zeigt:
   * Gestrichelte Horizontlinie. Kippt sie, steckt Roll drin.
   * Liegt das ChArUco-Brett im Bild, wird seine Lage LIVE gemessen und gegen die
     gespeicherten Werte gestellt -- plus Reprojektionsfehler in Pixeln.
+  * Rechts daneben die Vogelperspektive mit demselben Gitter (aus mit --no-bev bzw.
+    Parameter show_bev). Die Brettecken (magenta) werden darin auf den Boden gelegt:
+    stimmt die Extrinsik, bilden sie ein gleichmaessiges, achsparalleles 3-cm-Raster.
 
 So pruefst du, ob die Kalibrierung stimmt:
   1. Zollstock flach auf den Boden, 0 an der Radachse, entlang der Fahrtrichtung.
@@ -31,6 +34,7 @@ Live sind alle Werte ROS-Parameter und zur Laufzeit aenderbar:
     ros2 run rqt_reconfigure rqt_reconfigure
 """
 import argparse
+import math
 import os
 import sys
 
@@ -164,18 +168,97 @@ def scale_K(K, cal_wh, img_wh, warn=None):
     return K
 
 
+def overlay_homography(K, live, origin_lens, H_fit=None):
+    """Homographie Boden -> Bild, wie sie render_overlay() und render_bev() benutzen."""
+    if H_fit is not None:
+        return H_fit
+    dx, dy = (0.0, 0.0) if origin_lens else (live['forward'], live['lateral'])
+    return cg.ground_homography(K, live['height'], live['pitch'], live['roll'], dx, dy,
+                                live.get('yaw', 0.0))
+
+
+def render_bev(img, H, grid, height_px, board_corners=None):
+    """Vogelperspektive des Bodens von der Bildunterkante bis grid['x_max_cm'],
+    +/- grid['y_half_cm'], gleicher Massstab in beide Richtungen, mit Gitter.
+
+    board_corners: erkannte ChArUco-Ecken (Bildpixel) -- werden ueber dieselbe
+    Homographie auf den Boden gelegt. Stimmt die Extrinsik, bilden sie in der BEV ein
+    gleichmaessiges, achsparalleles Raster mit der echten Kachelgroesse.
+    """
+    h, w = img.shape[:2]
+    step = grid['step_cm'] / 100.0
+    x_max = grid['x_max_cm'] / 100.0
+    y_half = grid['y_half_cm'] / 100.0
+    H_i2g = np.linalg.inv(H)
+
+    # Naechster sichtbarer Bodenpunkt: Bildunterkante in der Mitte
+    g = H_i2g @ np.array([w / 2.0, h - 1.0, 1.0])
+    x_min = max(0.0, float(g[0] / g[2])) if g[2] != 0 else 0.0
+    x_min = math.floor(x_min * 20) / 20          # auf 5 cm abrunden
+    if x_max <= x_min + 0.05:
+        x_max = x_min + 0.5
+
+    ppm = height_px / (x_max - x_min)            # Pixel pro Meter
+    bw = int(round(2 * y_half * ppm))
+    if bw > 2 * height_px:                       # sehr breit: Breite begrenzen
+        bw = 2 * height_px
+        y_half = bw / (2 * ppm)
+    A = np.array([[0.0, -1.0 / ppm, x_max],      # BEV-Pixel (u,v) -> Boden (X,Y)
+                  [-1.0 / ppm, 0.0, y_half],
+                  [0.0, 0.0, 1.0]])
+    M = np.linalg.inv(H @ A)
+    M /= M[2, 2]
+    bev = cv2.warpPerspective(img, M, (bw, height_px), flags=cv2.INTER_LINEAR)
+
+    def g2b(X, Y):
+        return int(round((y_half - Y) * ppm)), int(round((x_max - X) * ppm))
+
+    # Gitter
+    x = math.ceil(x_min / step) * step
+    while x <= x_max + 1e-9:
+        major = round(x * 100) % 50 == 0
+        col = COL_MAJOR if major else COL_MINOR
+        cv2.line(bev, g2b(x, y_half), g2b(x, -y_half), col, 2 if major else 1, cv2.LINE_AA)
+        u, v = g2b(x, 0)
+        cv2.putText(bev, f'{round(x * 100)}', (4, v - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(bev, f'{round(x * 100)}', (4, v - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    col, 1, cv2.LINE_AA)
+        x = round(x + step, 4)
+    n_y = int(round(y_half / step))
+    for i in range(-n_y, n_y + 1):
+        y = round(i * step, 4)
+        center = abs(y) < 1e-9
+        col = COL_CENTER if center else (COL_MAJOR if round(abs(y) * 100) % 50 == 0 else COL_MINOR)
+        cv2.line(bev, g2b(x_min, y), g2b(x_max, y), col, 2 if center else 1, cv2.LINE_AA)
+
+    # Brettecken auf den Boden legen
+    if board_corners is not None and len(board_corners):
+        pts = board_corners.reshape(-1, 2).astype(np.float64)
+        gg = H_i2g @ np.vstack([pts.T, np.ones(len(pts))])
+        for X, Y in zip(gg[0] / gg[2], gg[1] / gg[2]):
+            cv2.circle(bev, g2b(X, Y), 3, COL_BOARD, -1, cv2.LINE_AA)
+
+    put_lines(bev, [f'VOGELPERSPEKTIVE  {round(x_min * 100)}-{round(x_max * 100)} cm, '
+                    f'Gitter {int(step * 100)} cm'], (8, 8))
+    return bev
+
+
 def render_overlay(img, K, live, stored, grid, origin_lens,
-                   D_pnp=None, dictionary=None, board=None, H_fit=None):
+                   D_pnp=None, dictionary=None, board=None, H_fit=None, found=None):
     """Kernstueck: Bodengitter + Infoblöcke ins Bild zeichnen. Gibt ein neues Bild zurueck.
 
     live/stored : dicts mit height, pitch, roll, forward, lateral
     grid        : dict mit step_cm, x_max_cm, y_half_cm
+    found       : optionales dict, bekommt 'board_corners' (fuer render_bev)
     """
     # Brett ZUERST auf dem unbemalten Bild suchen, danach erst das Gitter zeichnen.
     board_lines, board_corners, board_ids = None, None, None
     if board is not None:
         board_lines, _, board_corners, board_ids = measure_board(
             img, K, D_pnp, dictionary, board, stored)
+    if found is not None:
+        found['board_corners'] = board_corners
 
     img = img.copy()
     w = img.shape[1]
@@ -185,13 +268,9 @@ def render_overlay(img, K, live, stored, grid, origin_lens,
 
     # origin_lens: Ursprung unter der Linse. Sonst auf der Radachse -- dann sind die
     # Beschriftungen die Masse, die man vom Bot aus mit dem Zollstock nachmisst.
-    if H_fit is not None:
-        # An echte Bodenpunkte gefittete Homographie -- Hoehe/Neigung/Roll spielen
-        # dann keine Rolle mehr, der Ursprung steckt schon in der Messung.
-        H = H_fit
-    else:
-        dx, dy = (0.0, 0.0) if origin_lens else (live['forward'], live['lateral'])
-        H = cg.ground_homography(K, live['height'], live['pitch'], live['roll'], dx, dy)
+    # Bei H_fit: an echte Bodenpunkte gefittete Homographie -- Hoehe/Neigung/Roll spielen
+    # dann keine Rolle mehr, der Ursprung steckt schon in der Messung.
+    H = overlay_homography(K, live, origin_lens, H_fit)
 
     if H_fit is None:
         draw_horizon(img, K, live['pitch'], live['roll'])
@@ -242,6 +321,7 @@ def render_overlay(img, K, live, stored, grid, origin_lens,
             f'Hoehe   {live["height"] * 100:6.2f} cm  (gespeichert {stored["height"] * 100:.2f})',
             f'Neigung {live["pitch"]:6.2f} deg (gespeichert {stored["pitch"]:.2f})',
             f'Roll    {live["roll"]:6.2f} deg (gespeichert {stored["roll"]:.2f})',
+            f'Yaw     {live.get("yaw", 0.0):6.2f} deg (gespeichert {stored.get("yaw", 0.0):.2f}), gruen = Fahrtrichtung',
             f'fx {K[0, 0]:.1f}  cx {K[0, 2]:.1f} (Bildmitte {w / 2:.0f})',
             'Y=0 liegt geometrisch immer bei u = cx',
         ]
@@ -258,6 +338,7 @@ def stored_from_yaml(ext):
         roll=float(ext.get('camera_roll_deg', 0.0)),
         forward=float(ext.get('forward_offset_m', 0.0)),
         lateral=float(ext.get('lateral_offset_m', 0.0)),
+        yaw=float(ext.get('camera_yaw_deg', 0.0)),
     )
 
 
@@ -296,11 +377,14 @@ def run_live(K, D_pnp, ext, args, cal_w, cal_h, H_fit=None, fit_info=None):
             self.declare_parameter('roll_deg', stored['roll'], free_range(-20.0, 20.0))
             self.declare_parameter('forward_offset_m', stored['forward'], free_range(-0.3, 0.3))
             self.declare_parameter('lateral_offset_m', stored['lateral'], free_range(-0.3, 0.3))
+            self.declare_parameter('yaw_deg', stored['yaw'], free_range(-15.0, 15.0))
             # Defaults aus den CLI-Argumenten, damit live und offline identisch sind.
             self.declare_parameter('grid_step_cm', args.grid_cm, int_range(1, 50))
             self.declare_parameter('x_max_cm', args.x_max_cm, int_range(20, 400))
             self.declare_parameter('y_half_cm', args.y_half_cm, int_range(10, 200))
             self.declare_parameter('show_board', True)
+            # Vogelperspektive rechts daneben (Gitter-Reichweite = x_max_cm / y_half_cm)
+            self.declare_parameter('show_bev', not args.no_bev)
 
             self.create_subscription(Image, RAW_TOPIC, self.cb, 1)
             self.pub = self.create_publisher(Image, OUT_TOPIC, 1)
@@ -345,14 +429,20 @@ def run_live(K, D_pnp, ext, args, cal_w, cal_h, H_fit=None, fit_info=None):
                 roll=self.get_parameter('roll_deg').value,
                 forward=self.get_parameter('forward_offset_m').value,
                 lateral=self.get_parameter('lateral_offset_m').value,
+                yaw=self.get_parameter('yaw_deg').value,
             )
             grid = dict(step_cm=self.get_parameter('grid_step_cm').value,
                         x_max_cm=self.get_parameter('x_max_cm').value,
                         y_half_cm=self.get_parameter('y_half_cm').value)
             show_board = self.get_parameter('show_board').value
+            found = {}
             out = render_overlay(img, self.K_img, live, stored, grid, args.origin_lens,
                                  D_pnp, self.dictionary,
-                                 self.board if show_board else None, H_fit)
+                                 self.board if show_board else None, H_fit, found)
+            if self.get_parameter('show_bev').value:
+                H = overlay_homography(self.K_img, live, args.origin_lens, H_fit)
+                bev = render_bev(img, H, grid, out.shape[0], found.get('board_corners'))
+                out = np.hstack([out, bev])
             self.pub.publish(self.bridge.cv2_to_imgmsg(out, encoding='bgr8'))
             if args.save and not self.saved:
                 cv2.imwrite(args.save, out)
@@ -377,6 +467,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--image', metavar='PNG', default=None,
                     help='offline auf einem gespeicherten (entzerrten) Bild rechnen, ohne ROS')
+    ap.add_argument('--balance', type=float, default=0.0,
+                    help='nur Fisheye: muss zum Parameter "balance" von ingress_node passen (Default 0.0)')
     ap.add_argument('--distorted', action='store_true',
                     help=f'{RAW_TOPIC} bzw. --image ist NICHT entzerrt. Default: entzerrt, '
                          'PnP rechnet daher mit D = 0.')
@@ -393,6 +485,8 @@ def main():
     ap.add_argument('--grid-cm', type=int, default=10, help='Gitterabstand in cm')
     ap.add_argument('--x-max-cm', type=int, default=80, help='weiteste Gitterlinie in cm')
     ap.add_argument('--y-half-cm', type=int, default=40, help='halbe Gitterbreite in cm')
+    ap.add_argument('--no-bev', action='store_true',
+                    help='keine Vogelperspektive rechts daneben (live auch per Parameter show_bev)')
     args = ap.parse_args()
 
     if not os.path.isfile(INTRINSICS):
@@ -403,16 +497,30 @@ def main():
         return 1
 
     K, D, w, h = cg.load_intrinsics(INTRINSICS)
+    model = cg.intrinsics_model(INTRINSICS)
+    if cg.is_fisheye(model):
+        if args.distorted:
+            print('--distorted geht mit dem Fisheye-Modell nicht. ingress_node mit undistort:=true.')
+            return 1
+        ok_f, lines_f = cg.check_intrinsics(K, D, w, h, model)
+        print('Intrinsik roh: ' + lines_f[0])
+        for line in lines_f[1:]:
+            print('  ! ' + line)
+        # Gemessen wird auf dem entzerrten Bild -- das hat beim Fisheye eine eigene Kameramatrix.
+        K = cg.undistorted_camera_matrix(K, D, w, h, model, args.balance)
+        D = np.zeros((1, 5))
+        print(f'Fisheye: entzerrtes Bild (balance {args.balance:.2f}) fx={K[0,0]:.1f} cx={K[0,2]:.1f}')
     if args.cx is not None:
         print(f'cx von {K[0, 2]:.1f} auf {args.cx:.1f} ueberschrieben (nur zum Durchspielen).')
         K = K.copy()
         K[0, 2] = args.cx
-    ok, lines = cg.check_intrinsics(K, D, w, h)
+    ok, lines = (True, ['']) if cg.is_fisheye(model) else cg.check_intrinsics(K, D, w, h)
     print(f'Intrinsik ({w}x{h}): fx={K[0,0]:.1f} fy={K[1,1]:.1f} '
           f'cx={K[0,2]:.1f} cy={K[1,2]:.1f}')
-    print('  ' + lines[0])
-    for line in lines[1:]:
-        print('  ! ' + line)
+    if not cg.is_fisheye(model):
+        print('  ' + lines[0])
+        for line in lines[1:]:
+            print('  ! ' + line)
     if not ok:
         print('  -> Das Bodengitter kann dadurch systematisch schief stehen.')
 
@@ -451,10 +559,17 @@ def main():
             return 1
         stored = stored_from_yaml(ext)
         stored['fit_info'] = fit_info
+        # wie im Live-Betrieb: K auf die tatsaechliche Bildgroesse skalieren
+        K = scale_K(K, (w, h), (img.shape[1], img.shape[0]), warn=print)
         dictionary, board = cg.charuco_board()
         grid = dict(step_cm=args.grid_cm, x_max_cm=args.x_max_cm, y_half_cm=args.y_half_cm)
+        found = {}
         out = render_overlay(img, K, dict(stored), stored, grid, args.origin_lens,
-                             D_pnp, dictionary, board, H_fit)
+                             D_pnp, dictionary, board, H_fit, found)
+        if not args.no_bev:
+            H = overlay_homography(K, stored, args.origin_lens, H_fit)
+            out = np.hstack([out, render_bev(img, H, grid, out.shape[0],
+                                             found.get('board_corners'))])
         dest = args.save or os.path.join(REPO, 'logs', 'extrinsik_check.png')
         cv2.imwrite(dest, out)
         print(f'Geschrieben: {dest}')

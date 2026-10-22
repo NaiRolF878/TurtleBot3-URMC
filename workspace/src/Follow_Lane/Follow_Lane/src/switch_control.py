@@ -4,6 +4,7 @@ from enum import Enum
 import numpy as np
 
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange
@@ -206,11 +207,16 @@ class switch_control(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    # SIGINT selbst behandeln (KeyboardInterrupt), damit der Context beim Aufraeumen noch
+    # gilt -- sonst bei Strg+C ExternalShutdownException-/"context is invalid"-Tracebacks.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = switch_control()
 
     try:
-        rclpy.spin(node)
+        # spin_once mit Timeout statt spin(): spin() wartet in C auf die naechste Nachricht,
+        # Strg+C kaeme ohne Daten nie an (Knoten haengt beim Beenden).
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:

@@ -68,6 +68,7 @@ PREVIEW_TOPIC = '/lokal/intrinsik_view'
 BOARD = dict(n_cols=7, n_rows=5, dim=0.030, marker_size=0.022, aruco_dict='5x5_250')
 
 HFOV_DEG = 62.2         # Datenblatt IMX219, fuer Startwert und Abnahme
+HFOV_FISHEYE_DEG = 120.0  # Weitwinkel-Modul (Okt. 2026), nur Startwert fuer den Fisheye-Fit
 MIN_PSIZE = 0.18        # darunter entartet -- genau daran ist die alte Sitzung gestorben
 
 MODELS = {
@@ -331,6 +332,93 @@ def fit(images, key):
     return dict(K=K, D=D, ok=ok, desc=desc, size=size, n=len(good), rms=rms)
 
 
+def fit_fisheye(images, folds=5):
+    """Fisheye-Modell (cv2.fisheye, equidistant, 4 Verzerrungswerte) -- fuer Weitwinkel-Linsen.
+
+    Das Weitwinkel-Modul (Okt. 2026, ~120 Grad) bekommt das normale Modell nicht sauber hin
+    (Fehler an zurueckgehaltenen Bildern 0.79 px). Fisheye: 0.24 px, im Fit wie an neuen
+    Bildern gleich -- es lernt die Aufnahmen also nicht nur auswendig.
+    Hauptpunkt bleibt FREI: aufgeschraubte Linsen sitzen nie genau mittig (hier ~10/14 px).
+
+    Geprueft wird per Kreuzpruefung: das Modell wird {folds}-mal ohne einen Teil der Bilder
+    gerechnet und an genau diesen zurueckgehaltenen Bildern gemessen.
+    """
+    mc = make_calibrator(0)
+    board = mc._boards[0].charuco_board
+    size = (images[0].shape[1], images[0].shape[0])
+    w, h = size
+    obj_all = np.asarray(board.chessboardCorners, dtype=np.float64)
+
+    views = []
+    for img in images:
+        try:
+            got = mc.collect_corners([img])
+        except Exception:
+            continue
+        if not got:
+            continue
+        corners, ids, b = got[0]
+        if len(ids) < 6:
+            continue
+        p = mc.get_parameters(corners, ids, b, size)
+        if p[2] >= MIN_PSIZE:
+            views.append((corners.reshape(-1, 1, 2).astype(np.float64),
+                          obj_all[ids.ravel()].reshape(-1, 1, 3)))
+    if len(views) < 10:
+        print(f'\n  --- Fisheye ---\n    FEHLGESCHLAGEN: nur {len(views)} brauchbare Ansichten.')
+        return None
+
+    def calib(vs):
+        fx0 = (w / 2) / np.radians(HFOV_FISHEYE_DEG / 2)       # equidistant: r = f * theta
+        K0 = np.array([[fx0, 0, w / 2.], [0, fx0, h / 2.], [0, 0, 1.]])
+        flags = (cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW
+                 | cv2.fisheye.CALIB_USE_INTRINSIC_GUESS)
+        crit = (cv2.TERM_CRITERIA_COUNT + cv2.TERM_CRITERIA_EPS, 100, 1e-7)
+        rms, K, D, _, _ = cv2.fisheye.calibrate([o for _, o in vs], [c for c, _ in vs], size,
+                                                K0, np.zeros((4, 1)), flags=flags, criteria=crit)
+        return float(rms), K, D
+
+    def reproj(K, D, vs):
+        errs = []
+        for c, o in vs:
+            # Pose aus den entzerrten (normierten) Punkten, dann mit Fisheye zurueckprojizieren
+            und = cv2.fisheye.undistortPoints(c, K, D)
+            _, rv, tv = cv2.solvePnP(o, und, np.eye(3), None)
+            pr, _ = cv2.fisheye.projectPoints(o, rv, tv, K, D)
+            errs.append(np.linalg.norm(pr.reshape(-1, 2) - c.reshape(-1, 2), axis=1))
+        e = np.concatenate(errs)
+        return float(np.sqrt(np.mean(e ** 2)))
+
+    try:
+        rms, K, D = calib(views)
+        idx = np.random.default_rng(0).permutation(len(views))
+        held = []
+        for f in np.array_split(idx, folds):
+            fs = set(f.tolist())
+            _, Kf, Df = calib([views[j] for j in idx if j not in fs])
+            held.append(reproj(Kf, Df, [views[j] for j in f]))
+        held = float(np.mean(held))
+    except Exception as e:
+        print(f'\n  --- Fisheye ---\n    FEHLGESCHLAGEN: {str(e).splitlines()[0]}')
+        return None
+
+    D = np.asarray(D).ravel()
+    hfov = np.degrees(w / K[0, 0])          # equidistant: theta_rand = (w/2) / fx
+    ok = (held < 0.5 and abs(K[0, 2] - w / 2) < 40 and abs(K[1, 2] - h / 2) < 40
+          and abs(K[0, 0] - K[1, 1]) / K[0, 0] < 0.02 and 90 < hfov < 200)
+    print('\n  --- Fisheye (equidistant) -- FUER DAS WEITWINKEL-MODUL ---')
+    print(f'    {len(views)} Ansichten (p_size >= {MIN_PSIZE})')
+    print(f'    RMS im Fit {rms:.3f} px   an zurueckgehaltenen Bildern {held:.3f} px   '
+          f'{"OK" if held < 0.5 else "ZU HOCH (< 0.5 erwartet)"}')
+    print(f'    fx {K[0,0]:7.2f}  fy {K[1,1]:7.2f}   (Bildwinkel horizontal {hfov:.0f} deg)')
+    print(f'    cx {K[0,2]:7.2f}  cy {K[1,2]:7.2f}   (Bildmitte {w/2:.0f} / {h/2:.0f}, '
+          f'Abweichung {K[0,2]-w/2:+.0f} / {K[1,2]-h/2:+.0f} px)')
+    print(f'    k1 {D[0]:+.5f}  k2 {D[1]:+.5f}  k3 {D[2]:+.5f}  k4 {D[3]:+.5f}')
+    print(f'    Abnahme: {"BESTANDEN" if ok else "durchgefallen"}')
+    return dict(K=K, D=D, ok=ok, desc='Fisheye (equidistant)', size=size, n=len(views),
+                rms=rms, held=held, fisheye=True)
+
+
 def write_yaml(res):
     w, h = res['size']
     K, D = res['K'], res['D']
@@ -340,9 +428,11 @@ def write_yaml(res):
         yaml.dump({
             'image_width': int(w), 'image_height': int(h), 'camera_name': 'camera',
             'camera_matrix': {'rows': 3, 'cols': 3, 'data': [float(x) for x in K.ravel()]},
-            'distortion_model': 'plumb_bob',
-            'distortion_coefficients': {'rows': 1, 'cols': 5,
-                                        'data': [float(x) for x in D[:5]]},
+            # equidistant = Fisheye-Modell; ingress_node entzerrt dann mit cv2.fisheye
+            'distortion_model': 'equidistant' if res.get('fisheye') else 'plumb_bob',
+            'distortion_coefficients': {'rows': 1, 'cols': 4 if res.get('fisheye') else 5,
+                                        'data': [float(x) for x in
+                                                 (D[:4] if res.get('fisheye') else D[:5])]},
             'rectification_matrix': {'rows': 3, 'cols': 3,
                                      'data': [1., 0., 0., 0., 1., 0., 0., 0., 1.]},
             'projection_matrix': {'rows': 3, 'cols': 4,
@@ -370,7 +460,7 @@ def main():
     ap.add_argument('--no-topic', action='store_true',
                     help=f'{PREVIEW_TOPIC} nicht publizieren')
     ap.add_argument('--write', metavar='MODELL', default=None,
-                    help=f'Ergebnis speichern: {" | ".join(MODELS)}')
+                    help=f'Ergebnis speichern: {" | ".join(list(MODELS) + ["fisheye"])}')
     args = ap.parse_args()
 
     if args.capture:
@@ -385,6 +475,9 @@ def main():
     images = load_images()
     print(f'{len(images)} Aufnahmen aus {os.path.basename(TARBALL)}')
     res = {k: r for k in MODELS for r in [fit(images, k)] if r}
+    fe = fit_fisheye(images)
+    if fe:
+        res['fisheye'] = fe
 
     if args.write:
         if args.write not in res:
@@ -393,7 +486,10 @@ def main():
         write_yaml(res[args.write])
     else:
         print('\nNichts geschrieben. Zum Uebernehmen z.B.:')
-        print('  python3 scripts/tb/camera-intrinsics.py --calibrate --write fixed')
+        print('  python3 scripts/tb/camera-intrinsics.py --calibrate --write fisheye   '
+              '(Weitwinkel-Modul)')
+        print('  python3 scripts/tb/camera-intrinsics.py --calibrate --write fixed     '
+              '(alte Linse)')
     return 0
 
 
