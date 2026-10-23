@@ -28,7 +28,7 @@ class control_driving(Node):
                 FloatingPointRange(from_value=lo, to_value=hi, step=0.0)])
 
         # --- PID / Speed ---
-        self.declare_parameter('kp',                 5.5,  frange(0.0, 10.0))
+        self.declare_parameter('kp',                 5.5,  frange(0.0, 20.0))
         self.declare_parameter('ki',                 0.15, frange(0.0, 10.0))
         self.declare_parameter('kd',                 2.75, frange(0.0, 10.0))
         self.declare_parameter('MAX_VEL',            0.34, frange(0.0, 10.0))

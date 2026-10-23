@@ -22,15 +22,3 @@ lab_l_white_h: 255
 lab_l_white_l: 200
 lab_l_yellow_h: 255
 lab_l_yellow_l: 140
-hue_white_h: 255
-hue_white_l: 0
-hue_yellow_h: 60
-hue_yellow_l: 13
-lightness_white_h: 255
-lightness_white_l: 200
-lightness_yellow_h: 255
-lightness_yellow_l: 120
-saturation_white_h: 75
-saturation_white_l: 0
-saturation_yellow_h: 255
-saturation_yellow_l: 60

@@ -41,20 +41,6 @@ class detect_lane(Node):
         # Obergrenze deckt 1920x1080 ab, negativ weil RoI-Ecken ausserhalb des Bildes liegen duerfen
         crop = ParameterDescriptor(integer_range=[IntegerRange(from_value=-500, to_value=2200, step=1)])
 
-        # --- HSV-Parameter (VORUEBERGEHEND zum Testen, LAB-Stand in docs/bev-tests/backup_lab_20261022/) ---
-        self.declare_parameter('hue_white_l',        0,   byte)
-        self.declare_parameter('hue_white_h',        255, byte)
-        self.declare_parameter('saturation_white_l', 0,   byte)
-        self.declare_parameter('saturation_white_h', 75,  byte)
-        self.declare_parameter('lightness_white_l',  161, byte)
-        self.declare_parameter('lightness_white_h',  255, byte)
-        self.declare_parameter('hue_yellow_l',        13,  byte)
-        self.declare_parameter('hue_yellow_h',        60,  byte)
-        self.declare_parameter('saturation_yellow_l', 60,  byte)
-        self.declare_parameter('saturation_yellow_h', 255, byte)
-        self.declare_parameter('lightness_yellow_l',  120, byte)
-        self.declare_parameter('lightness_yellow_h',  255, byte)
-
         # --- LAB-Parameter (Farbfilter der Linien) ---
         # L = Helligkeit, A = gruen(<128)..rot(>128), B = blau(<128)..gelb(>128); 128 = farblos.
         # Startwerte gemessen auf BEV-Bildern nach CLAHE (docs/bev-tests/README.md, 22.10.):
@@ -205,10 +191,6 @@ class detect_lane(Node):
         try:
             # Alle oben deklarierten Parameter als self.<name>-Attribute verfügbar machen
             param_names = [
-                'hue_white_l', 'hue_white_h', 'saturation_white_l', 'saturation_white_h',
-                'lightness_white_l', 'lightness_white_h',
-                'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
-                'lightness_yellow_l', 'lightness_yellow_h',
                 'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
                 'lab_b_white_l', 'lab_b_white_h',
                 'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
@@ -318,10 +300,6 @@ class detect_lane(Node):
         try:
             # Alle oben deklarierten Parameter als self.<name>-Attribute verfügbar machen
             param_names = [
-                'hue_white_l', 'hue_white_h', 'saturation_white_l', 'saturation_white_h',
-                'lightness_white_l', 'lightness_white_h',
-                'hue_yellow_l', 'hue_yellow_h', 'saturation_yellow_l', 'saturation_yellow_h',
-                'lightness_yellow_l', 'lightness_yellow_h',
                 'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
                 'lab_b_white_l', 'lab_b_white_h',
                 'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
@@ -675,16 +653,14 @@ class detect_lane(Node):
         return polies, horizontal, vertical, corners, intersection_corners
 
     def color_masks(self, img):
-        """Gelb- und Weiss-Maske aus dem BGR-Bild nach CLAHE.
-        VORUEBERGEHEND HSV zum Testen -- die LAB-Version steht in docs/bev-tests/backup_lab_20261022/."""
-        bgr = self.apply_clahe(img)
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        mask_yellow = cv2.inRange(hsv,
-            (self.hue_yellow_l, self.saturation_yellow_l, self.lightness_yellow_l),
-            (self.hue_yellow_h, self.saturation_yellow_h, self.lightness_yellow_h))
-        mask_white = cv2.inRange(hsv,
-            (self.hue_white_l, self.saturation_white_l, self.lightness_white_l),
-            (self.hue_white_h, self.saturation_white_h, self.lightness_white_h))
+        """Gelb- und Weiss-Maske aus dem BGR-Bild: CLAHE auf L, dann Schwellen in LAB."""
+        lab = self.apply_clahe(img, return_lab=True)
+        mask_yellow = cv2.inRange(lab,
+            (self.lab_l_yellow_l, self.lab_a_yellow_l, self.lab_b_yellow_l),
+            (self.lab_l_yellow_h, self.lab_a_yellow_h, self.lab_b_yellow_h))
+        mask_white = cv2.inRange(lab,
+            (self.lab_l_white_l, self.lab_a_white_l, self.lab_b_white_l),
+            (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
         return mask_yellow, mask_white
 
     def apply_clahe(self, img, return_lab=False):
