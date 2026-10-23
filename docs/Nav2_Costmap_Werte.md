@@ -243,8 +243,11 @@ Y = y_half - (u + 0.5) * res       Y nach links
 
 Das entspricht genau `base_footprint`. Aktuell (`bev.yaml`): 1,25 mm pro
 Pixel, X von 0,05 bis 0,60 m, Y ±0,40 m, also 640 × 440 px. Was die Kamera
-nicht sieht, ist in der BEV schwarz und liefert keine Linienpunkte. Real
-beginnt der sichtbare Boden erst bei etwa 0,19 m.
+nicht sieht, ist in der BEV schwarz und liefert keine Linienpunkte. Mit der
+aktuellen Extrinsik (Höhe 10,1 cm, Neigung 38,0°) sieht die Kamera geradeaus
+ab etwa 0,07 m. Seitlich sind es bei 0,20 m etwa ±0,23 m und bei 0,60 m etwa
+±0,65 m. Das ist aus der Extrinsik gerechnet, nicht gemessen. Die volle
+BEV-Breite von ±0,40 m ist damit ab etwa 0,35 m abgedeckt.
 
 **Genauigkeit:** hängt an der Extrinsik (Höhe, Neigung, Roll der Kamera). Wie
 genau die BEV am Boden ist, steht in `docs/bev-tests/`. In diesem Dokument ist
@@ -260,10 +263,9 @@ das nicht nachgemessen.
 - Bestimmt durch `x_max_m` in `bev.yaml` (0,60 m). Laut Kommentar dort wird es
   dahinter in Fahrtrichtung sehr unscharf. Ein eigener Grenzwert im Node ist
   nicht nötig.
-- **Folge für breite Bereiche:** Bei 50 cm Spurbreite kommen beide Linien erst
-  ab etwa 0,45 m ins Bild. Bis 0,60 m bleibt dann nur ein schmaler Streifen,
-  in dem die Breite gemessen und die Mitte berechnet werden kann (siehe
-  „Spurmitte“).
+- **Folge für breite Bereiche:** Bei 50 cm Spurbreite kommen beide Linien ab
+  etwa 0,23 m ins Bild. Bis 0,60 m bleiben gut 30 cm, in denen die Breite
+  gemessen und die Mitte berechnet wird (siehe „Spurmitte“).
 
 ### `pixel_stride`
 - **Was er bewirkt:** Nur Pixel, deren x und y Vielfache von `pixel_stride`
@@ -317,24 +319,24 @@ funktioniert.
 | `center_width_history` | 20 Bilder | gewählt; Median der gemessenen Breite |
 
 **Offline geprüft** (synthetische Spuren direkt auf das BEV-Raster aus
-`bev.yaml` gelegt, Sichtfeld der echten Kamera ausgeblendet, `lane_mask_stride`
-2 wie in `detect_lane`, nicht auf dem Bot). Das prüft die Rechnung, nicht die
-Genauigkeit der Extrinsik:
+`bev.yaml` gelegt, Sichtfeld aus der aktuellen Extrinsik ausgeblendet,
+`lane_mask_stride` 2 wie in `detect_lane`, nicht auf dem Bot). Das prüft die
+Rechnung, nicht die Genauigkeit der Extrinsik:
 
 | Fall | Pfad von–bis | Abweichung von der echten Mitte |
 |---|---|---|
-| gerade, 20 cm | 0,20–0,55 m | 0,9 mm |
-| gerade, 50 cm | **0,47–0,52 m** | 0,8 mm |
-| Kurve R = 1,2 m, 20 cm | 0,18–0,63 m | 1,3 mm |
-| Kurve R = 0,7 m, 20 cm, Breite gelernt | 0,17–0,47 m | 1,8 mm |
+| gerade, 20 cm | 0,09–0,54 m | 0,6 mm |
+| gerade, 50 cm | 0,24–0,54 m | 0,7 mm |
+| Kurve R = 1,2 m, 20 cm | 0,08–0,58 m | 0,7 mm |
+| Kurve R = 0,7 m, 20 cm, Breite gelernt | 0,09–0,59 m | 5,1 mm |
+| Kurve R = 0,7 m, nur Gelb, Breite gelernt | 0,09–0,49 m | 3,5 mm |
 
 **Grenzen:**
-- Die Kamera sieht nah am Bot nur ±11 cm. In engen Kurven (R ≈ 0,7 m) liegt
-  die innere Linie dann außerhalb des Bildes, und es gilt die gelernte Breite.
-- **Breiter Bereich:** Bei 50 cm Breite sind beide Linien erst ab ~0,45 m im
-  Bild, die BEV endet bei 0,60 m. Die Spurmitte ist dann nur wenige Zentimeter
-  lang. Mit `x_max_m` größer als 0,60 m in `bev.yaml` würde sie länger, aber
-  laut `bev.yaml` wird die BEV dort unscharf.
+- Die Spurmitte reicht höchstens bis zum Ende der BEV (0,60 m). Mit `x_max_m`
+  größer als 0,60 m in `bev.yaml` würde sie länger, aber laut `bev.yaml` wird
+  die BEV dort unscharf.
+- Sieht ein Bild nur eine Linie (Lücke in Weiß, verdeckt), gilt die gelernte
+  Breite. Ist sie noch unbekannt, gibt es in diesem Bild keinen Pfad.
 - Gelbe oder weiße Linien, die quer durch den Hindernisbereich laufen, würden
   die Anpassung verfälschen. Das muss man vor Ort in RViz prüfen (Anzeige
   „Spurmitte“).
