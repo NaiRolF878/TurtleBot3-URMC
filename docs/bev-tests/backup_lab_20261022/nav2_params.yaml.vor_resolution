@@ -1,0 +1,388 @@
+# Nav2-Konfiguration fuer zwei Faelle:
+#
+# 1) Obstacle-Modus: Local Costmap + Local Controller, MPPI weicht den
+#    LiDAR-Hindernissen reaktiv aus und bleibt dabei zwischen den Spurlinien
+#    (lane_layer). Die Breite des Hindernisbereichs ist vorab nicht bekannt und
+#    muss auch nirgends eingestellt werden: MPPI prueft Kollisionen mit dem
+#    echten Footprint des Burger (local_costmap.footprint). Bewusst OHNE Global
+#    Planner / Global Costmap / AMCL -- es gibt kein festes Navigationsziel und
+#    keine gespeicherte Karte.
+#
+# 2) Tunnel-Exploration: hier gibt es zusaetzlich planner_server +
+#    global_costmap, aber NICHT fuer eine vorab gespeicherte Karte oder
+#    AMCL-Lokalisierung -- global_costmap ist eine zweite, ebenfalls
+#    mitfahrende Costmap-Instanz, groesser als local_costmap und ohne
+#    Spur-Layer, die seit Tunnel-Beginn akkumuliert, rein aus
+#    Odometrie + LiDAR seit dem Tunnel-Eintritt. Kein SLAM, keine
+#    Positions-Korrektur -- fuer die kurze Strecke eines einzelnen Tunnels
+#    reicht reine Odometrie. tunnel_explorer_node sucht darauf Frontier-
+#    Punkte (Rand zwischen bekannt-frei und unbekannt) und laesst
+#    planner_server (allow_unknown:false, plant also nie ins Unbekannte)
+#    einen echten Pfad dorthin berechnen. Die Kamera ist im Tunnel laut
+#    Reglement verboten -- auch die local_costmap sieht dort nur LiDAR und
+#    die Eingangssperre, der lane_layer bleibt leer.
+#
+# Warum MPPI statt DWB: Ohne echten globalen Pfad bekommt der Local Controller
+# hier nur einen kurzen, staendig neu gesetzten Pfad von nav2_goal_publisher --
+# die Spurmitte aus der Kamera, ersatzweise "fahr geradeaus". Beide fuehren mitten
+# durch das Hindernis. MPPIs Sampling-Ansatz bewertet viele moegliche
+# Kurzfrist-Trajektorien direkt gegen die Costmap und diese grobe Zielrichtung
+# und kombiniert beides robust. DWBs Kritiken (PathDist, Oscillation, ...) sind
+# dagegen auf einen von einem echten Planer stammenden, um Hindernisse herum
+# geformten Pfad ausgelegt -- mit unserem Kurzpfad waere das Verhalten deutlich
+# unruhiger.
+#
+# TurtleBot3 Burger: footprint/robot_radius/vx_max/wz_max unten an die
+# Burger-Spezifikation angelehnt (138 x 178 mm, 0.22 m/s, ~2.84 rad/s max).
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    # 20 Hz = Periode 0.05 s = model_dt des MPPI weiter unten. MPPI lehnt configure sonst
+    # ab ("Controller period more then model dt") und der ganze Nav2-Zweig bleibt inaktiv.
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.1
+      # 10.0 -> 3.0: haengt MPPI am Hindernis, drueckte er sonst zehn Sekunden
+      # dagegen, bevor das Ziel abgebrochen und ein neues gesetzt wurde.
+      movement_time_allowance: 3.0
+
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 3.15
+      stateful: true
+
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      # 56 -> 90: 56 * model_dt 0.05 = 2,8 s, bei vx_max 0.22 nur 0,62 m Vorausschau --
+      # das Ziel von nav2_goal_publisher war nie im Blick (Spurmitte bis ~0,8 m,
+      # Ersatz-Gerade goal_distance 1.0 m). 90 * 0.05 = 4,5 s, * 0.22 m/s ~ 0,99 m.
+      # Regel: time_steps * model_dt * vx_max soll mindestens goal_distance abdecken.
+      time_steps: 90
+      model_dt: 0.05
+      batch_size: 1000
+      vx_std: 0.2
+      vy_std: 0.0
+      wz_std: 0.4
+      vx_max: 0.22
+      vx_min: -0.1
+      vy_max: 0.0
+      wz_max: 1.9
+      iteration_count: 1
+      # Haengt an local_costmap.width/height: muss kleiner bleiben als die halbe
+      # Kartenbreite (2.0 m bei 4x4), sonst reicht der Pfad ueber die Karte hinaus.
+      prune_distance: 1.7
+      transform_tolerance: 0.1
+      temperature: 0.3
+      gamma: 0.015
+      motion_model: "DiffDrive"
+      # true = MPPI veroeffentlicht die simulierten/gewaehlte Trajektorie zur
+      # Kontrolle in RViz2 (Topics unterhalb von /controller_server, z.B.
+      # ".../transformed_global_plan" und Marker der Rollouts). Kostet
+      # zusaetzliche CPU/Bandbreite -- zum Tunen an, am Wettkampftag ggf.
+      # zurueck auf false stellen.
+      visualize: true
+      regenerate_noises: false
+      critics:
+        - "ConstraintCritic"
+        - "CostCritic"
+        - "GoalCritic"
+        - "GoalAngleCritic"
+        - "PathAlignCritic"
+        - "PathFollowCritic"
+        - "PathAngleCritic"
+        - "PreferForwardCritic"
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      # true -> false: die Ersatz-Gerade endet mit orientation.w = 1.0, also
+      # "geradeaus, gemessen im Moment der Pfaderzeugung". Ab 0,5 m vor dem Ziel zog
+      # die Kritik den Bot in genau diese Ausgangsrichtung zurueck, waehrend er am
+      # Hindernis vorbei sollte. goal_checker laesst das Ziel mit yaw_goal_tolerance
+      # 3.15 ohnehin durchgehen, die Endausrichtung ist irrelevant -- auch bei der
+      # Spurmitte, deren Ende in Spurrichtung zeigt.
+      GoalAngleCritic:
+        enabled: false
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      # Gewichte weichen bewusst von Nav2s Beispiel ab: dort kommt der Pfad von
+      # einem Planer, der schon um Hindernisse herumfuehrt. Unser Pfad (Spurmitte
+      # oder Gerade) zeigt mitten durch das Hindernis -- mit PathAlign 14.0 hat
+      # MPPI es deshalb vor sich hergeschoben statt auszuweichen (Test 02.09.).
+      # Also: Ausweichen dominiert, "auf der Linie bleiben" ist nur ein Hinweis.
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 20.0
+        critical_cost: 600.0
+        # true: Kollision heisst, der echte Footprint (local_costmap.footprint)
+        # beruehrt eine belegte Zelle -- nicht ein Kreis um den Mittelpunkt. Nur so
+        # muss die Korridorbreite zwischen den Spurlinien nirgends eingestellt
+        # werden. MPPI prueft den Footprint nur, wo die Kosten am Mittelpunkt schon
+        # erhoeht sind; deshalb muss der lane_layer VOR dem inflation_layer stehen,
+        # sonst bekommen die Linien keinen Kostensaum und werden uebersehen.
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 0.5
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        # 14.0 -> 2.0, siehe Begruendung oben.
+        cost_weight: 2.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        # 5.0 -> 3.0: haelt den Vorwaertsdrang, ohne das Ausweichen zu ueberstimmen.
+        cost_weight: 3.0
+        offset_from_furthest: 5
+        # 1.4 -> 0.5: MPPI wertet diese Kritik nur aus, wenn das Ziel WEITER weg ist
+        # als der Schwellwert. Bei 1,0 m Pfadlaenge und 1.4 griff sie nie --
+        # ausgerechnet die, die den Vorwaertsdrang halten soll.
+        threshold_to_consider: 0.5
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+
+# Fuer die Tunnel-Exploration (siehe tunnel_explorer_node): plant echte
+# Pfade zu Frontier-Punkten, aber NUR durch bereits bekanntes, freies
+# Gebiet (allow_unknown:false) -- nie ins Unerkundete hinein.
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 1.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      # Schraegstrich, nicht "::": nav2_navfn_planner registriert sich in Humble als
+      # nav2_navfn_planner/NavfnPlanner. Die "::"-Schreibweise kam erst mit Iron und
+      # laesst planner_server hier mit "class ... does not exist" abstuerzen.
+      # Die uebrigen Plugins in dieser Datei laden mit "::" korrekt -- das ist je
+      # nach Paket unterschiedlich.
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      use_astar: true
+      allow_unknown: false
+      tolerance: 0.3
+
+# Die "Tunnel-Karte": mitfahrend wie local_costmap, aber groesser und ohne
+# Spur-Layer. Sie merkt sich das seit Tunnel-Beginn Gesehene, solange es im
+# Fenster um den Roboter liegt -- was hinten herausrollt, ist vergessen.
+# Geleert wird sie von keepout_zone_node bei jedem Tunnel-Eintritt. Die Zellen
+# liegen im odom-Frame; tunnel_explorer_node liest den Kartenursprung bei jeder
+# Nachricht neu aus info.origin und kommt mit dem wandernden Fenster zurecht.
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      # false -> true: fest im odom-Nullpunkt verankert musste die Karte den Bereich
+      # abdecken, in dem der Tunnel relativ zur Odometrie-Nullposition liegt. Traegt
+      # man den Bot zwischen Testfahrten von Hand zurueck, drehen die Raeder nicht,
+      # die Odometrie laeuft weiter mit -- nach wenigen Laeufen lag der Bot
+      # rechnerisch ausserhalb der Karte und planner_server fand keinen Pfad.
+      # Mitfahrend ist das egal, ein Odometrie-Reset vor jeder Fahrt entfaellt.
+      # origin_x/origin_y entfallen, bei rolling_window werden sie ignoriert.
+      rolling_window: true
+      # 20x20 -> 7x7 m: die halbe Kartenbreite (3,5 m) entspricht etwa der Reichweite,
+      # die der LDS-03 aktuell halten kann. Er misst bis 12 m, bei 0,9 Grad
+      # Winkelaufloesung liegen die Strahlen aber ab ~3,2 m weiter auseinander als
+      # eine Zelle (0,05 m) -- ab dort wird das Freiraeumen lueckenhaft und schmale
+      # Hindernisse fallen zwischen zwei Strahlen durch.
+      width: 7
+      height: 7
+      resolution: 0.05
+      # Kreis statt Footprint: NavFn plant fuer einen Punkt und prueft keine
+      # Roboterform. 0.105 liegt 1,6 cm ueber der halben Breite des Burger
+      # (178 mm) -- in der Enclosure kostet jede Wandberuehrung einen Punkt.
+      robot_radius: 0.105
+      always_send_full_costmap: true
+      plugins: ["obstacle_layer", "entrance_layer", "inflation_layer"]
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: "scan"
+        scan:
+          topic: /scan
+          sensor_frame: ""
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.0
+
+      # Dieselbe Eingangs-Sperrzone wie in local_costmap (siehe dortiger
+      # Kommentar) -- sorgt dafuer, dass planner_server erst gar keinen Pfad
+      # zurueck durch den Eingang vorschlaegt.
+      entrance_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: "entrance_cloud"
+        entrance_cloud:
+          topic: /detect/tunnel_entrance_obstacle
+          sensor_frame: ""
+          data_type: "PointCloud2"
+          clearing: false
+          marking: true
+          max_obstacle_height: 2.0
+          min_obstacle_height: -1.0
+          # Die Wolke kommt im odom-Frame, die Reichweite zaehlt deshalb ab dem
+          # odom-Nullpunkt, nicht ab dem Bot. Mit 3.0 fiel die Sperre still weg,
+          # sobald der Eingang mehr als 3 m vom Startpunkt entfernt lag. Praktisch
+          # unbegrenzt: was ausserhalb des mitfahrenden Fensters liegt, verwirft
+          # die Costmap ohnehin. raytrace_* wirkt wegen clearing:false nicht.
+          obstacle_max_range: 100.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.3
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      rolling_window: true
+      # 4x4 statt 3x3 m: bei 3x3 sah der Regler nur 1,5 m weit -- zu knapp fuers
+      # Umfahren bei 1-m-Ziel. Nicht groesser: MPPI plant nur ~1 m voraus
+      # (time_steps * model_dt * vx_max), alles darueber kostet bei 10 Hz nur
+      # Rechenzeit.
+      width: 4
+      height: 4
+      resolution: 0.05
+      # Umriss des Burger relativ zu base_footprint (Radachse), aus 138 x 178 mm
+      # und der URDF: Rumpf 3,7 cm vor bis 10,1 cm hinter der Achse, +/-6,9 cm
+      # breit; Raeder +/-8,9 cm aussen, 3,3 cm Radius. Konvexe Huelle aus beidem.
+      # Gilt fuer alle Burger gleich, Umbauten sind laut Reglement verboten.
+      footprint: "[[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089], [-0.101, 0.069], [-0.101, -0.069], [-0.033, -0.089], [0.033, -0.089]]"
+      always_send_full_costmap: true
+      plugins: ["obstacle_layer", "lane_layer", "entrance_layer", "inflation_layer"]
+
+      # Layer 1: echte Hindernisse vom 360 Grad LiDAR.
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: "scan"
+        scan:
+          topic: /scan
+          sensor_frame: ""
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.0
+
+      # Layer 2: virtuelle Waende aus den erkannten Spurlinien, gespeist von
+      # lane_costmap_node ueber /detect/lane_obstacles (PointCloud2). Technisch
+      # derselbe Plugin-Typ wie obstacle_layer, nur mit einer anderen
+      # Beobachtungsquelle. Muss vor inflation_layer stehen (siehe CostCritic).
+      # Im Tunnel-Modus leer: lane_costmap_node sendet dort nichts und leert beim
+      # Eintritt die Karte (Kamera laut Reglement verboten).
+      lane_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: "lane_cloud"
+        lane_cloud:
+          topic: /detect/lane_obstacles
+          sensor_frame: ""
+          data_type: "PointCloud2"
+          clearing: true
+          marking: true
+          max_obstacle_height: 2.0
+          min_obstacle_height: -1.0
+          obstacle_max_range: 2.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 2.0
+          raytrace_min_range: 0.0
+
+      # Layer 3: die einmalig gemerkte Tunnel-Eingangs-Sperrzone von
+      # keepout_zone_node ueber /detect/tunnel_entrance_obstacle (PointCloud2,
+      # im odom-Frame, deshalb ortsfest statt roboter-relativ). clearing:false
+      # ist hier bewusst -- es gibt keinen echten Sensor-Ursprung fuer diese
+      # virtuellen Punkte, ein Raytrace-Clearing wuerde entlang einer
+      # willkuerlichen Linie im odom-Frame echte Hindernisse mit-loeschen.
+      # Ausserhalb des Tunnel-Modus veroeffentlicht keepout_zone_node nichts,
+      # der Layer bleibt dann einfach leer.
+      entrance_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: "entrance_cloud"
+        entrance_cloud:
+          topic: /detect/tunnel_entrance_obstacle
+          sensor_frame: ""
+          data_type: "PointCloud2"
+          clearing: false
+          marking: true
+          max_obstacle_height: 2.0
+          min_obstacle_height: -1.0
+          # Die Wolke kommt im odom-Frame, die Reichweite zaehlt deshalb ab dem
+          # odom-Nullpunkt, nicht ab dem Bot. Mit 3.0 fiel die Sperre still weg,
+          # sobald der Eingang mehr als 3 m vom Startpunkt entfernt lag. Praktisch
+          # unbegrenzt: was ausserhalb des mitfahrenden Fensters liegt, verwirft
+          # die Costmap ohnehin. raytrace_* wirkt wegen clearing:false nicht.
+          obstacle_max_range: 100.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+
+      # Kostengradient um alle Layer: LiDAR-Hindernisse, Spurlinien,
+      # Enclosure-Waende, Eingangssperre. Ohne ihn haette die Zelle direkt neben
+      # einer Wand noch Kosten 0 und der Regler wiche erst im letzten Moment aus.
+      # Kein Kollisionskriterium -- das ist der Footprint. Ueberlappen sich die
+      # Saeume beider Spurlinien in einem schmalen Korridor, bleibt die Mitte trotzdem
+      # die guenstigste Stelle; deshalb haengt der Wert nicht an der Spurbreite.
+      # Muss groesser bleiben als der Umkreis des Footprints (0.122 m plus Nav2s
+      # footprint_padding, Standard 0.01), sonst prueft MPPI den Footprint nicht
+      # mehr rechtzeitig. Gewaehlt, nicht vermessen.
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.20
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: false
+    autostart: true
+    node_names: ["controller_server", "planner_server"]

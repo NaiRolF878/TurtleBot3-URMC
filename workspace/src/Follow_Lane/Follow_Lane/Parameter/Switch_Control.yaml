@@ -9,8 +9,8 @@
     # Nav2 sonst nur ~1,2-1,8 s zum Ausweichen (PID-Sollwert MAX_VEL 0.34, der
     # Burger faehrt hoechstens 0.22 m/s; Test 02.09.: Hindernis wurde geschoben
     # statt umfahren). 1.0 m entspricht goal_distance und der MPPI-Vorausschau.
-    obstacle_trigger_distance: 1.0
-    obstacle_clear_debounce: 1.0
+    obstacle_trigger_distance: 0.20
+    obstacle_clear_debounce: 01.0
 
     # --- Tunnel-Austritt (Tunnel -> vorheriger Modus), nur LiDAR ---
     tunnel_exit_open_distance: 1.5

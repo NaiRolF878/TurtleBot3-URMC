@@ -1,13 +1,15 @@
-"""Draufsicht fuer den Nav2-Zweig als Bild auf /nav2/view/compressed.
+"""Draufsicht fuer den Nav2-Zweig als Bild auf /nav2/view (sensor_msgs/Image).
 
 Zeigt auf einen Blick, was Nav2 sieht und plant -- im Tunnel die global_costmap
 (Tunnelkarte), sonst die local_costmap mit den Spurwaenden:
 
-    weiss  frei          rosa   Sicherheitsabstand (Inflation)
-    grau   unbekannt     schwarz belegt (Wand, Hindernis, Spurlinie)
-    rot    Umriss des Bots (published_footprint der local_costmap) mit Fahrtrichtung
-    gruen  Pfad, dem Nav2 folgt, mit Ziel (X): Explorer-Pfad bzw. Spurmitte
-    orange Eingangssperre     blau   LiDAR-Punkte
+    gruen  befahrbar (frei; dunkler = naeher am Hindernis, Nav2 meidet es, darf aber)
+    rot    nicht befahrbar (Hindernis, Spurwand, Sicherheitsabstand fuer den Bot-Umriss)
+    grau   noch nicht gescannt / unbekannt
+    gelb / weiss  erkannte gelbe bzw. weisse Spurlinie (/detect/lane_mask)
+    blau   Umriss des Bots (published_footprint der local_costmap), magenta Fahrtrichtung
+    cyan   Pfad, dem Nav2 folgt, mit Ziel (X): Explorer-Pfad bzw. Spurmitte
+    orange Eingangssperre     hellblau LiDAR-Punkte
 
 Oben eine Statuszeile: Modus, was nav2_goal_publisher gerade tut (/nav2/status)
 und die letzte Warnung bzw. der letzte Fehler der Nav2-Knoten aus /rosout. Das
@@ -30,24 +32,32 @@ from rcl_interfaces.msg import Log, ParameterDescriptor, FloatingPointRange, Int
 from std_msgs.msg import String, UInt8
 from nav_msgs.msg import OccupancyGrid, Path
 from geometry_msgs.msg import PolygonStamped
-from sensor_msgs.msg import CompressedImage, LaserScan, PointCloud2
+from sensor_msgs.msg import Image, LaserScan, PointCloud2
+from cv_bridge import CvBridge
 from sensor_msgs_py import point_cloud2
+from ament_index_python.packages import get_package_share_directory
+from follow_lane_msg.msg import LaneMask
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 from Follow_Lane.src.switch_control import ControlType
+from Follow_Lane.src import bev_geometry
 
-# Farben (BGR) wie in der Vorlage: frei weiss, Inflation rosa, belegt schwarz.
-UNKNOWN = (110, 110, 110)
-FREE = (255, 255, 255)
-PINK = (150, 120, 250)
-INSCRIBED = (70, 50, 190)
-LETHAL = (0, 0, 0)
-ROBOT = (0, 0, 220)
+# Farben (BGR): befahrbar gruen, nicht befahrbar rot, unbekannt grau.
+UNKNOWN = (128, 128, 128)
+FREE = (60, 200, 60)          # Kosten 0
+NEAR = (20, 90, 30)           # Kosten 98: noch befahrbar, aber dicht am Hindernis
+BLOCKED = (40, 40, 220)       # 99 inscribed / 100 lethal: Bot-Umriss wuerde kollidieren
+LANE_YELLOW = (0, 230, 255)
+LANE_WHITE = (255, 255, 255)
+ROBOT = (255, 60, 0)
 HEADING = (200, 0, 200)
-PATH = (0, 160, 0)
+PATH = (255, 255, 0)
 WALL = (0, 140, 255)
-SCAN = (230, 120, 0)
+SCAN = (255, 190, 120)
+
+# Spurlinien aelter als das werden nicht mehr gezeichnet.
+LANE_FRESH_S = 1.0
 
 HEADER_H = 52
 FOOTER_H = 26
@@ -60,15 +70,16 @@ def cost_lut():
     """OccupancyGrid-Wert (-1..100) -> Farbe, Index = Wert + 1.
 
     costmap_2d uebersetzt Kosten so: 0 frei, 1..98 Inflation, 99 inscribed,
-    100 lethal, -1 unbekannt.
+    100 lethal, -1 unbekannt. Befahrbar fuer die Bot-Mitte ist alles < 99 -- gruen,
+    mit steigenden Kosten dunkler. 99/100 rot.
     """
     lut = np.zeros((102, 3), np.uint8)
     lut[0] = UNKNOWN
     for v in range(0, 99):
         t = v / 98.0
-        lut[v + 1] = [int(round((1 - t) * FREE[c] + t * PINK[c])) for c in range(3)]
-    lut[100] = INSCRIBED
-    lut[101] = LETHAL
+        lut[v + 1] = [int(round((1 - t) * FREE[c] + t * NEAR[c])) for c in range(3)]
+    lut[100] = BLOCKED
+    lut[101] = BLOCKED
     return lut
 
 
@@ -126,9 +137,14 @@ class nav2_view(Node):
         self.create_subscription(String, '/control/tunnel_source', self.cb_tunnel_source, 1)
         self.create_subscription(String, '/nav2/status', self.cb_nav2_status, 1)
         self.create_subscription(Log, '/rosout', self.cb_rosout, 50)
+        self.create_subscription(LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
 
-        # Muss auf /compressed enden: image_transport deutet das letzte Namenssegment als Transport
-        self.pub_view = self.create_publisher(CompressedImage, '/nav2/view/compressed', 1)
+        # Unkomprimiertes Image statt CompressedImage auf .../compressed: rqt_image_view stuerzte
+        # damit ab ("create_subscription ... incompatible type CompressedImage", exit -6), weil es
+        # das Topic teils als Image, teils als CompressedImage abonniert. nav2_view und rqt laufen
+        # beide auf dem Laptop, das Bild geht nicht uebers Netz -- komprimieren bringt nichts.
+        self.pub_view = self.create_publisher(Image, '/nav2/view', 1)
+        self.bridge = CvBridge()
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -143,10 +159,31 @@ class nav2_view(Node):
         self.tunnel_source = ''
         self.nav2_status = ''
         self.reason = None          # (Zeit, Knoten, Text)
+        self.lane = None            # (Empfangszeit, gelb (N,2), weiss (N,2)) in base_footprint [m]
+        try:
+            self._bev = bev_geometry.load_bev_spec(
+                get_package_share_directory('Follow_Lane') + '/Parameter')
+        except Exception as e:  # noqa: BLE001
+            self._bev = None
+            self.get_logger().warn(f'bev.yaml nicht ladbar ({e}) -- keine Spurlinien in der Ansicht.')
 
         self.create_timer(1.0 / self.get_parameter('view_rate').value, self.cb_timer)
 
     # --- Eingaenge ---
+
+    def cb_lane_mask(self, msg):
+        """BEV-Pixel der Spurlinien -> Meter im Bot-System (base_footprint, Radachse)."""
+        b = self._bev
+        if b is None or (msg.image_width, msg.image_height) != (b['width'], b['height']):
+            return
+
+        def to_m(us, vs):
+            u = np.asarray(us, np.float64)[::3]
+            v = np.asarray(vs, np.float64)[::3]
+            return np.column_stack([b['x_max'] - (v + 0.5) * b['res'],
+                                    b['y_half'] - (u + 0.5) * b['res']])
+        self.lane = (self.get_clock().now(), to_m(msg.yellow_x, msg.yellow_y),
+                     to_m(msg.white_x, msg.white_y))
 
     def cb_footprint(self, msg):
         self.footprint = msg
@@ -178,7 +215,10 @@ class nav2_view(Node):
         self.nav2_status = msg.data
 
     def cb_rosout(self, log):
-        if log.level < Log.WARN:
+        # Log.WARN ist in Humble ein bytes-Wert (b'\x1e'), log.level dagegen ein int --
+        # direkt verglichen wirft das TypeError und der Knoten stuerzt ab.
+        warn = Log.WARN[0] if isinstance(Log.WARN, bytes) else Log.WARN
+        if log.level < warn:
             return
         # Costmap-Knoten loggen z.B. als "local_costmap.local_costmap"
         node = log.name.split('.')[0]
@@ -229,6 +269,7 @@ class nav2_view(Node):
             v = (h - (y - oy) / res) * scale
             return (int(round(u)), int(round(v)))
 
+        self.draw_lane(body, px)
         self.draw_scan(body, px)
         self.draw_entrance(body, px)
         path = self.explore_path if in_tunnel else self.center_path
@@ -287,6 +328,25 @@ class nav2_view(Node):
             x = sx + ri * math.cos(syaw + ai)
             y = sy + ri * math.sin(syaw + ai)
             cv2.circle(body, px(x, y), 2, SCAN, -1)
+
+    def draw_lane(self, body, px):
+        """Erkannte Spurlinien in ihrer Farbe ueber die Karte legen."""
+        if self.lane is None:
+            return
+        stamp, yellow, white = self.lane
+        if (self.get_clock().now() - stamp).nanoseconds / 1e9 > LANE_FRESH_S:
+            return
+        pose = self.lookup(self.get_parameter('robot_frame').value)
+        if pose is None:
+            return
+        rx, ry, ryaw = pose
+        c, s_ = math.cos(ryaw), math.sin(ryaw)
+        h, w = body.shape[:2]
+        for pts, col in ((yellow, LANE_YELLOW), (white, LANE_WHITE)):
+            for X, Y in pts:
+                u, v = px(rx + X * c - Y * s_, ry + X * s_ + Y * c)
+                if 0 <= u < w and 0 <= v < h:
+                    cv2.circle(body, (u, v), 2, col, -1)
 
     def draw_entrance(self, body, px):
         if self.mode != ControlType.Tunnel or not self.entrance:
@@ -355,7 +415,18 @@ class nav2_view(Node):
             cv2.line(footer, (x1 - bar, 14), (x1, 14), (255, 255, 255), 2)
             cv2.putText(footer, '0,5 m', (x1 - bar - 52, 19),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-        return np.vstack([header, body, footer])
+        legend = np.full((FOOTER_H, w, 3), (40, 40, 40), np.uint8)
+        x = 8
+        for col, text in ((FREE, 'befahrbar'), (BLOCKED, 'blockiert'), (UNKNOWN, 'unbekannt'),
+                          (LANE_YELLOW, 'gelb'), (LANE_WHITE, 'weiss'), (PATH, 'Pfad'),
+                          (ROBOT, 'Bot')):
+            cv2.rectangle(legend, (x, 7), (x + 12, 19), col, -1)
+            cv2.putText(legend, text, (x + 16, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                        (220, 220, 220), 1, cv2.LINE_AA)
+            x += 22 + cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0]
+            if x > w - 40:
+                break
+        return np.vstack([header, body, footer, legend])
 
     @staticmethod
     def fit(text, width, scale=0.55):
@@ -365,14 +436,9 @@ class nav2_view(Node):
         return text
 
     def publish(self, img):
-        ok, encoded = cv2.imencode('.png', img)
-        if not ok:
-            return
-        msg = CompressedImage()
+        msg = self.bridge.cv2_to_imgmsg(np.ascontiguousarray(img), encoding='bgr8')
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.get_parameter('odom_frame').value
-        msg.format = 'png'
-        msg.data = encoded.tobytes()
         self.pub_view.publish(msg)
 
 

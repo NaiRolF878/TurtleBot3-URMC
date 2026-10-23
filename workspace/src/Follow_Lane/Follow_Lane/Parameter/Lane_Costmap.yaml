@@ -45,7 +45,7 @@
     arrival_radius: 0.3
     stall_timeout: 10.0
     free_cost_threshold: 50
-    min_frontier_cluster_cells: 6
+    min_frontier_cluster_cells: 12   # Zellen! 12 x 2,5 cm = 30 cm wie frueher 6 x 5 cm (global_costmap.resolution)
     entrance_weight: 1.0
     robot_distance_weight: 0.3
     frame_id: odom

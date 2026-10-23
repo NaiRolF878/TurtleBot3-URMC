@@ -55,7 +55,7 @@ def generate_launch_description():
             package='Follow_Lane', executable='tunnel_explorer_node', name='tunnel_explorer_node',
             parameters=[LaunchConfiguration('lane_costmap_params')],
         ),
-        # Draufsicht: Karte, Bot, Pfad, Statuszeile mit Abbruchgrund (/nav2/view/compressed)
+        # Draufsicht: Karte, Bot, Pfad, Statuszeile mit Abbruchgrund (/nav2/view)
         Node(package='Follow_Lane', executable='nav2_view', name='nav2_view'),
 
         # Local Costmap + MPPI. Fahrbefehle auf /control/cmd_vel statt /cmd_vel: wie bei
@@ -96,7 +96,7 @@ def generate_launch_description():
         # Zweites Fenster fuer die Nav2-Draufsicht; eigener Name, sonst kollidieren die Knoten.
         Node(
             package='rqt_image_view', executable='rqt_image_view', name='rqt_nav2_view',
-            arguments=['/nav2/view/compressed'],
+            arguments=['/nav2/view'],
             condition=IfCondition(LaunchConfiguration('image_view')),
         ),
     ])

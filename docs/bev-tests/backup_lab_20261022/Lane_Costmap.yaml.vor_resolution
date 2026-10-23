@@ -1,0 +1,54 @@
+/lane_costmap_node:
+  ros__parameters:
+    # Spurwaende fuer den lane_layer und Spurmitte als Pfad, in jedem Modus ausser
+    # Tunnel (Kamera dort verboten), siehe Docstring in lane_costmap_node.py.
+    # Pixel -> Meter und Reichweite kommen aus Parameter/bev.yaml (dieselbe Datei,
+    # mit der ingress_node /lokal/bev erzeugt). Wurde die Kamera verstellt, die
+    # Extrinsik neu messen (scripts/tb/camera-extrinsics.py).
+    frame_id: base_footprint
+    output_topic: /detect/lane_obstacles
+    pixel_stride: 2
+
+    # Spurmitte: keine Spurbreite einstellen -- sie wird laufend gemessen.
+    odom_frame: odom
+    center_path_topic: /lane/center_path
+    center_bin_size: 0.05        # = Zellgroesse der local_costmap
+    center_min_points: 3
+    center_width_history: 20     # Bilder; Median der gemessenen Breite
+
+/nav2_goal_publisher:
+  ros__parameters:
+    # Obstacle-Modus: Ziel ist die Spurmitte, solange sie juenger ist als
+    # center_path_max_age (Empfangszeit). Sonst die Gerade goal_distance geradeaus.
+    center_path_topic: /lane/center_path
+    center_path_max_age: 1.0
+    goal_distance: 1.0
+    goal_frame_id: base_footprint
+    num_waypoints: 5
+    watchdog_rate: 1.0
+
+/keepout_zone_node:
+  ros__parameters:
+    frame_id: odom
+    robot_frame: base_footprint
+    output_topic: /detect/tunnel_entrance_obstacle
+    entrance_wall_width: 0.6
+    entrance_wall_points: 9
+    publish_rate: 5.0
+    # Wand erst senden, wenn der Bot so weit von der Eintrittslinie weg ist:
+    # Heck 0.101 + footprint_padding 0.01 + eine Zelle 0.05. Vorher stuende er in ihr.
+    entrance_wall_delay: 0.16
+
+/tunnel_explorer_node:
+  ros__parameters:
+    recompute_rate: 1.0
+    arrival_radius: 0.3
+    stall_timeout: 10.0
+    free_cost_threshold: 50
+    min_frontier_cluster_cells: 6
+    entrance_weight: 1.0
+    robot_distance_weight: 0.3
+    frame_id: odom
+    robot_frame: base_footprint
+    costmap_topic: /global_costmap/costmap
+    output_path_topic: /tunnel/explore_path

@@ -482,7 +482,7 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
 | `/scan` | LiDAR-Rohdaten, unabhängig von Nav2 |
 | `/detect/lane_obstacles` (PointCloud2) | die Spurpunkte in Metern, außerhalb des Tunnels. Hier prüft man, ob BEV und Extrinsik stimmen. |
 | `/lane/center_path` (Anzeige „Spurmitte“) | die berechnete Spurmitte, das Ziel für MPPI im Obstacle-Modus |
-| `/nav2/view/compressed` (in `rqt_image_view`) | Draufsicht von `nav2_view`: Costmap, Bot, Pfad, Eingangssperre, LiDAR und Statuszeile mit dem letzten Abbruchgrund. Ohne RViz, leicht genug fürs WLAN |
+| `/nav2/view` (in `rqt_image_view`) | Draufsicht von `nav2_view`: Costmap, Bot, Pfad, Eingangssperre, LiDAR und Statuszeile mit dem letzten Abbruchgrund. Ohne RViz. Unkomprimiert, weil nav2_view und rqt beide auf dem Laptop laufen (mit `/compressed` stürzte rqt_image_view ab) |
 
 **Der Test, mit dem wir den Fehler gefunden haben:** Eine Wand vor den LiDAR
 halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
