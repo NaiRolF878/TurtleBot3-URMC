@@ -60,6 +60,16 @@ class detect_lane(Node):
         self.declare_parameter('lab_b_yellow_l', 150, byte)
         self.declare_parameter('lab_b_yellow_h', 255, byte)
 
+        # --- Blau (LAB) ---
+        # Gemessen am blauen Klemmbrettrand (23.10.): L 14-108, A 143-176, B 56-99;
+        # Rest des Bildes: A 120-133, B 115-164 -> erkennbar an niedrigem B + erhoehtem A.
+        self.declare_parameter('lab_l_blue_l', 10,  byte)
+        self.declare_parameter('lab_l_blue_h', 255, byte)
+        self.declare_parameter('lab_a_blue_l', 135, byte)
+        self.declare_parameter('lab_a_blue_h', 200, byte)
+        self.declare_parameter('lab_b_blue_l', 0,   byte)
+        self.declare_parameter('lab_b_blue_h', 105, byte)
+
         # --- Crop-Image-Parameter ---
         # --- Perspektiv-Punkte ---
         # --- (Im Moment noch DuckieCam Parameter) ---
@@ -174,12 +184,19 @@ class detect_lane(Node):
     def cbGetRawImage(self,img):
         self.raw_image = img
 
+        self.detectBarrier
+
         # self.cbFindLane(img)
 
     def cbGetBEV(self,img):
         self.BEV=img
 
         self.cbFindLaneBEV(img)
+
+    def detectBarrier(self,img):
+        mask_blue = self.blue_mask(img)
+
+
 
     def cbFindLaneBEV(self, img):
         if self.is_running:
@@ -195,6 +212,8 @@ class detect_lane(Node):
                 'lab_b_white_l', 'lab_b_white_h',
                 'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
                 'lab_b_yellow_l', 'lab_b_yellow_h',
+                'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l', 'lab_a_blue_h',
+                'lab_b_blue_l', 'lab_b_blue_h',
                 'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
                 'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
                 'detection_row_factor', 'min_lane_width',
@@ -304,6 +323,8 @@ class detect_lane(Node):
                 'lab_b_white_l', 'lab_b_white_h',
                 'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
                 'lab_b_yellow_l', 'lab_b_yellow_h',
+                'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l', 'lab_a_blue_h',
+                'lab_b_blue_l', 'lab_b_blue_h',
                 'top_left_x', 'top_left_y', 'top_right_x', 'top_right_y',
                 'bottom_left_x', 'bottom_left_y', 'bottom_right_x', 'bottom_right_y',
                 'detection_row_factor', 'min_lane_width',
@@ -662,6 +683,15 @@ class detect_lane(Node):
             (self.lab_l_white_l, self.lab_a_white_l, self.lab_b_white_l),
             (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
         return mask_yellow, mask_white
+
+    def blue_mask(self,img):
+        """Blau-Maske aus dem BGR-Bild: CLAHE auf L, dann Schwellen in LAB (Parameter lab_*_blue_*)."""
+        lab = self.apply_clahe(img, return_lab=True)
+        mask_blue= cv2.inRange(lab,
+            (self.lab_l_blue_l, self.lab_a_blue_l, self.lab_b_blue_l),
+            (self.lab_l_blue_h, self.lab_a_blue_h, self.lab_b_blue_h))
+        return mask_blue
+
 
     def apply_clahe(self, img, return_lab=False):
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
