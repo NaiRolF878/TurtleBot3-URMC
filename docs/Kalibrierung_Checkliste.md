@@ -63,9 +63,11 @@ Kameramontage (12,3 cm Höhe). Nav2 benutzt sie nicht mehr.
 - [ ] `/detect/mask_debug/compressed` ansehen: Gelb und Weiß sauber getrennt,
       keine Linie am Rand abgeschnitten?
 - [ ] Schwellen in `rqt_params.sh` → `detect_lane` nachziehen (wirkt sofort):
-  - HSV: Der dritte Wert heißt `lightness_*`, ist aber der **V-Kanal** von
-    HSV. Gelb und Weiß sind dort gleich hell. Getrennt werden sie über die
-    Sättigung (`saturation_white_h` niedrig, `saturation_yellow_l` hoch).
+  - Farbfilter in **LAB** (`lab_l_*`, `lab_a_*`, `lab_b_*`, je `_l`/`_h`):
+    L = Helligkeit, A = grün (<128) bis rot (>128), B = blau (<128) bis gelb
+    (>128), 128 = farblos. **Gelb** erkennt man am hohen B (`lab_b_yellow_l`
+    150), **Weiß** am hohen L bei A/B nahe 128 (`lab_l_white_l` 200). Die
+    Messwerte vom 22.10. stehen als Kommentar in `detect_lane.py`.
   - `min_lane_width` ist in BEV-Pixeln: 80 px = 10 cm.
   - `detection_row_factor`: Suchzeile im Bild (0,80 = 80 % der Höhe).
   - Sichern: `bash scripts/tb/save-params.sh detect_lane`
