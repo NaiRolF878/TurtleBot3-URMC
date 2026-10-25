@@ -47,6 +47,7 @@ tb             # Menü mit allen Launchern
 |---|---|
 | `follow_lane.sh` | komplette Spurverfolgung + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
 | `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel), RViz und Draufsicht `/nav2/view` |
+| `storage.sh` | Storage-Aufgabe (Palette): Spurverfolgung + Storage-Detektoren, ohne Nav2. Bot steht, bis im Debugbild **STORAGE STARTEN** geklickt wird |
 | `extrinsik_view.sh` | Kamerabild mit 10-cm-Bodengitter + Vogelperspektive, Brett wird live vermessen |
 | `rqt_debug.sh` | Bildanzeige (`/lokal/raw_image`, `/lokal/bev`, Debug-Bilder) |
 | `rqt_params.sh` | Parameter von `detect_lane` / `control_driving` live einstellen |
@@ -81,6 +82,7 @@ bash scripts/tb/load-params.sh detect_lane     # Datei in den laufenden Node lad
 | Datei | Inhalt |
 |---|---|
 | `logs/follow_lane-<Zeit>.log` / `follow_lane-latest.log` | Ausgaben aller Knoten der Pipeline (Fehler, Tracebacks) |
+| `logs/storage-<Zeit>.log` / `storage-latest.log` | dasselbe für `storage.sh` |
 | `logs/tb-status-<Zeit>.log` | alle 10 s Knoten/Topic-Raten/Netz, wenn bei `tb` „mitloggen“ = j |
 
 Zeiten in Dateinamen sind UTC (2 h hinter deutscher Sommerzeit).
@@ -93,7 +95,9 @@ Zeiten in Dateinamen sind UTC (2 h hinter deutscher Sommerzeit).
 | `/lokal/raw_image` | entzerrtes Bild (ingress_node) |
 | `/lokal/bev` | **Vogelperspektive**, 5–60 cm vor der Radachse, ±40 cm, 1,25 mm/px (640x440) |
 | `/detect/lane` | Spurfehler für den Regler |
-| `/control/mode` | Fahrmodus von `switch_control` (1 Lane, 2 Obstacle, 7 TunnelEntry, 6 Tunnel) |
+| `/control/mode` | Fahrmodus von `switch_control` (1 Lane, 2 Obstacle, 3 Stop, 7 TunnelEntry, 6 Tunnel, 8 Dock, 9 Maneuver) |
+| `/control/storage_state`, `/control/storage_info` | Storage: Ablaufschritt und Klartext (Zonen, Ziel, Fehlergrund) |
+| `/detect/pallet_debug/compressed`, `/detect/storage_sign_debug/compressed`, `/detect/zone_debug/compressed` | Storage: Debugbilder zum Einstellen von Magnetlage, Farben und Linien |
 | `/nav2/cmd_vel` | Fahrbefehle von Nav2 (`controller_server`) an `control_driving` |
 | `/control/cmd_vel` | Fahrbefehle von `control_driving` an den Not-Aus |
 | `/odom`, `/cmd_vel`, `/battery_state` | vom Bringup (`turtlebot3_node`) |

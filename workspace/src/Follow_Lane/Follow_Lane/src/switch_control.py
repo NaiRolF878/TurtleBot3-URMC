@@ -1,7 +1,9 @@
 """Zustandsmaschine fuer den Fahrmodus, einziger Publisher von /control/mode.
 
-Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request
-Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String)
+Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request,
+      dazu die Eingaenge der Storage-Aufgabe (storage_sequence.py)
+Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
+      dazu die Ausgaenge der Storage-Aufgabe (Zustand, Grundbewegungen, Magnet)
 Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier.
 """
 import math
@@ -20,6 +22,7 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 from Follow_Lane.src.common import (
     ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, run_node,
     scan_points, transform_points)
+from Follow_Lane.src.storage_sequence import StorageSequence
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als mode_timeout nichts hoert.
@@ -57,6 +60,12 @@ class switch_control(Node):
     Tunnel -> Modus von vor dem Tunnel, sobald der LiDAR rundum freien Raum sieht.
     Diese Pruefung laeuft erst ab Tunnel, nicht schon vor der Oeffnung, wo es meist
     auch frei ist. Beides jederzeit von Hand abbrechbar (False).
+
+    Storage (Palette, Button im Debugbild auf /control/storage_request): den Ablauf
+    fuehrt StorageSequence, sie setzt die Modi Lane, Stop, Dock und Maneuver. Solange
+    sie laeuft, gibt es kein Obstacle (der LiDAR spielt dort keine Rolle; Schilder-
+    pfosten oder Stuetzen loesten ihn sonst aus) und keinen Tunnel. Nach Abbruch gilt
+    initial_mode: Lane fuer die Strecke, Stop fuer den Start mit storage.launch.py.
     """
 
     def __init__(self):
@@ -93,6 +102,8 @@ class switch_control(Node):
         self.declare_parameter('tunnel_exit_open_distance', 1.5, frange(0.1, 10.0))
         self.declare_parameter('tunnel_exit_open_ratio', 0.8, frange(0.0, 1.0))
         self.declare_parameter('tunnel_exit_debounce', 1.0, frange(0.0, 10.0))
+        # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop.
+        self.declare_parameter('initial_mode', 'Lane')
         self._param_names = [
             'obstacle_check_angle_deg', 'obstacle_trigger_distance',
             'obstacle_clear_angle_deg', 'obstacle_clear_distance', 'obstacle_clear_debounce',
@@ -123,7 +134,7 @@ class switch_control(Node):
         # --- Zustand ---
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.control_mode = ControlType.Lane
+        self.control_mode = self._initial_mode()
         self._mode_before_tunnel = None
         self._tunnel_source = ''          # 'auto' (Schild) oder 'manuell' (Button)
         self._obstacle_clear_since = None
@@ -134,8 +145,10 @@ class switch_control(Node):
         self._lane_frame = None
         self._lane_time = None
         self._scanner_poses = {}          # (Ziel-Frame, Scanner-Frame) -> (x, y, yaw)
+        # Braucht tf_buffer, odom_frame und robot_frame, daher zuletzt.
+        self.storage = StorageSequence(self)
 
-        self.get_logger().info('Started switch_control Node.')
+        self.get_logger().info(f'Started switch_control Node ({self.control_mode.name}).')
 
     # --- Callbacks ---
 
@@ -176,7 +189,7 @@ class switch_control(Node):
             self._update_tunnel_entry(scan)
         elif self.control_mode == ControlType.Tunnel:
             self._update_tunnel_exit(scan)
-        elif self.control_mode == ControlType.Lane:
+        elif self.control_mode == ControlType.Lane and not self.storage.active:
             if self._obstacle_in_lane(scan, self.obstacle_check_angle_deg,
                                       self.obstacle_trigger_distance):
                 self._set_mode(ControlType.Obstacle, 'Hindernis in der Fahrbahn')
@@ -202,8 +215,22 @@ class switch_control(Node):
         self.pub_control_mode.publish(UInt8(data=self.control_mode.value))
         self.pub_tunnel_source.publish(String(data=self._tunnel_source))
 
+    def set_initial_mode(self, reason):
+        """Zurueck auf initial_mode (nach einem Storage-Abbruch)."""
+        self._set_mode(self._initial_mode(), reason)
+
+    def _initial_mode(self):
+        name = self.get_parameter('initial_mode').value
+        if name not in ('Lane', 'Stop'):
+            self.get_logger().warn(f'initial_mode "{name}" unbekannt -- nehme Lane.')
+            return ControlType.Lane
+        return ControlType[name]
+
     def _enter_tunnel(self, source):
         if self.control_mode in TUNNEL_MODES:
+            return
+        if self.storage.active:
+            self.get_logger().warn(f'Tunnel ({source}) ignoriert: Storage laeuft.')
             return
         self._mode_before_tunnel = self.control_mode
         self._tunnel_source = source
@@ -352,7 +379,8 @@ class switch_control(Node):
     # --- Beenden ---
 
     def shut_down(self):
-        self.get_logger().info('Shutting down switch_control Node.')
+        self.get_logger().info('Shutting down switch_control Node -- Magnet aus.')
+        self.storage.shut_down()
 
 
 def main(args=None):

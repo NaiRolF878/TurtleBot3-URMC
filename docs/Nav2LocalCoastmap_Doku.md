@@ -45,7 +45,7 @@ flowchart LR
 
 `switch_control` merkt sich beim Eintritt in den Tunnel, welcher Modus vorher aktiv war, und stellt genau den beim Verlassen wieder her (nicht stur "zurück zu Lane"). Jeder Moduswechsel wird sofort auf `/control/mode` gesendet, zusätzlich alle 0,5 s.
 
-Die Werte `Stop`, `Intersection` und `Align` gibt es im Enum schon, sie haben aber noch keinen Auslöser (vorgesehen für Schranke und Kreuzung an Tag 1). In diesen Modi sendet `control_driving` Null.
+Die Werte `Intersection` und `Align` gibt es im Enum schon, sie haben aber noch keinen Auslöser (vorgesehen für Kreuzung an Tag 1). In diesen Modi und in `Stop` sendet `control_driving` Null. `Stop`, `Dock` und `Maneuver` setzt bisher nur die Storage-Aufgabe (`storage.launch.py`, siehe `docs/Storage_Retrieval_Konzept.md`).
 
 ### Wer fährt, wer nutzt die Kamera?
 
@@ -116,16 +116,16 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem M
 ## 4. Die Nodes im Einzelnen
 
 ### `switch_control` — die Zustandsmaschine
-Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `lane_max_age`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer).
+Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `lane_max_age`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer). Den Ablauf der Storage-Aufgabe führt er über `storage_sequence.py` (Button auf `/control/storage_request`); solange er läuft, gibt es weder Obstacle noch Tunnel.
 
 ### `control_driving` — die einzige Quelle für Fahrbefehle
-Wählt je nach `/control/mode` den PID (Lane) oder reicht `/nav2/cmd_vel` unverändert durch (Obstacle, Tunnel); in jedem anderen Modus Null. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen nur in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
+Wählt je nach `/control/mode` den PID (Lane) oder reicht `/nav2/cmd_vel` unverändert durch (Obstacle, Tunnel); für die Storage-Aufgabe regelt er `Dock` (Kamerabild) und `Maneuver` (odom); in jedem anderen Modus Null. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen nur in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
 
 ### `notaus` — die Fahrfreigabe
 Letzte Stufe zwischen `/control/cmd_vel` und `/cmd_vel`. Erzeugt keine Bewegung, reicht nur nach Freigabe (Leertaste, rqt `drive`, `/notaus/set`) durch oder sendet Null, auch wenn 0,5 s (`cmd_timeout_s`) nichts kommt.
 
 ### `debug_view` — das Debugbild mit Tunnel-Button
-Zeichnet das Debugbild auf `/lokal/debug_view`, angezeigt in `rqt_image_view`. Im Tunnel steht statt des Kamerabilds ein Platzhalter. Unten im Mode-Panel liegt der Tunnel-Button. Ein Klick darauf kommt als Klickposition von `rqt_image_view` auf `/lokal/debug_view_mouse_left` an. Dafür muss in `rqt_image_view` einmal die Checkbox **„Publish click location“** angehakt sein.
+Zeichnet das Debugbild auf `/lokal/debug_view`, angezeigt in `rqt_image_view`. Im Tunnel steht statt des Kamerabilds ein Platzhalter. Unten im Mode-Panel liegen der Tunnel-Button und darunter der Storage-Button. Ein Klick darauf kommt als Klickposition von `rqt_image_view` auf `/lokal/debug_view_mouse_left` an. Dafür muss in `rqt_image_view` einmal die Checkbox **„Publish click location“** angehakt sein.
 
 ### `lane_costmap_node` — das Spurgedächtnis (nicht im Tunnel)
 Wandelt die von der Kamera erkannten Spurlinien-Pixel aus der metrischen Vogelperspektive `/lokal/bev` über `Parameter/bev.yaml` in Meter um und merkt sie sich in einem ortsfesten Raster (odom-Frame, 2,5 cm). Eine Zelle wird erst nach `line_confirm_frames` (3) Bildern in Folge zur Linie und erst nach `free_confirm_frames` (10) Bildern in Folge ohne Linie wieder frei. Abgestimmt wird nur, was die Kamera gerade sieht (Sichtmaske `/lokal/bev_view` von `ingress_node`); Zellen im Sichtschatten eines LiDAR-Hindernisses bekommen keine „frei“-Stimme, weil das Hindernis die Linie dort nur verdeckt. So kennt Nav2 auch Linien neben und hinter dem Bot, die die Kamera (5–60 cm voraus) nicht mehr sieht.

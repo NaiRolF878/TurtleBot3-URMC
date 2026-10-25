@@ -44,6 +44,10 @@ def launch_setup(context, *args, **kwargs):
     detect_params = load_flat_params(LaunchConfiguration('detect_params').perform(context))
     control_params = load_flat_params(LaunchConfiguration('control_params').perform(context))
     switch_params = load_flat_params(LaunchConfiguration('switch_control_params').perform(context))
+    # Zusaetzliche Datei mit Node-Bloecken (storage.launch.py: Storage.yaml); ueberschreibt
+    # die Werte davor, weil sie spaeter in der Liste steht.
+    storage_params = LaunchConfiguration('storage_params').perform(context)
+    extra = [storage_params] if storage_params else []
 
     # *_nav2: Kopien von ingress_node/detect_lane, die im Tunnel pausieren. Die
     # Node-Namen bleiben, damit rqt, save-params.sh und ros2 param gleich funktionieren.
@@ -55,11 +59,11 @@ def launch_setup(context, *args, **kwargs):
         ),
         Node(
             package='Follow_Lane', executable='control_driving', name='control_driving',
-            parameters=[control_params],
+            parameters=[control_params] + extra,
         ),
         Node(
             package='Follow_Lane', executable='switch_control', name='switch_control',
-            parameters=[switch_params],
+            parameters=[switch_params] + extra,
         ),
         Node(package='Follow_Lane', executable='debug_view', name='debug_view'),
     ]
@@ -75,6 +79,7 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'Control_driving_PID.yaml')),
         DeclareLaunchArgument('switch_control_params',
             default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
+        DeclareLaunchArgument('storage_params', default_value=''),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
     ])

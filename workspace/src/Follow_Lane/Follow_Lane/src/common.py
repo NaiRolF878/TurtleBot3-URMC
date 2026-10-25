@@ -1,8 +1,8 @@
 """Gemeinsame Bausteine der Follow_Lane-Nodes.
 
-Fahrmodi (ControlType), Parameter-Helfer, Geometrie (Gierwinkel, BEV-Pixel ->
-Meter) und der einheitliche Ablauf von main(): starten, spinnen, bei
-SIGINT/SIGTERM shut_down().
+Fahrmodi (ControlType), Storage-Zustaende (StorageState), Parameter-Helfer,
+Geometrie (Gierwinkel, BEV-Pixel -> Meter) und der einheitliche Ablauf von main():
+starten, spinnen, bei SIGINT/SIGTERM shut_down().
 """
 import math
 import signal
@@ -22,11 +22,37 @@ class ControlType(Enum):
     """Fahrmodus auf /control/mode (std_msgs/UInt8), gesetzt nur von switch_control."""
     Lane = 1
     Obstacle = 2
-    Stop = 3            # noch ohne Ausloeser
+    Stop = 3            # Nullbefehl; Storage beim Lesen, Greifen, Ablegen
     Intersection = 4    # noch ohne Ausloeser
     Align = 5           # noch ohne Ausloeser
     Tunnel = 6          # im Tunnel: Kamera verboten (Reglement)
     TunnelEntry = 7     # Einfahrt bis kurz vor die Oeffnung, Kamera noch erlaubt
+    Dock = 8            # Storage: Feinanfahrt an die Palette im Kamerabild
+    Maneuver = 9        # Storage: Grundbewegung in odom (/control/maneuver)
+
+
+class StorageState(Enum):
+    """Unterzustand der Storage-Aufgabe auf /control/storage_state (std_msgs/String,
+    Name des Werts), gesetzt nur von switch_control. Die Detektoren arbeiten nur in
+    den Zustaenden, die sie brauchen."""
+    IDLE = 0
+    ERKUNDEN = 1             # an der Spur entlang, Zonengrenzen sammeln
+    ZUR_ZONE_DREHEN = 2      # zur Zonenmitte auf der Spur, dann zur Zone drehen
+    SCHILD_LESEN = 3         # stehen, Schild, Palette und Zonentiefe abstimmen
+    ZURUECKDREHEN = 4        # zurueck in Fahrtrichtung der Spur
+    ZUR_PALETTENZONE = 5     # auf der Spur vor die Palettenzone, zur Zone drehen
+    POSITIONIERT = 6         # anhalten vor der Palettenzone (Wertung)
+    ANDOCKEN = 7             # im Bild bis an den Metallstreifen
+    GREIFEN = 8              # Magnet an, warten
+    GRIFF_PRUEFEN = 9        # kurz zuruecksetzen, kommt die Palette mit?
+    NEU_ANSETZEN = 10        # zurueck auf die Spur, erneut ausrichten
+    HERAUSFAHREN = 11        # mit Palette rueckwaerts auf die Spur
+    TRANSPORT = 12           # auf der Spur vor die Zielzone, zur Zone drehen
+    ABLAGE_ANFAHREN = 13     # bis zur Zonenmitte
+    ABLEGEN = 14             # Magnet aus, warten
+    VERLASSEN = 15           # rueckwaerts auf die Spur
+    FERTIG = 16
+    FEHLER = 17
 
 
 class SignType(Enum):
@@ -76,9 +102,19 @@ def control_mode_from_msg(node, msg):
         return None
 
 
+def storage_state_from_msg(msg):
+    """String von /control/storage_state -> StorageState, IDLE bei unbekanntem Namen."""
+    return StorageState.__members__.get(msg.data, StorageState.IDLE)
+
+
 def yaw_from_quaternion(q):
     """Gierwinkel (rad, positiv = nach links) aus einem geometry_msgs-Quaternion."""
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def wrap_angle(a):
+    """Winkel (rad) auf [-pi, pi]."""
+    return math.atan2(math.sin(a), math.cos(a))
 
 
 def pose2d_from_transform(tf):
