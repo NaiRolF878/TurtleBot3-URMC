@@ -46,8 +46,8 @@ der PID die Spur nicht hält, lässt sich Nav2 nicht sinnvoll testen.
       Ablauf und Messwerte: `docs/bev-tests/README.md`, Kurzform in
       `docs/Befehle.md`.
 
-`Parameter/camera_info/ground_homography_800x600.yaml` gehört zur alten
-Kameramontage (12,3 cm Höhe). Nav2 benutzt sie nicht mehr.
+`Parameter/camera_info/ground_homography_800x600.yaml` beschreibt eine
+Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie nicht.
 
 ---
 

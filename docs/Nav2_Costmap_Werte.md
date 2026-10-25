@@ -52,7 +52,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
   liegt der Bot rechnerisch außerhalb der Karte, und `planner_server` findet
   keinen Pfad mehr. Mit `true` spielt das keine Rolle, und **vor einer Fahrt muss
   die Odometrie nicht zurückgesetzt werden**. `origin_x`/`origin_y` werden bei
-  `rolling_window: true` ignoriert und stehen deshalb nicht mehr in der Datei.
+  `rolling_window: true` ignoriert und stehen deshalb nicht in der Datei.
 - Nebenwirkung bei der global_costmap: Was aus dem 7×7-m-Fenster herausrollt,
   ist vergessen. Für die Enclosure reicht das.
 

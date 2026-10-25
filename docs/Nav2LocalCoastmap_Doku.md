@@ -1,4 +1,4 @@
-# Nav2-Fahrmodi: Hindernisvermeidung & Tunnel-Navigation (Ansatz 3)
+# Nav2-Fahrmodi: Hindernisvermeidung & Tunnel-Navigation
 
 Dokumentation für alle, die nicht direkt am Code gearbeitet haben, aber verstehen wollen/müssen, wie die Nav2-Fahrmodi funktionieren und welche Werte am Wettbewerbstag ggf. angepasst werden müssen.
 

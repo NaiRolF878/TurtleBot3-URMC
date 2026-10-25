@@ -22,38 +22,34 @@ Bei der URMC programmieren Teams standardisierte TurtleBot3 Burger Roboter, die 
 ### Voraussetzungen
 
 - Docker Desktop (Windows) oder Docker Engine (Linux)
-- Mindestens 4 CPU-Kerne, 8 GB RAM, 20 GB Speicher
+- VS Code mit der Erweiterung „Dev Containers“
 
-### Quickstart (Linux)
+### Quickstart
 
-```bash
-# X11-Zugriff erlauben
-xhost +local:docker
+1. Repo in VS Code öffnen und **Reopen in Container** wählen (`.devcontainer/`,
+   ROS 2 Humble). Beim ersten Start werden die TurtleBot3-Pakete gebaut und die
+   Kurzbefehle (`tb`, `botup`, `lanup` …) angelegt.
+2. Workspace bauen:
+   ```bash
+   cd workspace && colcon build --symlink-install
+   ```
+3. Bot starten und Pipeline laufen lassen: `docs/Befehle.md`.
 
-# Container bauen & starten
-docker compose up -d --build
-
-# In den Container einsteigen
-docker exec -it tb3_urmc bash
-
-# Simulation testen
-ros2 launch urmc simulation.launch.py
-```
+Das Konzept des ausgecheckten Branches steht in `docs/Konzept_*.md`.
 
 ## Ordnerstruktur
 
 ```
 .
-├── docker/                  ← Docker-Dateien
-│   ├── Dockerfile
-│   ├── docker-compose.yml
-│   ├── entrypoint.sh
-│   └── novnc_startup.sh
-│
-└── workspace/               ← ROS2-Workspace (wird in den Container gemountet)
+├── .devcontainer/           ← Container (Dockerfile, devcontainer.json, DDS-Profil)
+├── docs/                    ← Konzept, Befehle, Kalibrierung, Nav2-Doku
+├── scripts/tb/              ← Bot-Start, Netz, Kalibrierwerkzeuge, Launcher (Menü `tb`)
+└── workspace/               ← ROS2-Workspace
     └── src/
-        └── urmc/            ← Unser Package
-            ├── urmc/        ← Nodes (Python)
-            ├── config/      ← Parameter (JSON)
-            └── launch/      ← Startdateien
+        ├── Follow_Lane/     ← Unser Package
+        │   ├── Follow_Lane/src/        ← Nodes (Python)
+        │   ├── Follow_Lane/Parameter/  ← Parameter (YAML)
+        │   ├── launch/                 ← Startdateien
+        │   └── rviz/                   ← RViz-Konfiguration
+        └── follow_lane_msg/ ← eigene Messages
 ```
