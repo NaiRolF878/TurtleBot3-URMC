@@ -1,0 +1,70 @@
+/lane_costmap_node:
+  ros__parameters:
+    # Spurgedaechtnis fuer die lane_layer und Spurmitte (nur Obstacle-Modus), in jedem
+    # Modus ausser Tunnel (Kamera dort verboten), siehe Docstring in lane_costmap_node.py.
+    # Pixel -> Meter und Reichweite kommen aus Parameter/bev.yaml (dieselbe Datei,
+    # mit der ingress_node /lokal/bev erzeugt). Wurde die Kamera verstellt, die
+    # Extrinsik neu messen (scripts/tb/camera-extrinsics.py).
+    robot_frame: base_footprint
+    odom_frame: odom
+    output_topic: /detect/lane_obstacles
+    pixel_stride: 2
+
+    # Spurgedaechtnis: eine Zelle wird erst nach so vielen Kamerabildern in Folge zur
+    # Linie bzw. wieder frei.
+    memory_resolution: 0.025     # m, = resolution der Costmaps
+    memory_radius: 2.0           # m, = obstacle_max_range der lane_layer
+    line_confirm_frames: 3
+    free_confirm_frames: 10
+    shadow_radius: 0.03          # m, Sichtschatten je LiDAR-Punkt
+    shadow_margin: 0.05          # m
+
+    # Spurmitte: keine Spurbreite einstellen, sie wird laufend gemessen.
+    center_path_topic: /lane/center_path
+    center_bin_size: 0.05        # m, Tiefe eines Streifens
+    center_min_points: 3
+    center_width_history: 20     # Bilder; Median der gemessenen Breite
+
+/nav2_goal_publisher:
+  ros__parameters:
+    # Obstacle-Modus: Planziel goal_distance voraus auf der Spurmitte (solange sie
+    # juenger ist als center_path_max_age, Empfangszeit), sonst geradeaus.
+    # planner_server rechnet alle replan_period einen Weg dorthin.
+    center_path_topic: /lane/center_path
+    center_path_max_age: 1.0
+    goal_distance: 1.0
+    replan_period: 1.0
+    robot_frame: base_footprint
+    odom_frame: odom
+    watchdog_rate: 2.0
+
+/keepout_zone_node:
+  ros__parameters:
+    odom_frame: odom
+    robot_frame: base_footprint
+    output_topic: /detect/tunnel_entrance_obstacle
+    entrance_wall_width: 0.6
+    entrance_wall_points: 9
+    publish_rate: 5.0
+    # Wand erst senden, wenn der Bot so weit von der Eintrittslinie weg ist:
+    # Heck 0.101 + footprint_padding 0.01 + 0.05 Reserve. Vorher stuende er in ihr.
+    entrance_wall_delay: 0.16
+    # Wand so weit vor die Pose beim Umschalten setzen, also an die Oeffnung
+    # (siehe switch_control.tunnel_side_distance).
+    entrance_wall_offset: 0.2
+
+/tunnel_explorer_node:
+  ros__parameters:
+    recompute_rate: 1.0
+    arrival_radius: 0.3
+    stall_timeout: 10.0
+    free_cost_threshold: 50
+    # In Zellen: 12 x 2,5 cm (global_costmap.resolution) = 30 cm Mindestbreite eines
+    # Frontier-Clusters. Bei anderer resolution mitaendern.
+    min_frontier_cluster_cells: 12
+    entrance_weight: 1.0
+    robot_distance_weight: 0.3
+    odom_frame: odom
+    robot_frame: base_footprint
+    costmap_topic: /global_costmap/costmap
+    output_path_topic: /tunnel/explore_path

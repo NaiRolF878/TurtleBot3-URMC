@@ -33,9 +33,10 @@ TOPICS=(
     /lokal/debug_view
     /detect/lane_debug
     /scan
-    /lokal/scan
     /detect/lane
+    /nav2/cmd_vel
     /control/cmd_vel
+    /cmd_vel
     /control/mode
 )
 

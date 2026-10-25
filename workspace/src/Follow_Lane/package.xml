@@ -9,6 +9,41 @@
 
   <depend>follow_lane_msg</depend>
 
+  <!-- ROS-Python-Bibliotheken und Nachrichten, die die Nodes importieren -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <!-- Python-Modul tf2_ros -->
+  <exec_depend>tf2_ros_py</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+
+  <!-- Python-Pakete ausserhalb von ROS -->
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- GPIO des Raspberry Pi fuer den Magneten (magnet_controll) -->
+  <exec_depend>python3-gpiozero</exec_depend>
+
+  <!-- Gestartet von launch/*.launch.py bzw. als Plugin aus nav2_params.yaml geladen -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_costmap_2d</exec_depend>
+  <exec_depend>nav2_mppi_controller</exec_depend>
+  <exec_depend>nav2_navfn_planner</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>rqt_image_view</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

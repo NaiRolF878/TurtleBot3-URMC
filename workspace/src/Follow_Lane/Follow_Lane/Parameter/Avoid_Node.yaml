@@ -1,63 +1,53 @@
-# Parameter fuer avoid_node (Zoneneinteilung + Ausweichen).
+# Parameter fuer avoid_node (Zonenauswertung des LiDAR).
 #
-# Flaches Format (name: wert), passend zu load_flat_params im Launch und zu den
-# Datei-Knoepfen von rqt_reconfigure.
+# Verschachteltes Format: nav2_obstacle.launch.py uebergibt die Datei direkt an
+# den Node. Wann auf Obstacle umgeschaltet wird, steht in Switch_Control.yaml, die
+# Geschwindigkeiten des Ausweichmanoevers in control_driving.
 #
 # Winkel in Grad, gegen den Uhrzeigersinn ab Fahrtrichtung:
 #   0 = geradeaus, 90 = links, 270 = rechts.
 # Laeuft ein Bereich ueber die 360/0-Grenze, steht der groessere Wert vorn
 # (Frontzone 350..10).
 
-# --- Zonen: [start_deg, end_deg] ---
-zone_front:        [350.0, 10.0]
-zone_front_left:   [10.0, 50.0]
-zone_front_right:  [310.0, 350.0]
-zone_left:         [50.0, 90.0]
-zone_right:        [270.0, 310.0]
+/avoid_node:
+  ros__parameters:
+    # --- Zonen: [start_deg, end_deg] ---
+    zone_front:        [350.0, 10.0]
+    zone_front_left:   [10.0, 50.0]
+    zone_front_right:  [310.0, 350.0]
+    zone_left:         [50.0, 90.0]
+    zone_right:        [270.0, 310.0]
 
-# --- Kosten pro Zone ---
-# Vorzeichen = Drehrichtung (positiv = links, negativ = rechts),
-# Betrag = Kosten. Gewaehlt wird der freie Sektor mit dem kleinsten Betrag,
-# geradeaus ist mit 0 also immer erste Wahl, danach die schraegen Sektoren,
-# zuletzt die seitlichen.
-cost_front:        0.0
-cost_front_left:   1.0
-cost_front_right: -1.0
-cost_left:         2.0
-cost_right:       -2.0
+    # --- Kosten pro Zone ---
+    # Vorzeichen = Drehrichtung (positiv = links, negativ = rechts),
+    # Betrag = Kosten. Gewaehlt wird der freie Sektor mit dem kleinsten Betrag,
+    # geradeaus ist mit 0 also immer erste Wahl, danach die schraegen Sektoren,
+    # zuletzt die seitlichen.
+    cost_front:        0.0
+    cost_front_left:   1.0
+    cost_front_right: -1.0
+    cost_left:         2.0
+    cost_right:       -2.0
 
-# --- Schwellwerte (Meter) ---
-# Ab hier gilt die Frontzone als blockiert.
-front_threshold:           0.35
-# Ein Sektor gilt als frei, wenn seine kleinste Messung darueber liegt.
-clear_distance:            0.50
-# Darunter reicht der Offset nicht mehr -> avoid_node uebernimmt komplett
-# (/cmd_avoid, switch_control geht auf Obstacle = Prioritaet 2).
-takeover_distance:         0.20
-# Hysterese fuer die Rueckgabe: erst ab dieser Distanz, und erst nach
-# takeover_release_debounce Sekunden, faehrt wieder der PID.
-takeover_release_distance: 0.45
-takeover_release_debounce: 1.0
-# Messwerte darunter sind Artefakte (der LDS meldet statt "kein Echo"
-# gelegentlich 0.0) und werden verworfen.
-min_valid_distance:        0.05
+    # --- Schwellwerte (Meter) ---
+    # Ein Sektor gilt als frei, wenn seine kleinste Messung darueber liegt.
+    clear_distance:            0.50
+    # Ist die Front naeher als das, meldet avoid_node "nur drehen".
+    avoid_turn_only_distance:  0.15
+    # Messwerte darunter sind Artefakte (der LDS meldet statt "kein Echo"
+    # gelegentlich 0.0) und werden verworfen.
+    min_valid_distance:        0.05
 
-# --- Offset auf den Spur-Error (Normalbetrieb) ---
-# Ab dieser Distanz beginnt der Offset zu wirken ...
-offset_trigger_distance:    0.80
-# ... und ab dieser wirkt er voll. Dazwischen linear -- je naeher, desto mehr.
-offset_saturation_distance: 0.25
-# Maximaler Offset bei voller Wirkung. Der Spur-Error liegt in [-1, 1], 0.6 ist
-# also ein kraeftiger, aber nicht uebersteuernder Ausschlag.
-offset_gain:                0.6
-offset_max:                 0.6
-# 1.0 passt zur Konvention von detect_lane (positiver Error = nach links):
-# Hindernis rechts -> positiver Offset -> Ausweichen nach links.
-# Nur auf -1.0 stellen, wenn die Vorzeichenkonvention in detect_lane gedreht wird.
-offset_direction:           1.0
-
-# --- Geschwindigkeiten waehrend der kompletten Uebernahme ---
-avoid_linear_speed:         0.06
-avoid_angular_speed:        0.7
-# Ist die Front naeher als das, wird nur noch auf der Stelle gedreht.
-avoid_turn_only_distance:   0.15
+    # --- Offset auf den Spurfehler (Lane-Modus) ---
+    # Ab dieser Distanz beginnt der Offset zu wirken ...
+    offset_trigger_distance:    0.80
+    # ... und ab dieser wirkt er voll. Dazwischen linear -- je naeher, desto mehr.
+    offset_saturation_distance: 0.25
+    # Maximaler Offset bei voller Wirkung. Der Spurfehler liegt in [-1, 1], 0.6 ist
+    # also ein kraeftiger, aber nicht uebersteuernder Ausschlag.
+    offset_gain:                0.6
+    offset_max:                 0.6
+    # 1.0 passt zur Konvention von detect_lane (positiver Fehler = nach links):
+    # Hindernis rechts -> positiver Offset -> Ausweichen nach links.
+    # Nur auf -1.0 stellen, wenn die Vorzeichenkonvention in detect_lane gedreht wird.
+    offset_direction:           1.0

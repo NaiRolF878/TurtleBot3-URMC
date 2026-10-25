@@ -8,16 +8,16 @@
 # Beenden mit bot-down.sh.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BOT_USER="gertrude"
+source "$SCRIPT_DIR/bot.conf" || exit 1
 
-# Kameraeinstellungen. 4:3 beibehalten -- beim IMX219 (Cam 2) bleibt damit der volle
-# Bildwinkel erhalten, 16:9 landet im beschnittenen Sensormodus. Details in docs/MEMORY.md.
-CAM_W=800
-CAM_H=600
-CAM_Q=80
-# Bilddauer in Mikrosekunden, min und max gleich = feste Rate. 33333 us = 30 Hz.
-# Ohne diesen Wert waehlt libcamera selbst und laesst die Rate je nach Belichtung sinken.
-CAM_FRAME_US=33333
+# Kameraeinstellungen (Aufloesung, Sensormodus, Weissabgleich) stehen in camera.conf.
+source "$SCRIPT_DIR/camera.conf" || exit 1
+
+# Klang am Ende (Dienst /sound, fest in der OpenCR-Firmware -- keine eigenen Melodien):
+# 0 OFF, 1 ON, 2 LOW_BATTERY, 3 ERROR. Leer = kein Klang.
+# 4 BUTTON1 / 5 BUTTON2 werden angenommen (success=True), spielen bei uns aber NICHTS (getestet).
+SOUND_OK=1
+SOUND_FAIL=3
 
 BOT_IP=$(bash "$SCRIPT_DIR/find-bot-ip.sh") || exit 1
 
@@ -34,7 +34,7 @@ eval "$(grep -E '^[[:space:]]*export[[:space:]]+(TURTLEBOT3_MODEL|LDS_MODEL|ROS_
 
 # ...und fuer alles, was dort nicht steht, Standardwerte setzen.
 # TURTLEBOT3_MODEL fehlte hier zuerst -- turtlebot3_bringup startet ohne die Variable nicht.
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-33}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-__DOMAIN_ID__}"
 export TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}"
 [ -f "$HOME/fastdds_profile.xml" ] && export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/fastdds_profile.xml"
 echo "  Umgebung: TURTLEBOT3_MODEL=$TURTLEBOT3_MODEL LDS_MODEL=${LDS_MODEL:-(nicht gesetzt)} ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
@@ -73,19 +73,7 @@ setsid nohup ros2 launch turtlebot3_bringup robot.launch.py usb_port:="$PORT" \
     > "$HOME/logs/bringup.log" 2>&1 < /dev/null &
 sleep 6
 
-echo "--- Kamera starten ---"
-# QoS-Overrides: der Publisher stand sonst auf RELIABLE. Fuer einen Livestrom ist das
-# falsch -- DDS haelt verlorene Samples vor und sendet sie erneut, bei Paketverlust
-# staut sich der Sender und liefert alte Bilder nach. BEST_EFFORT + Tiefe 1 heisst:
-# immer nur das neueste Bild, verlorene werden verworfen statt nachgereicht.
-setsid nohup ros2 run camera_ros camera_node --ros-args \
-    -p format:=RGB888 -p width:=__CAM_W__ -p height:=__CAM_H__ -p jpeg_quality:=__CAM_Q__ \
-    -p FrameDurationLimits:="[__CAM_FRAME_US__,__CAM_FRAME_US__]" \
-    -p qos_overrides./camera/image_raw/compressed.publisher.reliability:=best_effort \
-    -p qos_overrides./camera/image_raw/compressed.publisher.history:=keep_last \
-    -p qos_overrides./camera/image_raw/compressed.publisher.depth:=1 \
-    > "$HOME/logs/camera.log" 2>&1 < /dev/null &
-sleep 4
+__CAMERA_START__
 
 echo "--- laufende Prozesse ---"
 # Bei Fehlschlag gleich das Log zeigen, statt nur darauf zu verweisen.
@@ -104,27 +92,56 @@ fi
 EOF
 )
 
-REMOTE=${REMOTE//__CAM_W__/$CAM_W}
-REMOTE=${REMOTE//__CAM_H__/$CAM_H}
-REMOTE=${REMOTE//__CAM_Q__/$CAM_Q}
-REMOTE=${REMOTE//__CAM_FRAME_US__/$CAM_FRAME_US}
-
-echo ""
-echo "=== Bot hochfahren ($BOT_IP) ==="
+# Kamerastart aus _camera-start.sh einsetzen, die Werte aus camera.conf davor.
+# Ersatztext in Anfuehrungszeichen: sonst wuerde bash >= 5.2 jedes & darin als
+# "gefundener Text" interpretieren (patsub_replacement).
+CAMERA_START="CAM_W=$CAM_W CAM_H=$CAM_H CAM_Q=$CAM_Q CAM_FRAME_US=$CAM_FRAME_US CAM_REL=best_effort
+CAM_SENSOR_MODE='$CAM_SENSOR_MODE' CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS' CAM_ORIENTATION='$CAM_ORIENTATION' CAM_TUNING='$CAM_TUNING'
+$(cat "$SCRIPT_DIR/_camera-start.sh")"
+REMOTE="${REMOTE/__CAMERA_START__/"$CAMERA_START"}"
+REMOTE=${REMOTE//__DOMAIN_ID__/$BOT_DOMAIN_ID}
+# Tuning-Datei mitschicken (Details in camera.conf)
+if [ -n "$CAM_TUNING" ]; then
+    ssh "$BOT_USER@$BOT_IP" "mkdir -p ~/tuning" && \
+        scp -q "$SCRIPT_DIR/tuning/$CAM_TUNING" "$BOT_USER@$BOT_IP:tuning/$CAM_TUNING" || \
+        echo "  WARNUNG: Tuning-Datei $CAM_TUNING konnte nicht auf den Bot kopiert werden."
+fi
 ssh "$BOT_USER@$BOT_IP" "bash -s" <<< "$REMOTE" || exit 1
 
 echo ""
 echo "=== Gegenprobe vom Laptop ==="
 # Der Daemon cacht nach Bot-Neustart oder IP-Wechsel falsch -> hier bewusst --no-daemon.
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
-export ROS_DOMAIN_ID=33
-sleep 3
-FOUND=$(timeout 25 ros2 topic list --no-daemon 2>/dev/null | grep -cE "^/(scan|odom|battery_state|camera/image_raw/compressed)$")
+export ROS_DOMAIN_ID=$BOT_DOMAIN_ID
+# Bis zu 3 Versuche: nach dem Start (und mit WLAN + Kabel gleichzeitig) tauchen nicht alle
+# Topics sofort auf -- einmal pruefen meldete sonst Fehler, obwohl kurz darauf alles da war.
+EXPECTED="/scan /odom /battery_state /camera/image_raw/compressed"
+for attempt in 1 2 3; do
+    sleep 3
+    TOPICS=$(timeout 25 ros2 topic list --no-daemon 2>/dev/null)
+    MISSING=""
+    for t in $EXPECTED; do
+        grep -qx "$t" <<< "$TOPICS" || MISSING="$MISSING $t"
+    done
+    FOUND=$(( 4 - $(wc -w <<< "$MISSING") ))
+    [ -z "$MISSING" ] && break
+    [ "$attempt" -lt 3 ] && echo "  Versuch $attempt: $FOUND von 4, fehlt:$MISSING -- warte kurz ..."
+done
 echo "  $FOUND von 4 erwarteten Topics sichtbar (scan, odom, battery_state, camera compressed)"
-if [ "$FOUND" -lt 4 ]; then
-    echo "  Fehlt etwas, Logs auf dem Bot pruefen:"
-    echo "    botssh 'tail -30 ~/logs/bringup.log'"
-    echo "    botssh 'tail -30 ~/logs/camera.log'"
+if [ -n "$MISSING" ]; then
+    echo "  FEHLT:$MISSING"
+    echo "  Logs auf dem Bot pruefen:"
+    case "$MISSING" in *camera*) echo "    botssh 'tail -30 ~/logs/camera.log'    (Kamera)";; esac
+    case "$MISSING" in *scan*|*odom*|*battery*) echo "    botssh 'tail -30 ~/logs/bringup.log'   (LiDAR / OpenCR)";; esac
+fi
+
+# Hoerbare Rueckmeldung: alles da -> SOUND_OK, sonst SOUND_FAIL.
+SOUND=$([ "$FOUND" -ge 4 ] && echo "$SOUND_OK" || echo "$SOUND_FAIL")
+if [ -n "$SOUND" ]; then
+    # turtlebot3_msgs (Sound.srv) liegt im turtlebot3_ws, nicht in /opt/ros.
+    [ -f "$HOME/turtlebot3_ws/install/setup.bash" ] && source "$HOME/turtlebot3_ws/install/setup.bash" >/dev/null 2>&1
+    timeout 10 ros2 service call /sound turtlebot3_msgs/srv/Sound "{value: $SOUND}" >/dev/null 2>&1 \
+        || echo "  (Klang konnte nicht abgespielt werden -- /sound nicht erreichbar)"
 fi
 
 echo ""
