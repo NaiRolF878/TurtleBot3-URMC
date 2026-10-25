@@ -1,16 +1,40 @@
 /switch_control:
   ros__parameters:
-    # --- Obstacle-Erkennung (Lane <-> Obstacle) ---
-    # HALBwinkel -- 20.0 heisst 40 Grad Gesamtkegel, bei 1 m also ca. +/-0.36 m
-    # seitlich. Erster Wert zum Verkleinern, falls Streckenbegrenzungen faelschlich
-    # den Obstacle-Modus ausloesen.
+    # --- Eintritt Lane -> Obstacle ---
+    # Halbwinkel: 20.0 heisst 40 Grad Gesamtkegel, bei 1 m also ca. +/-0.36 m seitlich.
     obstacle_check_angle_deg: 20.0
-    # 1.0 statt 0.4 m: der PID ignoriert Hindernisse komplett, bei 0.4 m blieben
-    # Nav2 sonst nur ~1,2-1,8 s zum Ausweichen (PID-Sollwert MAX_VEL 0.34, der
-    # Burger faehrt hoechstens 0.22 m/s; Test 02.09.: Hindernis wurde geschoben
-    # statt umfahren). 1.0 m entspricht goal_distance und der MPPI-Vorausschau.
+    # LiDAR-Punkt im Kegel naeher als das (m, ab LiDAR) -> Obstacle, sofern keine
+    # Spurlinie zwischen Bot und Punkt liegt. Der PID beachtet Hindernisse nicht; je
+    # kleiner der Wert, desto weniger Weg bleibt Nav2 zum Ausweichen. Wird vor Ort
+    # abgestimmt.
     obstacle_trigger_distance: 0.20
-    obstacle_clear_debounce: 01.0
+
+    # --- Austritt Obstacle -> Lane ---
+    # Halbwinkel 135 = 270 Grad: vorn, seitlich und schraeg hinten. Der Keil direkt
+    # hinter dem Bot zaehlt nicht, aus dieser Richtung kam er gerade.
+    obstacle_clear_angle_deg: 135.0
+    obstacle_clear_distance: 0.20
+    # So lange (s) muss der Bereich frei sein, bevor es zurueck zu Lane geht.
+    obstacle_clear_debounce: 1.0
+
+    # --- Linienfilter (Spurgedaechtnis von lane_costmap_node) ---
+    line_block_tolerance: 0.02
+    line_obstacle_margin: 0.05
+    lane_max_age: 0.5
+
+    # --- Tunnel-Einfahrt (TunnelEntry -> Tunnel), nur LiDAR ---
+    # Umschalten (Kamera aus), sobald links und rechts voraus eine Wand naeher als
+    # tunnel_side_distance liegt. Testtunnel 0,5 m breit: Waende 0,25 m neben der Mitte,
+    # mit 0.35 schaltet es ~20 cm vor der Oeffnung.
+    tunnel_side_angle_min_deg: 30.0
+    tunnel_side_angle_max_deg: 100.0
+    tunnel_side_distance: 0.35
+    tunnel_entry_debounce: 0.2
+    # Sicherheitsnetz: spaetestens nach so viel Strecke (m) ab dem Umschalten gilt der
+    # Bot als drin. Etwas mehr als der Abstand, mit dem er vor dem Tunnel steht.
+    tunnel_entry_max_distance: 0.8
+    odom_frame: odom
+    robot_frame: base_footprint
 
     # --- Tunnel-Austritt (Tunnel -> vorheriger Modus), nur LiDAR ---
     tunnel_exit_open_distance: 1.5

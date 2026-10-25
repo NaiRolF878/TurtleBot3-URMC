@@ -15,17 +15,15 @@ RVIZ_CONFIG = os.path.join(SHARE, 'rviz', 'urmc.rviz')
 
 
 def generate_launch_description():
-    """Startet alles: Spurverfolgung, Nav2-Zweig, RViz und Debug-Fenster -- ausser dem
-    Not-Aus (notaus.py), der ein Terminal fuer die Leertaste braucht. launchers/nav2_obstacle.sh
+    """Startet alles: Spurverfolgung, Nav2-Zweig, RViz und Debug-Fenster, ausser dem
+    Not-Aus (notaus), der ein Terminal fuer die Leertaste braucht. launchers/nav2_obstacle.sh
     startet ihn im Vordergrund; ohne ihn faehrt der Bot nicht.
 
-    Die Fahrzweige schliessen sich ueber /control/mode gegenseitig aus --
-    control_driving faehrt bei Lane, der Nav2-Zweig bei Obstacle bzw. Tunnel.
+    Fahrbefehle: controller_server -> /nav2/cmd_vel -> control_driving -> /control/cmd_vel
+    -> notaus -> /cmd_vel. control_driving waehlt je nach /control/mode PID oder Nav2.
 
-    detect_params/control_params/switch_control_params werden hier bewusst NICHT
-    deklariert -- die Defaults stehen ausschliesslich in follow_lane.launch.py.
-    Vorher standen sie doppelt und liefen auseinander: der Nav2-Zweig fuhr mit
-    einer anderen Kameradatei als der Spur-Zweig. Zum Aendern dort anfassen.
+    detect_params/control_params/switch_control_params sind nur in follow_lane.launch.py
+    deklariert, damit beide Zweige mit denselben Dateien fahren.
     """
     return LaunchDescription([
         DeclareLaunchArgument('lane_costmap_params',
@@ -35,7 +33,7 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('image_view', default_value='true'),
 
-        # Basis: ingress_node, detect_lane, control_driving, switch_control, debug_view
+        # Basis: ingress_node_nav2, detect_lane_nav2, control_driving, switch_control, debug_view
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(LAUNCH_DIR, 'follow_lane.launch.py'))),
 
@@ -58,15 +56,13 @@ def generate_launch_description():
         # Draufsicht: Karte, Bot, Pfad, Statuszeile mit Abbruchgrund (/nav2/view)
         Node(package='Follow_Lane', executable='nav2_view', name='nav2_view'),
 
-        # Local Costmap + MPPI. Fahrbefehle auf /control/cmd_vel statt /cmd_vel: wie bei
-        # control_driving sitzt dazwischen der Not-Aus (notaus.py), der nur nach Freigabe
-        # durchreicht. Beide Regler teilen sich das Topic ohne Konflikt -- control_driving
-        # sendet nur im Lane-Modus, Nav2 hat nur in Obstacle/Tunnel ein Ziel.
+        # Local Costmap + MPPI. Sendet nicht direkt an den Bot: control_driving reicht
+        # /nav2/cmd_vel nur im Obstacle- und Tunnel-Modus weiter.
         Node(
             package='nav2_controller', executable='controller_server', name='controller_server',
             output='screen',
             parameters=[LaunchConfiguration('nav2_params')],
-            remappings=[('cmd_vel', '/control/cmd_vel')],
+            remappings=[('cmd_vel', '/nav2/cmd_vel')],
         ),
         # Global Planner + Tunnelkarte, liefert nur Pfade
         Node(

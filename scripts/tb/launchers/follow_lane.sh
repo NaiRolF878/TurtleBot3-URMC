@@ -10,7 +10,7 @@
 # Laeuft schon eine Pipeline (z.B. in einem anderen Terminal)? Zwei gleichzeitig senden auf
 # dieselben Topics -- flackernde Debug-Bilder, und zwei Not-Aus-Knoten, von denen einer im STOPP
 # dauernd Null an den Bot schickt.
-PATTERN='lib/Follow_Lane/(ingress_node|detect_lane|control_driving|switch_control|debug_view|avoid_obstacle|notaus)( |$)'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus)( |$)'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Follow-Lane-Pipeline:"
     ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/Follow_Lane/##; s# --ros-args.*##'

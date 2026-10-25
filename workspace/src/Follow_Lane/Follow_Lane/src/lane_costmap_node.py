@@ -1,26 +1,44 @@
+"""Spurgedaechtnis: Spurlinien als virtuelle Waende fuer Nav2, Spurmitte als Pfad.
+
+Ein:  /detect/lane_mask (LaneMask, BEV-Pixel), /lokal/bev_view (Sichtmaske), /scan,
+      /control/mode
+Aus:  /detect/lane_obstacles (PointCloud2 aller gemerkten Linienzellen, fuer die
+      lane_layer der Costmaps und den Linienfilter von switch_control),
+      /lane/center_path (Path im odom-Frame, nur in Obstacle und TunnelEntry)
+Im Tunnel nichts: die Kamera ist dort laut Reglement verboten.
+"""
 import math
 import os
+import time
 from collections import deque
 
 import numpy as np
+import yaml
 
 import rclpy
-from rclpy.node import Node
-from rclpy.time import Time
 from ament_index_python.packages import get_package_share_directory
-from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange
-from std_msgs.msg import Header, UInt8
-from sensor_msgs.msg import PointCloud2
-from sensor_msgs_py import point_cloud2
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
 from nav2_msgs.srv import ClearEntireCostmap
+from nav_msgs.msg import Path
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.time import Time
+from sensor_msgs.msg import Image, LaserScan, PointCloud2
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header, UInt8
 from tf2_ros import Buffer, TransformListener
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from follow_lane_msg.msg import LaneMask
 from Follow_Lane.src import bev_geometry
-from Follow_Lane.src.switch_control import ControlType
+from Follow_Lane.src.common import (
+    ControlType, bev_pixels_to_ground, control_mode_from_msg, frange, inverse_transform_points,
+    irange, pose2d_from_transform, read_params, run_node, scan_points, transform_points)
+
+EXTRINSICS = os.path.join('camera_info', 'extrinsics_800x600.yaml')
+CENTER_PATH_MODES = (ControlType.Obstacle, ControlType.TunnelEntry)
+# LiDAR-Scan aelter als das (s) taugt nicht mehr fuer den Sichtschatten.
+SCAN_MAX_AGE_S = 0.5
 
 
 def _bin_medians(pts, x_min, x_max, bin_size):
@@ -125,137 +143,143 @@ def fit_center_line(xs, ys, step):
     return px, py, yaw
 
 
+
 class lane_costmap_node(Node):
-    """Spurlinien-Pixel von /detect/lane_mask als PointCloud2 fuer Nav2s
-    obstacle_layer -- virtuelle Waende in der Local Costmap, zwischen denen MPPI
-    im Obstacle-Modus ausweicht.
+    """Spurgedaechtnis: ein Raster im odom-Frame (memory_resolution), das sich die
+    Spurlinien merkt. Eine Zelle wechselt zwischen "Linie" und "frei" erst, wenn
+    line_confirm_frames bzw. free_confirm_frames Kamerabilder hintereinander das
+    Gegenteil zeigen. So bleiben Linien neben und hinter dem Bot erhalten, die die
+    Kamera nicht mehr sieht, und einzelne Fehldetektionen kommen nicht hinein.
 
-    Sendet in jedem Modus ausser Tunnel: so enthaelt der lane_layer beim
-    Umschalten auf Obstacle schon einen Korridor, statt erst dann leer
-    anzufangen. Im Tunnel ist die Kamera laut Reglement verboten -- dort sendet
-    der Node nichts und leert beim Eintritt die Local Costmap, damit auch keine
-    vorher gemerkten Spurwaende mehr darin liegen.
+    Abgestimmt wird nur, was die Kamera in diesem Bild sieht (Sichtmaske von
+    ingress_node). Zellen im Sichtschatten eines LiDAR-Hindernisses bekommen keine
+    "frei"-Stimme: dort verdeckt das Hindernis die Linie, sie ist nicht weg.
 
-    Die Korridorbreite muss nirgends eingestellt werden: MPPI prueft Kollisionen
-    mit dem echten Footprint des Burger gegen die Linienzellen (siehe
-    nav2_params.yaml, local_costmap.footprint).
+    Gesendet wird jedes Mal das ganze Gedaechtnis im Umkreis memory_radius, im
+    robot_frame zum Bildzeitpunkt. Die lane_layer raeumen per Strahl vom Bot aus
+    frei und tragen alle Punkte wieder ein; gemerkte Linien bleiben so stehen,
+    vergessene verschwinden.
 
-    Zusaetzlich die Spurmitte als nav_msgs/Path (center_path_topic), im
-    odom-Frame zum Zeitpunkt des Bildes: nav2_goal_publisher gibt sie MPPI im
-    Obstacle-Modus statt einer Geraden, damit der Bot auch in Kurven der Spur
-    folgt. Im odom-Frame bleibt der Pfad liegen, wenn der Bot beim Ausweichen
-    schraeg steht und die Linien kurz nicht sieht.
+    In jedem Modus ausser Tunnel, damit der Korridor beim Umschalten auf Obstacle
+    schon in der Karte steht. Vor der ersten /control/mode nichts, damit ein Neustart
+    im Tunnel keine Kameradaten durchlaesst. Beim Tunnel-Eintritt wird das Gedaechtnis
+    verworfen und die local_costmap geleert.
 
-    Die Linienpixel kommen aus der metrischen Vogelperspektive /lokal/bev, die
-    ingress_node aus der vermessenen Extrinsik erzeugt. Pixel -> Meter ist dort
-    linear und steht in Parameter/bev.yaml (gleiche Datei wie fuer ingress_node):
-        X = x_max - (v + 0.5) * res,   Y = y_half - (u + 0.5) * res
-    Kommt die LaneMask in einer anderen Groesse als bev.yaml beschreibt, wird
-    nichts gesendet, weil die Meter sonst falsch waeren.
+    Die Spurmitte (nur Obstacle und TunnelEntry) liegt im odom-Frame zum Bildzeitpunkt und ist
+    das Ziel, zu dem nav2_goal_publisher den Bahnplaner rechnen laesst.
 
-    Ergebnis ist X vorwaerts ab Radachse, Y nach links, in Metern am Boden. Das
-    ist genau base_footprint: in der TurtleBot3-URDF (burger) sitzen
-    wheel_left/right_joint bei x=0 relativ zu base_link, und base_link liegt
-    0.010 m ueber base_footprint; die Achse hat damit 0.010+0.023 = 0.033 m Hoehe
-    = Radradius. base_footprint liegt also am Boden direkt unter der Radachse,
-    die Punkte gehen ohne weitere Transformation in frame_id=base_footprint.
+    Pixel -> Meter ueber Parameter/bev.yaml: X vorwaerts ab Radachse, Y nach links, am
+    Boden. Das ist genau base_footprint: in der TurtleBot3-URDF (burger) sitzen die
+    Radgelenke bei x=0 relativ zu base_link, base_link liegt 0.010 m ueber
+    base_footprint, die Achse also 0.010+0.023 = 0.033 m hoch = Radradius.
     """
 
     def __init__(self):
         super().__init__('lane_costmap_node')
 
-        self.get_logger().info('Started lane_costmap_node Node.')
-
-        def frange(lo, hi):
-            return ParameterDescriptor(floating_point_range=[
-                FloatingPointRange(from_value=lo, to_value=hi, step=0.0)])
-
-        self.declare_parameter('frame_id', 'base_footprint')
-        self.declare_parameter('output_topic', '/detect/lane_obstacles')
-        self.declare_parameter('pixel_stride', 2,
-            ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=20, step=1)]))
-
-        # --- Spurmitte ---
+        # --- Parameter ---
+        self.declare_parameter('robot_frame', 'base_footprint')
         self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('output_topic', '/detect/lane_obstacles')
+        self.declare_parameter('pixel_stride', 2, irange(1, 20))
+        # Zellgroesse (m), gleich der resolution der Costmaps.
+        self.declare_parameter('memory_resolution', 0.025, frange(0.005, 0.2))
+        # Weiter entfernte Zellen werden vergessen; nicht ueber die Reichweite der
+        # lane_layer (obstacle_max_range in nav2_params.yaml) hinaus.
+        self.declare_parameter('memory_radius', 2.0, frange(0.5, 10.0))
+        self.declare_parameter('line_confirm_frames', 3, irange(1, 100))
+        # Groesser als line_confirm_frames: ein Hindernis oder der eigene Schatten kann
+        # eine Linie kurz verdecken, ohne dass die LiDAR-Schattenpruefung greift.
+        self.declare_parameter('free_confirm_frames', 10, irange(1, 500))
+        # Jeder LiDAR-Punkt verdeckt fuer die Kamera einen Keil dieser halben Breite
+        # (m); Zellen bis shadow_margin vor dem Punkt zaehlen schon zum Hindernis.
+        self.declare_parameter('shadow_radius', 0.03, frange(0.0, 0.5))
+        self.declare_parameter('shadow_margin', 0.05, frange(0.0, 0.5))
         self.declare_parameter('center_path_topic', '/lane/center_path')
-        # Tiefe eines Streifens; gleich der Zellgroesse der local_costmap, feiner
-        # kann MPPI ohnehin nicht unterscheiden.
+        # Tiefe eines Streifens (m), zugleich Abstand der Posen im Pfad.
         self.declare_parameter('center_bin_size', 0.05, frange(0.01, 0.5))
         # Mindestzahl Mittelpunkte, sonst wird kein Pfad gesendet.
-        self.declare_parameter('center_min_points', 3,
-            ParameterDescriptor(integer_range=[IntegerRange(from_value=2, to_value=50, step=1)]))
+        self.declare_parameter('center_min_points', 3, irange(2, 50))
         # Ueber so viele Bilder wird die gemessene Spurbreite (Linienmitte zu
-        # Linienmitte) gemittelt (Median). Gilt, wenn ein Bild nur eine Linie sieht.
-        # Kurz genug, dass der Wechsel von der 20-cm-Spur in den breiteren
+        # Linienmitte) gemittelt (Median); sie gilt, wenn ein Bild nur eine Linie
+        # sieht. Kurz genug, dass der Wechsel von der 20-cm-Spur in den breiteren
         # Hindernisbereich nach wenigen Bildern nachgezogen ist.
-        self.declare_parameter('center_width_history', 20,
-            ParameterDescriptor(integer_range=[IntegerRange(from_value=1, to_value=500, step=1)]))
-
+        self.declare_parameter('center_width_history', 20, irange(1, 500))
         self._param_names = [
-            'frame_id', 'pixel_stride',
-            'odom_frame', 'center_bin_size', 'center_min_points',
+            'robot_frame', 'odom_frame', 'pixel_stride', 'memory_resolution', 'memory_radius',
+            'line_confirm_frames', 'free_confirm_frames', 'shadow_radius', 'shadow_margin',
+            'center_bin_size', 'center_min_points',
         ]
+        read_params(self, self._param_names)
 
-        self.sub_lane_mask = self.create_subscription(
-            LaneMask, '/detect/lane_mask', self.cbLaneMask, 1)
+        # --- Subscriber ---
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.sub_control_mode = self.create_subscription(
-            UInt8, '/control/mode', self.cbGetControlMode, 1)
+            UInt8, '/control/mode', self.cb_control_mode, 1)
+        self.sub_lane_mask = self.create_subscription(
+            LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
+        self.sub_bev_view = self.create_subscription(
+            Image, '/lokal/bev_view', self.cb_bev_view, latched)
+        self.sub_scan = self.create_subscription(
+            LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
 
-        output_topic = self.get_parameter('output_topic').value
-        self.pub_lane_obstacles = self.create_publisher(PointCloud2, output_topic, 1)
+        # --- Publisher ---
+        self.pub_lane_obstacles = self.create_publisher(
+            PointCloud2, self.get_parameter('output_topic').value, 1)
         self.pub_center_path = self.create_publisher(
             Path, self.get_parameter('center_path_topic').value, 1)
-
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-        self._widths = deque(maxlen=self.get_parameter('center_width_history').value)
-
         self.clear_local_costmap = self.create_client(
             ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
 
-        self.current_control_mode = ControlType.Lane
-
-        self._bev = None
+        # --- Zustand ---
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.control_mode = None
+        self.memory = {}               # (ix, iy) im odom-Raster -> [ist_linie, gegenstimmen]
+        self._widths = deque(maxlen=self.get_parameter('center_width_history').value)
         self._size_error_logged = False
-        self._load_bev()
+        self._view_points = None       # sichtbare BEV-Stuetzpunkte (K, 2) in robot_frame
+        self._scan = None
+        self._scan_time = None
+        self._scanner_pose = None      # Scanner im robot_frame (x, y, yaw)
+        self._bev = self._load_bev()
+        self._camera_xy = self._load_camera_position()
 
-    def _load_bev(self):
-        param_dir = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
-        try:
-            self._bev = bev_geometry.load_bev_spec(param_dir)
-        except Exception as e:
-            self.get_logger().error(
-                f'{bev_geometry.BEV_FILE} nicht ladbar ({e}) -- es werden keine Spurwaende gesendet.')
+        self.get_logger().info('Started lane_costmap_node Node.')
+
+    # --- Callbacks ---
+
+    def cb_control_mode(self, msg):
+        new_mode = control_mode_from_msg(self, msg)
+        if new_mode is None:
             return
-        b = self._bev
-        self.get_logger().info(
-            f'BEV aus {bev_geometry.BEV_FILE}: {b["width"]}x{b["height"]} px, '
-            f'{b["res"] * 1000:.2f} mm/px, X {b["x_min"]:.2f}-{b["x_max"]:.2f} m.')
-
-    def cbGetControlMode(self, msg):
-        try:
-            new_mode = ControlType(msg.data)
-        except ValueError:
-            self.get_logger().warn(f'Unbekannter Control-Mode empfangen: {msg.data}')
-            return
-
-        entering_tunnel = (new_mode == ControlType.Tunnel
-                           and self.current_control_mode != ControlType.Tunnel)
-        self.current_control_mode = new_mode
+        entering_tunnel = new_mode == ControlType.Tunnel and self.control_mode != ControlType.Tunnel
+        self.control_mode = new_mode
         if entering_tunnel:
+            self.memory.clear()
             self._clear_local_costmap()
 
-    def _clear_local_costmap(self):
-        # Leert alle Layer; LiDAR und Eingangssperre fuellen sich im naechsten Zyklus neu.
-        if not self.clear_local_costmap.service_is_ready():
-            self.get_logger().error(
-                'local_costmap-Clear-Service nicht erreichbar -- alte Spurwaende bleiben '
-                'in der Karte. Laeuft controller_server?')
+    def cb_bev_view(self, msg):
+        if self._bev is None:
             return
-        self.clear_local_costmap.call_async(ClearEntireCostmap.Request())
+        if (msg.width, msg.height) != (self._bev['width'], self._bev['height']):
+            self.get_logger().error(
+                f'/lokal/bev_view ist {msg.width}x{msg.height}, bev.yaml beschreibt '
+                f'{self._bev["width"]}x{self._bev["height"]} -- Gedaechtnis vergisst nichts.')
+            return
+        view = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(msg.height, msg.step)
+        # Stuetzpunkte im halben Zellabstand, damit jede sichtbare Zelle getroffen wird.
+        step = max(1, int(self.memory_resolution / 2.0 / self._bev['res']))
+        vs, us = np.nonzero(view[::step, :msg.width:step] > 0)
+        self._view_points = np.column_stack(
+            bev_pixels_to_ground(self._bev, us * step, vs * step))
 
-    def cbLaneMask(self, lane_mask):
-        if self.current_control_mode == ControlType.Tunnel:
+    def cb_scan(self, scan):
+        self._scan = scan
+        self._scan_time = time.monotonic()
+
+    def cb_lane_mask(self, lane_mask):
+        if self.control_mode is None or self.control_mode == ControlType.Tunnel:
             return
         if self._bev is None:
             return
@@ -270,105 +294,199 @@ class lane_costmap_node(Node):
                 self._size_error_logged = True
             return
 
-        for name in self._param_names:
-            setattr(self, name, self.get_parameter(name).value)
-
+        read_params(self, self._param_names)
         stride = max(1, int(self.pixel_stride))
-
         yellow = self._pixels_to_ground(lane_mask.yellow_x, lane_mask.yellow_y, stride)
         white = self._pixels_to_ground(lane_mask.white_x, lane_mask.white_y, stride)
 
+        # Pose des Bots zum Bildzeitpunkt, nicht jetzt: sonst laegen Linien und Pfad
+        # um die seitdem gefahrene Strecke versetzt.
+        stamp = lane_mask.header.stamp
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.odom_frame, self.robot_frame, Time.from_msg(stamp))
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().warn(
+                f'Keine TF {self.odom_frame} <- {self.robot_frame} zum Bildzeitpunkt: {e}',
+                throttle_duration_sec=2.0)
+            return
+        robot_pose = pose2d_from_transform(tf)
+
+        line_points = np.vstack([np.column_stack(yellow), np.column_stack(white)])
+        self._update_memory(robot_pose, line_points)
+        self._publish_memory(robot_pose, stamp)
+        self._update_center_path(yellow, white, robot_pose, stamp)
+
+    # --- Hilfsmethoden ---
+
+    def _load_bev(self):
+        param_dir = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
+        try:
+            bev = bev_geometry.load_bev_spec(param_dir)
+        except Exception as e:  # noqa: BLE001 -- jeder Ladefehler heisst: keine Spurwaende
+            self.get_logger().error(
+                f'{bev_geometry.BEV_FILE} nicht ladbar ({e}) -- es werden keine Spurwaende gesendet.')
+            return None
+        self.get_logger().info(
+            f'BEV aus {bev_geometry.BEV_FILE}: {bev["width"]}x{bev["height"]} px, '
+            f'{bev["res"] * 1000:.2f} mm/px, X {bev["x_min"]:.2f}-{bev["x_max"]:.2f} m.')
+        return bev
+
+    def _load_camera_position(self):
+        """Linse in robot_frame (x, y) aus der Extrinsik; Ursprung des Sichtschattens."""
+        path = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter', EXTRINSICS)
+        try:
+            with open(path) as f:
+                ext = yaml.safe_load(f)
+            return (float(ext.get('forward_offset_m', 0.0)), float(ext.get('lateral_offset_m', 0.0)))
+        except Exception as e:  # noqa: BLE001 -- Radachse ist eine brauchbare Naeherung
+            self.get_logger().warn(f'Extrinsik nicht ladbar ({e}) -- Kamera bei x=0 angenommen.')
+            return (0.0, 0.0)
+
+    def _clear_local_costmap(self):
+        # Leert alle Layer; LiDAR und Eingangssperre fuellen sich im naechsten Zyklus neu.
+        if not self.clear_local_costmap.service_is_ready():
+            self.get_logger().error(
+                'local_costmap-Clear-Service nicht erreichbar -- alte Spurwaende bleiben '
+                'in der Karte. Laeuft controller_server?')
+            return
+        self.clear_local_costmap.call_async(ClearEntireCostmap.Request())
+
+    def _pixels_to_ground(self, xs, ys, stride):
+        """Linienpixel -> (forward, lateral) in Metern, base_footprint."""
+        empty = (np.empty(0), np.empty(0))
+        if not len(xs):
+            return empty
+        xs = np.asarray(xs)
+        ys = np.asarray(ys)
+        keep = (xs % stride == 0) & (ys % stride == 0)
+        if not keep.any():
+            return empty
+        return bev_pixels_to_ground(self._bev, xs[keep], ys[keep])
+
+    def _cells(self, points_odom):
+        if len(points_odom) == 0:
+            return set()
+        idx = np.unique(np.floor(points_odom / self.memory_resolution).astype(np.int64), axis=0)
+        return set(map(tuple, idx.tolist()))
+
+    def _update_memory(self, robot_pose, line_points):
+        """Eine Stimme pro sichtbarer Zelle: Linie, wenn ein Linienpixel darin liegt,
+        sonst frei. Der Zustand kippt nach genug Gegenstimmen in Folge."""
+        line_cells = self._cells(transform_points(robot_pose, line_points))
+        observed = set(line_cells)
+        if self._view_points is not None:
+            free_candidates = self._view_points[~self._shadowed(self._view_points)]
+            observed |= self._cells(transform_points(robot_pose, free_candidates))
+        else:
+            self.get_logger().warn(
+                'Noch keine Sichtmaske /lokal/bev_view -- Linien werden nur gemerkt, '
+                'nicht vergessen.', throttle_duration_sec=10.0)
+
+        for cell in observed:
+            seen_line = cell in line_cells
+            state = self.memory.get(cell)
+            if state is None:
+                if not seen_line:
+                    continue
+                state = self.memory[cell] = [False, 0]
+            if seen_line == state[0]:
+                state[1] = 0
+            else:
+                state[1] += 1
+                needed = self.line_confirm_frames if seen_line else self.free_confirm_frames
+                if state[1] >= needed:
+                    state[0], state[1] = seen_line, 0
+            # Freie Zellen ohne Gegenstimme muss sich niemand merken.
+            if not state[0] and state[1] == 0:
+                del self.memory[cell]
+
+        rx, ry, _ = robot_pose
+        limit = (self.memory_radius / self.memory_resolution) ** 2
+        cx, cy = rx / self.memory_resolution, ry / self.memory_resolution
+        for cell in [c for c in self.memory if (c[0] + 0.5 - cx) ** 2 + (c[1] + 0.5 - cy) ** 2 > limit]:
+            del self.memory[cell]
+
+    def _shadowed(self, points):
+        """Welche Punkte (robot_frame) verdeckt ein LiDAR-Hindernis fuer die Kamera?
+        Ohne aktuellen Scan gelten alle als verdeckt: dann wird nichts vergessen."""
+        if self._scan is None or time.monotonic() - self._scan_time > SCAN_MAX_AGE_S:
+            return np.ones(len(points), dtype=bool)
+        if self._scanner_pose is None:
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    self.robot_frame, self._scan.header.frame_id, rclpy.time.Time())
+            except (LookupException, ConnectivityException, ExtrapolationException):
+                return np.ones(len(points), dtype=bool)
+            self._scanner_pose = pose2d_from_transform(tf)
+
+        _, _, hits = scan_points(self._scan)
+        hits = transform_points(self._scanner_pose, hits) - self._camera_xy
+        hits = hits[hits[:, 0] > 0.0]
+        if hits.size == 0:
+            return np.zeros(len(points), dtype=bool)
+        rel = points - self._camera_xy
+        ang_p, dist_p = np.arctan2(rel[:, 1], rel[:, 0]), np.hypot(rel[:, 0], rel[:, 1])
+        ang_h, dist_h = np.arctan2(hits[:, 1], hits[:, 0]), np.hypot(hits[:, 0], hits[:, 1])
+        d_ang = np.abs(np.arctan2(np.sin(ang_p[:, None] - ang_h), np.cos(ang_p[:, None] - ang_h)))
+        in_wedge = d_ang <= np.arctan2(self.shadow_radius, dist_h)
+        behind = dist_p[:, None] >= dist_h - self.shadow_margin
+        return (in_wedge & behind).any(axis=1)
+
+    def _publish_memory(self, robot_pose, stamp):
+        lines = [c for c, state in self.memory.items() if state[0]]
+        if lines:
+            centers = (np.asarray(lines, dtype=np.float64) + 0.5) * self.memory_resolution
+            local = inverse_transform_points(robot_pose, centers)
+            points = [(float(x), float(y), 0.0) for x, y in local]
+        else:
+            points = []
         header = Header()
-        header.stamp = lane_mask.header.stamp
-        header.frame_id = self.frame_id
+        header.stamp = stamp
+        header.frame_id = self.robot_frame
+        self.pub_lane_obstacles.publish(point_cloud2.create_cloud_xyz32(header, points))
 
-        forward = np.concatenate([yellow[0], white[0]])
-        lateral = np.concatenate([yellow[1], white[1]])
-        points = list(zip(forward.tolist(), lateral.tolist(), [0.0] * forward.size))
-        cloud = point_cloud2.create_cloud_xyz32(header, points)
-        self.pub_lane_obstacles.publish(cloud)
-
-        self._publish_center_path(yellow, white, lane_mask.header.stamp)
-
-    def _publish_center_path(self, yellow, white, stamp):
+    def _update_center_path(self, yellow, white, robot_pose, stamp):
         half_width = float(np.median(self._widths)) / 2.0 if self._widths else None
         xs, ys, widths = lane_center_points(
             yellow, white, self._bev['x_min'], self._bev['x_max'],
             self.center_bin_size, half_width)
+        # Die Breite auch in den anderen Modi messen: beim Umschalten ist
+        # sonst noch keine bekannt, falls dann nur eine Linie zu sehen ist.
         if widths:
             self._widths.append(float(np.median(widths)))
-        if len(xs) < self.center_min_points:
+        # Nur in diesen Modi plant jemand damit; sonst keine Planungsdaten senden.
+        if self.control_mode not in CENTER_PATH_MODES or len(xs) < self.center_min_points:
             return
 
         line = fit_center_line(xs, ys, self.center_bin_size)
         if line is None:
             return
-
-        # Pose des Bots zum Bildzeitpunkt, nicht jetzt -- sonst laege der Pfad um
-        # die seitdem gefahrene Strecke versetzt. Fehlt die TF dafuer noch, faellt
-        # dieses Bild fuer den Pfad aus; die Spurwaende sind schon gesendet.
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                self.odom_frame, self.frame_id, Time.from_msg(stamp))
-        except (LookupException, ConnectivityException, ExtrapolationException) as e:
-            self.get_logger().warn(
-                f'Keine TF {self.odom_frame} <- {self.frame_id} zum Bildzeitpunkt: {e}',
-                throttle_duration_sec=2.0)
-            return
-
-        t = tf.transform.translation
-        q = tf.transform.rotation
-        robot_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-        c, s = math.cos(robot_yaw), math.sin(robot_yaw)
+        px, py, pyaw = line
+        poses_odom = transform_points(robot_pose, np.column_stack([px, py]))
+        robot_yaw = robot_pose[2]
 
         path = Path()
         path.header.stamp = stamp
         path.header.frame_id = self.odom_frame
-        for px, py, pyaw in zip(*line):
+        for (x, y), yaw in zip(poses_odom, pyaw + robot_yaw):
             pose = PoseStamped()
             pose.header = path.header
-            pose.pose.position.x = t.x + c * px - s * py
-            pose.pose.position.y = t.y + s * px + c * py
-            yaw = robot_yaw + pyaw
+            pose.pose.position.x = float(x)
+            pose.pose.position.y = float(y)
             pose.pose.orientation.z = math.sin(yaw / 2.0)
             pose.pose.orientation.w = math.cos(yaw / 2.0)
             path.poses.append(pose)
         self.pub_center_path.publish(path)
 
-    def _pixels_to_ground(self, xs, ys, stride):
-        """Linienpixel -> (forward, lateral) in Metern, base_footprint."""
-        empty = (np.empty(0), np.empty(0))
-        if not xs:
-            return empty
+    # --- Beenden ---
 
-        xs = np.asarray(xs)
-        ys = np.asarray(ys)
-
-        keep = (xs % stride == 0) & (ys % stride == 0)
-        xs = xs[keep]
-        ys = ys[keep]
-        if xs.size == 0:
-            return empty
-
-        # Linear, Pixelmitte: siehe bev.yaml
-        b = self._bev
-        forward = b['x_max'] - (ys + 0.5) * b['res']
-        lateral = b['y_half'] - (xs + 0.5) * b['res']
-        return forward, lateral
+    def shut_down(self):
+        self.get_logger().info('Shutting down lane_costmap_node Node.')
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = lane_costmap_node()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        # rclpy raeumt den Context im eigenen SIGINT-Handler ab
-        if rclpy.ok():
-            rclpy.shutdown()
+    run_node(lane_costmap_node, args)
 
 
 if __name__ == '__main__':

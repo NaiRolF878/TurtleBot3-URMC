@@ -20,13 +20,14 @@ nicht bekannt.
 
 **Wer wann was sieht:**
 
-| Modus | fährt | local_costmap enthält |
+| Modus | fährt | local_ und global_costmap enthalten |
 |---|---|---|
-| Lane | PID (`control_driving`) | LiDAR + Spurwände (Nav2 ruht) |
-| Obstacle | Nav2/MPPI | LiDAR + Spurwände |
-| Tunnel | Nav2/MPPI | LiDAR + Eingangssperre, **keine Kamera** (Reglement) |
+| Lane | PID (`control_driving`) | LiDAR + Spurgedächtnis (Nav2 ruht, plant nichts) |
+| Obstacle | Nav2: NavFn plant, MPPI fährt | LiDAR + Spurgedächtnis |
+| Tunnel | Nav2: Explorer + NavFn plant, MPPI fährt | LiDAR + Eingangssperre, **keine Kamera** (Reglement) |
 
-Beim Tunnel-Eintritt leert `lane_costmap_node` die local_costmap. Warum keiner
+Beim Tunnel-Eintritt verwirft `lane_costmap_node` das Spurgedächtnis und leert
+die local_costmap, `keepout_zone_node` leert die global_costmap. Warum keiner
 der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 
 ---
@@ -37,7 +38,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 |---|---|---|
 | `rolling_window` | `true` | `true` |
 | `width` / `height` | 4 / 4 m | 7 / 7 m |
-| `resolution` | 0.05 m | 0.05 m |
+| `resolution` | 0.025 m | 0.025 m |
 | Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.105 m |
 | `global_frame` | `odom` | `odom` |
 
@@ -62,7 +63,8 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
   1. **Die Reichweite, die der Sensor aktuell halten kann.** Der LDS-03 misst
      bis 12 m, hat aber nur 0,9° Winkelauflösung. Der Abstand zwischen zwei
      Strahlen ist `r · 0,9° · π/180 = r · 0,0157`. Ab etwa **3,2 m** ist dieser
-     Abstand größer als eine Zelle (0,05 m). Darüber wird das Freiräumen
+     Abstand größer als 5 cm (bei 2,5-cm-Zellen schon ab ~1,6 m größer als eine
+     Zelle). Darüber wird das Freiräumen
      lückenhaft, und schmale Hindernisse fallen zwischen zwei Strahlen durch.
      Eine halbe Kartenbreite weit über ~3,2 m hinaus bringt also nur unsichere
      Zellen. Global: 7 m → 3,5 m halbe Breite, passend zu `raytrace_max_range` 3.5.
@@ -78,8 +80,11 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
   local_costmap reicht der Pfad über die Karte hinaus.
 
 ### `resolution`
-- **Was er bewirkt:** Kantenlänge einer Zelle, 0,05 m.
-- **Woher:** gewählt. Die Dateien begründen den Wert nicht.
+- **Was er bewirkt:** Kantenlänge einer Zelle, 0,025 m.
+- **Woher:** gewählt: Spurlinien (~2 cm) und Hindernisränder werden feiner
+  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen. Ob
+  `controller_server` damit seine 20 Hz hält, ist am Bot noch nicht geprüft.
+  Zurück auf 0.05 heißt auch `min_frontier_cluster_cells` halbieren.
 - **Was kaputtgeht:** Andere Werte hängen an ihm: die 3,2-m-Grenze oben und
   die Quantisierung des `inflation_radius` (Abschnitt 3). Außerdem wird jede
   Linie auf ganze Zellen vergröbert. Wo nur wenige Zentimeter Luft sind, kann
@@ -103,11 +108,13 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 ### `robot_radius` (global_costmap)
 - **Was er bewirkt:** Zellen, die näher als dieser Radius an einem Hindernis
   liegen, gelten für den Mittelpunkt des Roboters als Kollision. Nur für
-  `planner_server` (NavFn) im Tunnel. NavFn plant für einen Punkt und prüft
+  `planner_server` (NavFn), im Obstacle- und im Tunnel-Modus. NavFn plant für einen Punkt und prüft
   keinen Umriss, deshalb bleibt hier der Kreis.
 - **Woher:** 1,6 cm über der halben Breite des Burger (178 mm / 2 = 0,089 m).
 - **Was kaputtgeht:** Ist der Wert zu klein, plant NavFn Wege zu dicht an den
-  Enclosure-Wänden. Jede Wandberührung kostet einen Punkt.
+  Enclosure-Wänden. Jede Wandberührung kostet einen Punkt. Ist eine Lücke für
+  den Kreis zu eng, findet NavFn keinen Weg, auch wenn der echte Umriss passen
+  würde (Status „kein Weg gefunden“).
 
 ---
 
@@ -120,7 +127,7 @@ ankommt.
 | Layer (Karte) | Quelle | Frame der Quelle | obstacle min / max | raytrace min / max | clearing |
 |---|---|---|---|---|---|
 | `obstacle_layer` (local + global) | `/scan` | LiDAR | 0.0 / 3.0 m | 0.0 / 3.5 m | `true` |
-| `lane_layer` (nur local) | `/detect/lane_obstacles` | `base_footprint` | 0.0 / 2.0 m | 0.0 / 2.0 m | `true` |
+| `lane_layer` (local + global) | `/detect/lane_obstacles` | `base_footprint` | 0.0 / 2.0 m | 0.0 / 2.0 m | `true` |
 | `entrance_layer` (local + global) | `/detect/tunnel_entrance_obstacle` | `odom` | 0.0 / 100.0 m | 0.0 / 3.0 m | `false` |
 
 ### `obstacle_layer` (LiDAR)
@@ -138,17 +145,18 @@ ankommt.
   `obstacle_max_range`, bleiben Geisterhindernisse am Rand stehen.
 
 ### `lane_layer` (Spurwände)
-- Wird in jedem Modus außer Tunnel gefüllt. Er steht in der `plugins`-Liste
-  **vor** dem `inflation_layer` (siehe Abschnitt 3).
-- **`clearing: true`:** Die Strahlen von `base_footprint` zu den aktuellen
-  Linienpunkten löschen alte Spurpunkte, die dazwischen liegen. Das wirkt nur
-  auf die Zellen des `lane_layer`. Spurpunkte außerhalb des Kamerabilds bleiben
-  erhalten. Das ist das Gedächtnis, das den Korridor neben und hinter dem Bot
-  hält.
+- Wird in jedem Modus außer Tunnel gefüllt, in beiden Costmaps gleich. Er steht
+  in der `plugins`-Liste **vor** dem `inflation_layer` (siehe Abschnitt 3).
+- **Quelle ist das Spurgedächtnis** von `lane_costmap_node` (Abschnitt 4): Die
+  Wolke enthält jedes Mal **alle** gemerkten Linienzellen im Umkreis von 2 m,
+  auch neben und hinter dem Bot, nicht nur das aktuelle Kamerabild.
+- **`clearing: true`:** Die Strahlen von `base_footprint` zu jedem Punkt der
+  Wolke räumen die Zellen dazwischen frei, danach werden alle Punkte wieder
+  eingetragen. Gemerkte Linien bleiben so stehen, vom Gedächtnis vergessene
+  verschwinden. Das wirkt nur auf die Zellen des `lane_layer`.
 - **`obstacle_max_range` / `raytrace_max_range` 2.0:** Gemessen ab
-  `base_footprint`. *Woher:* nicht dokumentiert. Faktisch **begrenzen sie
-  nichts**: `lane_costmap_node` schickt nur Punkte aus der BEV, also bis 0,60 m
-  voraus und ±0,40 m seitlich (zusammen < 0,75 m Abstand).
+  `base_footprint`. *Woher:* gewählt, = `memory_radius` des Gedächtnisses. Wer
+  einen der beiden Werte ändert, muss den anderen mitziehen.
 
 ### `entrance_layer` (Tunnel-Eingangssperre)
 - **`clearing: false`:** *Woher:* gewählt, siehe Kommentar in der Datei. Die
@@ -208,7 +216,7 @@ könnten unbemerkt über eine Linie fahren.
   Linien entlang. Ist er zu groß, werden enge Durchfahrten teuer und MPPI
   zögert. **Im Hindernisbereich und in der Enclosure testen.**
 - Nav2 rundet den Inflationsradius auf ganze Zellen auf. Werte, die kein
-  Vielfaches von `resolution` (0.05) sind, wirken wie das nächste größere
+  Vielfaches von `resolution` (0.025) sind, wirken wie das nächste größere
   Vielfache.
 
 ### Auf der normalen 20-cm-Spur
@@ -226,8 +234,30 @@ Konfiguration abgeleitet und nicht auf dem Bot beobachtet.
 | Wert | aktuell |
 |---|---|
 | `pixel_stride` | 2 |
-| `frame_id` | `base_footprint` |
+| `robot_frame` | `base_footprint` |
 | Umrechnung Pixel → Meter | aus `Parameter/bev.yaml` |
+| `memory_resolution` / `memory_radius` | 0.025 m / 2.0 m |
+| `line_confirm_frames` / `free_confirm_frames` | 3 / 10 |
+| `shadow_radius` / `shadow_margin` | 0.03 m / 0.05 m |
+
+### Spurgedächtnis
+Die Kamera sieht nur 5–60 cm voraus. Damit Nav2 auch die Linien neben und hinter
+dem Bot kennt, merkt sich `lane_costmap_node` die Linien in einem ortsfesten
+Raster im odom-Frame (`memory_resolution`, = `resolution` der Costmaps):
+- Pro Kamerabild bekommt jede **sichtbare** Zelle eine Stimme: „Linie“, wenn ein
+  Linienpixel darin liegt, sonst „frei“. Sichtbar heißt: in der Sichtmaske
+  `/lokal/bev_view` (die BEV-Ecken liegen außerhalb des Kamerabilds) und nicht
+  im Sichtschatten eines LiDAR-Hindernisses. Ein Hindernis vor der Linie
+  verdeckt sie nur; ohne diese Prüfung würde die Linie dort nach ein paar Bildern
+  gelöscht, genau neben dem Hindernis.
+- Eine Zelle wechselt erst, wenn `line_confirm_frames` (Linie) bzw.
+  `free_confirm_frames` (frei) Bilder hintereinander das Gegenteil sagen. Linien
+  erscheinen nach ~3 Bildern, verschwinden nach ~10. Einzelne Fehldetektionen
+  kommen so nicht hinein. *Woher:* gewählt, am Bot noch nicht abgestimmt.
+- Zellen außerhalb von `memory_radius` werden vergessen. Beim Tunnel-Eintritt
+  wird das ganze Gedächtnis verworfen (keine Kameradaten im Tunnel).
+- Gesendet wird jedes Mal das ganze Gedächtnis auf `/detect/lane_obstacles`;
+  `switch_control` nutzt es zusätzlich für den Linienfilter.
 
 Der Node sendet in jedem Modus außer Tunnel. Die Linienpixel stammen aus der
 metrischen Vogelperspektive `/lokal/bev`, die `ingress_node` aus dem Rohbild
@@ -275,17 +305,20 @@ das nicht nachgemessen.
   Solange beide 2 sind, dünnt `pixel_stride` nichts weiter aus. Bei 1,25 mm/px
   sind das 2,5 mm Abstand, weit unter einer Costmap-Zelle.
 
-### `frame_id`
+### `robot_frame`
 - `base_footprint` liegt in der TurtleBot3-URDF (burger) am Boden direkt unter
   der Radachse und passt damit zur Konvention der BEV (X ab Radachse). Nicht
   ändern, solange `bev.yaml` ab Radachse rechnet.
 
-### Spurmitte als Pfad für MPPI
+### Spurmitte als Richtung für das Planziel
 
-Aus denselben Linienpunkten berechnet `lane_costmap_node` die Spurmitte und
-sendet sie als `nav_msgs/Path` auf `/lane/center_path`. Im Obstacle-Modus ist
-sie das Ziel für MPPI (Abschnitt 5). So folgt der Bot auch in Kurven der Spur
-statt einer Geraden, die irgendwann in die Spurwand zeigt.
+Aus den Linienpunkten des aktuellen Bilds berechnet `lane_costmap_node` die
+Spurmitte und sendet sie **nur im Obstacle-Modus** als `nav_msgs/Path` auf
+`/lane/center_path`. `nav2_goal_publisher` setzt das Planziel `goal_distance`
+voraus auf diese Linie (über ihr Ende hinaus verlängert, Abschnitt 5). So folgt
+der Bot auch in Kurven der Spur statt einer Geraden, die irgendwann in die
+Spurwand zeigt. Die Spurbreite wird auch im Lane-Modus gemessen, damit sie beim
+Umschalten schon bekannt ist.
 
 **Verfahren** (Funktionen `lane_center_points`, `fit_center_line`):
 1. Pro Linie und pro 5-cm-Streifen in Fahrtrichtung den Median-Punkt der
@@ -314,7 +347,7 @@ funktioniert.
 |---|---|---|
 | `center_path_topic` | `/lane/center_path` | gewählt |
 | `odom_frame` | `odom` | = `global_frame` der Costmaps |
-| `center_bin_size` | 0.05 m | = `resolution`, feiner kann MPPI nicht unterscheiden |
+| `center_bin_size` | 0.05 m | gewählt; Streifentiefe und Abstand der Posen im Pfad |
 | `center_min_points` | 3 | gewählt; darunter kein Pfad |
 | `center_width_history` | 20 Bilder | gewählt; Median der gemessenen Breite |
 
@@ -339,7 +372,7 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
   Breite. Ist sie noch unbekannt, gibt es in diesem Bild keinen Pfad.
 - Gelbe oder weiße Linien, die quer durch den Hindernisbereich laufen, würden
   die Anpassung verfälschen. Das muss man vor Ort in RViz prüfen (Anzeige
-  „Spurmitte“).
+  „Aktiver Pfad (Nav2)“ im Obstacle-Modus).
 
 ---
 
@@ -352,8 +385,9 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
 | `time_steps` | nav2_params | 90 |
 | `vx_max` | nav2_params | 0.22 m/s |
 | `prune_distance` | nav2_params | 1.7 m |
-| `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m (nur Ersatz-Gerade) |
+| `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m (Abstand des Planziels) |
 | `center_path_max_age` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 s |
+| `replan_period` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 s |
 
 ### Die Zusammenhänge
 
@@ -373,8 +407,9 @@ Bedingungen:
 
 ### Einzelwerte
 - **`time_steps`:** Anzahl der Schritte, die MPPI vorausrechnet. *Woher:*
-  abgeleitet aus der Formel oben. *Was kaputtging:* Bei 56 Schritten war die
-  Vorausschau 2,8 s · 0,22 = 0,62 m. Das 1-m-Ziel war nie im Blick.
+  abgeleitet aus der Formel oben. *Was kaputtgeht:* Weniger Schritte verkürzen
+  die Vorausschau; bei 56 wären es 2,8 s · 0,22 = 0,62 m, das 1-m-Ziel läge
+  außer Sicht.
 - **`model_dt`:** Zeitschritt der Simulation. *Woher:* gewählt, gekoppelt an
   `controller_frequency`.
 - **`controller_frequency`:** *Woher:* abgeleitet, = 1 / `model_dt`.
@@ -383,13 +418,14 @@ Bedingungen:
   `time_steps` nachziehen.
 - **`prune_distance`:** Wie weit voraus MPPI den Pfad berücksichtigt. *Woher:*
   gewählt, durch die Kartengröße begrenzt.
-- **Ziel im Obstacle-Modus:** die Spurmitte (Abschnitt 4), solange sie jünger
-  ist als `center_path_max_age` (Empfangszeit, damit die Uhren von Bot und
-  Rechner nicht synchron sein müssen). Sie reicht bis ~0,8 m voraus. Ist sie
-  älter, weil die Linien eine Weile nicht zu sehen waren, gilt die Gerade
-  `goal_distance` (1,0 m) geradeaus. Ein neues Ziel kommt erst, wenn das alte
-  erreicht (`xy_goal_tolerance`) oder abgebrochen ist; dann wird die jeweils
-  neueste Spurmitte genommen. *Woher:* gewählt.
+- **Ziel im Obstacle-Modus:** ein Punkt `goal_distance` (1,0 m) voraus auf der
+  Spurmitte (Abschnitt 4), über ihr Ende (~0,6 m) hinaus in ihrer Richtung
+  verlängert, solange sie jünger ist als `center_path_max_age` (Empfangszeit,
+  damit die Uhren von Bot und Rechner nicht synchron sein müssen). Sonst liegt
+  das Ziel geradeaus. `planner_server` (NavFn) rechnet auf der global_costmap
+  einen Weg dorthin, MPPI fährt ihn ab. Neu geplant wird alle `replan_period`
+  und sobald ein Weg erreicht oder abgebrochen ist. Nach dem Umschalten wartet
+  die erste Planung bis zu 0,5 s auf die erste Spurmitte. *Woher:* gewählt.
 
 ---
 
@@ -421,21 +457,21 @@ ergibt das:
   Ausweichen soll dominieren. `critical_cost` 600, `collision_cost` 1e6.
   `consider_footprint: true`: Kollision prüft er mit dem Umriss des Burger
   (Abschnitt 3).
-- **`PathFollowCritic` Schwelle 0.5:** Vorher stand 1.4 m. Bei 1,0 m Pfadlänge
-  griff die Kritik damit nie, ausgerechnet die, die den Vorwärtsdrang halten
-  soll.
-- **`GoalAngleCritic` abgeschaltet:** Die Ersatz-Gerade endet mit
-  `orientation.w = 1.0`, also „geradeaus, gemessen im Moment der
-  Pfaderzeugung“. Ab 0,5 m vor dem Ziel zog die Kritik den Bot in genau diese
-  Ausgangsrichtung zurück, während er am Hindernis vorbei sollte. Der
-  `goal_checker` lässt das Ziel mit `yaw_goal_tolerance` 3.15 ohnehin
-  durchgehen, die Endausrichtung spielt keine Rolle.
-- **`PathAlignCritic` niedrig gewichtet (2.0):** Unser Pfad (Spurmitte oder
-  Gerade) führt *durch* das Hindernis, kein geplanter Pfad darum herum. Mit 14.0 (Nav2-Beispiel)
-  hat MPPI das Hindernis vor sich hergeschoben statt auszuweichen (Test 02.09.).
-  „Auf der Linie bleiben“ ist deshalb nur ein Hinweis. Zusätzlich schaltet
-  `max_path_occupancy_ratio` 0.05 die Kritik ab, sobald mehr als 5 % der
-  Pfadpunkte in belegten Zellen liegen.
+- **`PathFollowCritic` Schwelle 0.5:** muss deutlich unter der Pfadlänge (~1 m)
+  liegen. Bei 1.4 m würde die Kritik nie greifen, ausgerechnet die, die den
+  Vorwärtsdrang halten soll.
+- **`GoalAngleCritic` abgeschaltet:** Das Planziel wird jede Sekunde neu
+  gesetzt, seine Endausrichtung spielt keine Rolle. Eingeschaltet würde die
+  Kritik den Bot ab 0,5 m vor dem Ziel auf dessen Ausrichtung drehen, auch
+  wenn er gerade an einem Hindernis vorbei muss. Der `goal_checker` lässt das
+  Ziel mit `yaw_goal_tolerance` 3.15 ohnehin durchgehen.
+- **`PathAlignCritic` niedrig gewichtet (2.0):** Der Pfad kommt von NavFn, das
+  für einen Kreis plant und den echten Umriss nicht kennt. Wo er zu eng ist
+  oder ein Hindernis seit der letzten Planung dazukam, soll MPPI abweichen
+  dürfen. Mit 14.0 (Nav2-Beispiel) schob MPPI ein Hindernis vor sich her, das
+  auf dem Pfad lag. „Auf dem Pfad bleiben“ ist deshalb nur ein Hinweis.
+  Zusätzlich schaltet `max_path_occupancy_ratio` 0.05 die Kritik ab, sobald
+  mehr als 5 % der Pfadpunkte in belegten Zellen liegen.
 
 Im Tunnel-Modus kommt der Pfad von `planner_server` zu einem Frontier-Ziel.
 Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
@@ -478,11 +514,12 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
 | Display | zeigt |
 |---|---|
 | `/local_costmap/costmap` | alle Layer der local_costmap zusammen, dazu die Inflation. Außerhalb des Tunnels auch die Spurwände. |
-| `/global_costmap/costmap` | die Tunnelkarte (LiDAR + Eingangssperre, keine Spur), 7×7 m um den Bot |
+| `/global_costmap/costmap` | Karte des Bahnplaners, 7×7 m um den Bot: außerhalb des Tunnels LiDAR + Spurgedächtnis, im Tunnel LiDAR + Eingangssperre |
 | `/scan` | LiDAR-Rohdaten, unabhängig von Nav2 |
-| `/detect/lane_obstacles` (PointCloud2) | die Spurpunkte in Metern, außerhalb des Tunnels. Hier prüft man, ob BEV und Extrinsik stimmen. |
-| `/lane/center_path` (Anzeige „Spurmitte“) | die berechnete Spurmitte, das Ziel für MPPI im Obstacle-Modus |
-| `/nav2/view` (in `rqt_image_view`) | Draufsicht von `nav2_view`: Costmap, Bot, Pfad, Eingangssperre, LiDAR und Statuszeile mit dem letzten Abbruchgrund. Ohne RViz. Unkomprimiert, weil nav2_view und rqt beide auf dem Laptop laufen (mit `/compressed` stürzte rqt_image_view ab) |
+| `/detect/lane_obstacles` (Anzeige „Spurgedächtnis“) | alle gemerkten Linienzellen in Metern, außerhalb des Tunnels. Hier prüft man, ob BEV und Extrinsik stimmen und ob die Linien beim Ausweichen stehen bleiben. |
+| `/nav2/active_path` (Anzeige „Aktiver Pfad (Nav2)“) | der Weg, dem Nav2 gerade folgt; nur im Obstacle- und Tunnel-Modus während einer Fahrt |
+| `/plan` | was `planner_server` zuletzt gerechnet hat |
+| `/nav2/view` (in `rqt_image_view`) | Draufsicht von `nav2_view`: Costmap, Bot, aktiver Pfad, Eingangssperre, LiDAR und Statuszeile mit dem letzten Abbruchgrund. Ohne RViz. Unkomprimiert, weil rqt_image_view das Topic teils als Image, teils als CompressedImage abonniert und mit `/compressed` abbricht |
 
 **Der Test, mit dem wir den Fehler gefunden haben:** Eine Wand vor den LiDAR
 halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.

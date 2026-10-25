@@ -1,47 +1,34 @@
-"""Draufsicht fuer den Nav2-Zweig als Bild auf /nav2/view (sensor_msgs/Image).
+"""Draufsicht fuer den Nav2-Zweig: was Nav2 sieht und plant, als Bild.
 
-Zeigt auf einen Blick, was Nav2 sieht und plant -- im Tunnel die global_costmap
-(Tunnelkarte), sonst die local_costmap mit den Spurwaenden:
-
-    gruen  befahrbar (frei; dunkler = naeher am Hindernis, Nav2 meidet es, darf aber)
-    rot    nicht befahrbar (Hindernis, Spurwand, Sicherheitsabstand fuer den Bot-Umriss)
-    grau   noch nicht gescannt / unbekannt
-    gelb / weiss  erkannte gelbe bzw. weisse Spurlinie (/detect/lane_mask)
-    blau   Umriss des Bots (published_footprint der local_costmap), magenta Fahrtrichtung
-    cyan   Pfad, dem Nav2 folgt, mit Ziel (X): Explorer-Pfad bzw. Spurmitte
-    orange Eingangssperre     hellblau LiDAR-Punkte
-
-Oben eine Statuszeile: Modus, was nav2_goal_publisher gerade tut (/nav2/status)
-und die letzte Warnung bzw. der letzte Fehler der Nav2-Knoten aus /rosout. Das
-ist der Abbruchgrund -- das FollowPath-Ergebnis meldet in Humble nur
-"abgebrochen", den Grund schreibt controller_server nur ins Log.
-
-Feste Ausrichtung: odom-X nach rechts, odom-Y nach oben. Die Karte liegt
-ohnehin in odom; so stehen Waende still und nur der Bot bewegt sich.
-Anzeigen z.B. in rqt_image_view.
+Ein:  /local_costmap/costmap bzw. im Tunnel /global_costmap/costmap, Footprint, Pfade,
+      Eingangssperre, /scan, /detect/lane_mask, /control/mode, /nav2/status, /rosout
+Aus:  /nav2/view (sensor_msgs/Image, z.B. in rqt_image_view)
 """
 import math
+import os
 
 import cv2
 import numpy as np
 
 import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, qos_profile_sensor_data
-from rcl_interfaces.msg import Log, ParameterDescriptor, FloatingPointRange, IntegerRange
-from std_msgs.msg import String, UInt8
-from nav_msgs.msg import OccupancyGrid, Path
-from geometry_msgs.msg import PolygonStamped
-from sensor_msgs.msg import Image, LaserScan, PointCloud2
-from cv_bridge import CvBridge
-from sensor_msgs_py import point_cloud2
 from ament_index_python.packages import get_package_share_directory
-from follow_lane_msg.msg import LaneMask
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PolygonStamped
+from nav_msgs.msg import OccupancyGrid, Path
+from rcl_interfaces.msg import Log
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import Image, LaserScan, PointCloud2
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import String, UInt8
 from tf2_ros import Buffer, TransformListener
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
-from Follow_Lane.src.switch_control import ControlType
+from follow_lane_msg.msg import LaneMask
 from Follow_Lane.src import bev_geometry
+from Follow_Lane.src.common import (
+    ControlType, bev_pixels_to_ground, control_mode_from_msg, frange, irange, run_node,
+    yaw_from_quaternion)
 
 # Farben (BGR): befahrbar gruen, nicht befahrbar rot, unbekannt grau.
 UNKNOWN = (128, 128, 128)
@@ -83,43 +70,51 @@ def cost_lut():
     return lut
 
 
-def yaw_of(q):
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-
-
 class nav2_view(Node):
+    """Im Tunnel die global_costmap (Tunnelkarte), sonst die local_costmap mit den
+    Spurwaenden:
+
+        gruen  befahrbar (frei; dunkler = naeher am Hindernis, Nav2 meidet es, darf aber)
+        rot    nicht befahrbar (Hindernis, Spurwand, Sicherheitsabstand fuer den Bot-Umriss)
+        grau   noch nicht gescannt / unbekannt
+        gelb / weiss  erkannte Spurlinien (/detect/lane_mask), nicht im Tunnel
+        blau   Umriss des Bots (published_footprint der local_costmap), magenta Fahrtrichtung
+        cyan   Pfad, dem Nav2 gerade folgt, mit Ziel (X); nur waehrend einer Fahrt
+        orange Eingangssperre     hellblau LiDAR-Punkte
+
+    Oben eine Statuszeile: Modus, was nav2_goal_publisher gerade tut, und die letzte
+    Warnung der Nav2-Knoten aus /rosout. Das ist der Abbruchgrund: das
+    FollowPath-Ergebnis meldet in Humble nur "abgebrochen", den Grund schreibt
+    controller_server nur ins Log.
+
+    Feste Ausrichtung: odom-X nach rechts, odom-Y nach oben. Die Karte liegt ohnehin
+    in odom; so stehen Waende still und nur der Bot bewegt sich.
+    """
+
     def __init__(self):
         super().__init__('nav2_view')
 
-        self.get_logger().info('Started nav2_view Node.')
-
-        self.declare_parameter('view_rate', 5.0,
-            ParameterDescriptor(floating_point_range=[
-                FloatingPointRange(from_value=0.5, to_value=30.0, step=0.0)]))
+        # --- Parameter ---
+        self.declare_parameter('view_rate', 5.0, frange(0.5, 30.0))
         # Groesse der laengeren Kartenkante im Bild (px).
-        self.declare_parameter('canvas_size', 600,
-            ParameterDescriptor(integer_range=[IntegerRange(from_value=200, to_value=2000, step=1)]))
+        self.declare_parameter('canvas_size', 600, irange(200, 2000))
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('robot_frame', 'base_footprint')
-        # Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot. 2.4 m = 1.2 m je
-        # Richtung -- deckt den Obstacle-Ausloeser (1.0 m voraus) und die
-        # MPPI-Vorausschau (~1 m) mit Rand. Zentriert statt in Fahrtrichtung
-        # verschoben, sonst springt das Bild bei jedem Lenkausschlag mit.
-        self.declare_parameter('local_view_size_m', 2.4,
-            ParameterDescriptor(floating_point_range=[
-                FloatingPointRange(from_value=0.5, to_value=20.0, step=0.0)]))
+        # Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot, 1.2 m je Richtung.
+        # Deckt die MPPI-Vorausschau (~1 m) mit Rand. Zentriert, nicht in
+        # Fahrtrichtung verschoben, sonst springt das Bild bei jedem Lenkausschlag.
+        self.declare_parameter('local_view_size_m', 2.4, frange(0.5, 20.0))
         # Im Tunnel: nur die schon gesehene Flaeche plus dieser Rand, damit das Bild
         # anfangs gross ist und mit der Karte herauszoomt.
-        self.declare_parameter('tunnel_view_margin_m', 0.3,
-            ParameterDescriptor(floating_point_range=[
-                FloatingPointRange(from_value=0.0, to_value=5.0, step=0.0)]))
+        self.declare_parameter('tunnel_view_margin_m', 0.3, frange(0.0, 5.0))
         # Nur Warnungen dieser Knoten zaehlen als Abbruchgrund. nav2_goal_publisher
-        # fehlt bewusst: sein "Rolling-Goal beendet" wuerde den eigentlichen Grund
-        # von controller_server ueberschreiben; was er tut, kommt ueber /nav2/status.
+        # fehlt: sein "Rolling-Goal beendet" wuerde den eigentlichen Grund von
+        # controller_server ueberschreiben; was er tut, kommt ueber /nav2/status.
         self.declare_parameter('reason_nodes', [
             'controller_server', 'planner_server', 'local_costmap', 'global_costmap',
             'tunnel_explorer_node', 'lane_costmap_node', 'keepout_zone_node'])
 
+        # --- Subscriber ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
         self._grids = {}
@@ -128,71 +123,70 @@ class nav2_view(Node):
                                      lambda msg, n=name: self._grids.__setitem__(n, msg), latched)
         self.create_subscription(PolygonStamped, '/local_costmap/published_footprint',
                                  self.cb_footprint, 1)
-        self.create_subscription(Path, '/tunnel/explore_path', self.cb_explore_path, 1)
-        self.create_subscription(Path, '/lane/center_path', self.cb_center_path, 1)
+        self.create_subscription(Path, '/nav2/active_path', self.cb_active_path,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(PointCloud2, '/detect/tunnel_entrance_obstacle',
                                  self.cb_entrance, 1)
         self.create_subscription(LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
-        self.create_subscription(UInt8, '/control/mode', self.cb_mode, 1)
+        self.create_subscription(UInt8, '/control/mode', self.cb_control_mode, 1)
         self.create_subscription(String, '/control/tunnel_source', self.cb_tunnel_source, 1)
         self.create_subscription(String, '/nav2/status', self.cb_nav2_status, 1)
         self.create_subscription(Log, '/rosout', self.cb_rosout, 50)
         self.create_subscription(LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
 
-        # Unkomprimiertes Image statt CompressedImage auf .../compressed: rqt_image_view stuerzte
-        # damit ab ("create_subscription ... incompatible type CompressedImage", exit -6), weil es
-        # das Topic teils als Image, teils als CompressedImage abonniert. nav2_view und rqt laufen
-        # beide auf dem Laptop, das Bild geht nicht uebers Netz -- komprimieren bringt nichts.
+        # --- Publisher ---
+        # Image, nicht CompressedImage auf .../compressed: rqt_image_view abonniert das
+        # Topic teils als Image, teils als CompressedImage und bricht dann mit
+        # "incompatible type" ab. nav2_view und rqt laufen beide auf dem Laptop, das
+        # Bild geht nicht uebers Netz.
         self.pub_view = self.create_publisher(Image, '/nav2/view', 1)
-        self.bridge = CvBridge()
 
+        # --- Timer ---
+        self.timer = self.create_timer(1.0 / self.get_parameter('view_rate').value, self.cb_timer)
+
+        # --- Zustand ---
+        self.bridge = CvBridge()
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-
         self._lut = cost_lut()
         self.footprint = None
-        self.explore_path = None
-        self.center_path = None
+        self.active_path = None
         self.entrance = None
         self.scan = None
-        self.mode = None
+        self.control_mode = None
         self.tunnel_source = ''
         self.nav2_status = ''
         self.reason = None          # (Zeit, Knoten, Text)
         self.lane = None            # (Empfangszeit, gelb (N,2), weiss (N,2)) in base_footprint [m]
         try:
             self._bev = bev_geometry.load_bev_spec(
-                get_package_share_directory('Follow_Lane') + '/Parameter')
-        except Exception as e:  # noqa: BLE001
+                os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
+        except Exception as e:  # noqa: BLE001 -- ohne bev.yaml nur keine Spurlinien
             self._bev = None
             self.get_logger().warn(f'bev.yaml nicht ladbar ({e}) -- keine Spurlinien in der Ansicht.')
 
-        self.create_timer(1.0 / self.get_parameter('view_rate').value, self.cb_timer)
+        self.get_logger().info('Started nav2_view Node.')
 
-    # --- Eingaenge ---
+    # --- Callbacks ---
 
     def cb_lane_mask(self, msg):
-        """BEV-Pixel der Spurlinien -> Meter im Bot-System (base_footprint, Radachse)."""
+        # Im Tunnel keine Kameradaten, auch nicht zur Anzeige (Reglement).
+        if self.control_mode == ControlType.Tunnel:
+            return
         b = self._bev
         if b is None or (msg.image_width, msg.image_height) != (b['width'], b['height']):
             return
 
         def to_m(us, vs):
-            u = np.asarray(us, np.float64)[::3]
-            v = np.asarray(vs, np.float64)[::3]
-            return np.column_stack([b['x_max'] - (v + 0.5) * b['res'],
-                                    b['y_half'] - (u + 0.5) * b['res']])
+            return np.column_stack(bev_pixels_to_ground(b, us[::3], vs[::3]))
         self.lane = (self.get_clock().now(), to_m(msg.yellow_x, msg.yellow_y),
                      to_m(msg.white_x, msg.white_y))
 
     def cb_footprint(self, msg):
         self.footprint = msg
 
-    def cb_explore_path(self, msg):
-        self.explore_path = msg
-
-    def cb_center_path(self, msg):
-        self.center_path = msg
+    def cb_active_path(self, msg):
+        self.active_path = msg
 
     def cb_entrance(self, cloud):
         pts = [(p[0], p[1]) for p in point_cloud2.read_points(
@@ -202,11 +196,10 @@ class nav2_view(Node):
     def cb_scan(self, msg):
         self.scan = msg
 
-    def cb_mode(self, msg):
-        try:
-            self.mode = ControlType(msg.data)
-        except ValueError:
-            self.mode = None
+    def cb_control_mode(self, msg):
+        self.control_mode = control_mode_from_msg(self, msg)
+        if self.control_mode == ControlType.Tunnel:
+            self.lane = None
 
     def cb_tunnel_source(self, msg):
         self.tunnel_source = msg.data
@@ -225,13 +218,11 @@ class nav2_view(Node):
         if node in self.get_parameter('reason_nodes').value:
             self.reason = (self.get_clock().now(), node, log.msg)
 
-    # --- Zeichnen ---
-
     def cb_timer(self):
         if self.pub_view.get_subscription_count() == 0:
             return
 
-        in_tunnel = self.mode == ControlType.Tunnel
+        in_tunnel = self.control_mode == ControlType.Tunnel
         grid_name = 'global_costmap' if in_tunnel else 'local_costmap'
         grid = self._grids.get(grid_name)
 
@@ -272,11 +263,13 @@ class nav2_view(Node):
         self.draw_lane(body, px)
         self.draw_scan(body, px)
         self.draw_entrance(body, px)
-        path = self.explore_path if in_tunnel else self.center_path
-        self.draw_path(body, px, path)
+        # Lane-Modus: nav2_goal_publisher hat den Pfad beim Verlassen geleert.
+        self.draw_path(body, px, self.active_path)
         self.draw_robot(body, px)
 
         self.publish(self.compose(body, grid_name, (res, scale)))
+
+    # --- Hilfsmethoden ---
 
     def view_window(self, cells, info, in_tunnel):
         """Zeilen/Spalten (r0, r1, c0, c1) des gezeigten Ausschnitts der Karte."""
@@ -312,7 +305,7 @@ class nav2_view(Node):
         except (LookupException, ConnectivityException, ExtrapolationException):
             return None
         t = tf.transform.translation
-        return t.x, t.y, yaw_of(tf.transform.rotation)
+        return t.x, t.y, yaw_from_quaternion(tf.transform.rotation)
 
     def draw_scan(self, body, px):
         if self.scan is None:
@@ -331,7 +324,7 @@ class nav2_view(Node):
 
     def draw_lane(self, body, px):
         """Erkannte Spurlinien in ihrer Farbe ueber die Karte legen."""
-        if self.lane is None:
+        if self.lane is None or self.control_mode == ControlType.Tunnel:
             return
         stamp, yellow, white = self.lane
         if (self.get_clock().now() - stamp).nanoseconds / 1e9 > LANE_FRESH_S:
@@ -349,7 +342,7 @@ class nav2_view(Node):
                     cv2.circle(body, (u, v), 2, col, -1)
 
     def draw_entrance(self, body, px):
-        if self.mode != ControlType.Tunnel or not self.entrance:
+        if self.control_mode != ControlType.Tunnel or not self.entrance:
             return
         frame, pts = self.entrance
         if len(pts) < 2 or frame != self.get_parameter('odom_frame').value:
@@ -388,9 +381,9 @@ class nav2_view(Node):
         w = body.shape[1]
         header = np.full((HEADER_H, w, 3), (40, 40, 40), np.uint8)
 
-        mode = self.mode.name if self.mode is not None else 'kein Mode'
-        if self.mode == ControlType.Tunnel and self.tunnel_source:
-            mode += ' (von Hand)' if self.tunnel_source == 'Hand' else ' (Schild)'
+        mode = self.control_mode.name if self.control_mode is not None else 'kein Mode'
+        if self.control_mode in (ControlType.TunnelEntry, ControlType.Tunnel) and self.tunnel_source:
+            mode += f' ({self.tunnel_source})'
         line1 = f'{mode} | Nav2: {self.nav2_status or "-"}'
         cv2.putText(header, self.fit(line1, w), (8, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
@@ -441,18 +434,14 @@ class nav2_view(Node):
         msg.header.frame_id = self.get_parameter('odom_frame').value
         self.pub_view.publish(msg)
 
+    # --- Beenden ---
+
+    def shut_down(self):
+        self.get_logger().info('Shutting down nav2_view Node.')
+
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = nav2_view()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    run_node(nav2_view, args)
 
 
 if __name__ == '__main__':

@@ -4,9 +4,9 @@
 # auf die er angewiesen ist -- im Hintergrund und den NOT-AUS (notaus) im Vordergrund
 # dieses Terminals. Nur Spurverfolgung ohne Nav2: follow_lane.sh
 #
-# Die Zweige schliessen sich ueber /control/mode gegenseitig aus: control_driving
-# faehrt bei ControlType.Lane, der Nav2-Zweig bei Obstacle bzw. Tunnel. Beide senden
-# auf /control/cmd_vel; erst der Not-Aus reicht an /cmd_vel durch.
+# Fahrbefehle erzeugt nur control_driving: je nach /control/mode den PID (Lane) oder
+# die Befehle von Nav2 (/nav2/cmd_vel, Obstacle/Tunnel), sonst Null. Er sendet auf
+# /control/cmd_vel; erst der Not-Aus reicht an /cmd_vel durch.
 #
 # Der Bot faehrt NICHT von selbst: erst LEERTASTE in diesem Terminal gibt die Fahrt frei,
 # nochmal Leertaste = STOPP. q oder Strg+C beendet den Not-Aus (sendet Stopp) und danach
@@ -14,7 +14,7 @@
 
 # Laeuft schon eine Pipeline? Zwei gleichzeitig senden auf dieselben Topics, und ein
 # zweiter Not-Aus im STOPP schickt dauernd Null an den Bot.
-PATTERN='lib/Follow_Lane/(ingress_node|detect_lane|control_driving|switch_control|debug_view|avoid_obstacle|notaus|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Pipeline:"
     ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/[^/]*/##; s# --ros-args.*##'

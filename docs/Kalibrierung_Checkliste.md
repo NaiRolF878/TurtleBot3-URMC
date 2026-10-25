@@ -8,9 +8,6 @@ Reihenfolge einhalten: Jeder Schritt baut darauf auf, dass der vorherige stimmt.
 Ist die Kamera falsch vermessen, ist jede Meterangabe danach falsch. Und solange
 der PID die Spur nicht hält, lässt sich Nav2 nicht sinnvoll testen.
 
-Ersetzt die Checkliste vom 10.09. Deren Schritte zu ROI-Ecken, `x_near`/`x_far`
-und einer zur Spurbreite passenden Inflation gibt es nicht mehr.
-
 ---
 
 ## Phase 0 — Bauen und Voraussetzungen
@@ -80,12 +77,15 @@ Kameramontage (12,3 cm Höhe). Nav2 benutzt sie nicht mehr.
 
 - [ ] `nav2_obstacle.sh` starten, noch **nicht** freigeben (keine Leertaste).
 - [ ] Ein Klebeband quer in gemessenem Abstand vor den Bot legen, z. B. 40 cm
-      vor der Radachse. In RViz das Display `Spurwaende (nicht im Tunnel)`
-      bzw. die Draufsicht `/nav2/view/compressed` ansehen: Das Band muss dort
+      vor der Radachse. In RViz das Display `Spurgedaechtnis (nicht im Tunnel)`
+      bzw. die Draufsicht `/nav2/view` ansehen: Das Band muss dort
       erscheinen, wo es real liegt. Die Draufsicht hat einen 0,5-m-Maßstab
       unten rechts.
-- [ ] Bot auf die Spur stellen: Beide Linien müssen als schwarze Zellreihen
-      erscheinen, die Anzeige `Spurmitte` mittig dazwischen.
+- [ ] Bot auf die Spur stellen: Beide Linien müssen nach ~3 Bildern als
+      blockierte Zellreihen (in `/nav2/view` rot) erscheinen.
+- [ ] Bot von Hand ein Stück vorschieben: Die Linien neben und hinter ihm
+      müssen stehen bleiben (Spurgedächtnis), obwohl die Kamera sie nicht mehr
+      sieht.
 - [ ] Weicht etwas ab: zurück zu Phase 1. Nicht an Nav2 drehen.
 
 ---
@@ -94,15 +94,20 @@ Kameramontage (12,3 cm Höhe). Nav2 benutzt sie nicht mehr.
 
 Werte in `Switch_Control.yaml`. `obstacle_check_angle_deg` (20°) ist der
 **Halbwinkel**, der Kegel ist 40° breit. Ausgelöst wird bei
-`obstacle_trigger_distance` (1,0 m).
+`obstacle_trigger_distance` (0,20 m), aber nur, wenn keine Spurlinie zwischen
+Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher als
+`obstacle_clear_distance` (0,20 m) im 270°-Bereich liegt.
 
 - [ ] **Fehlauslösung:** eine Runde **ohne** Hindernis. Im Debugbild muss
       durchgehend `Lane` stehen. Springt es auf `Obstacle`, sieht der LiDAR
       die Streckenbegrenzung. Dann Winkel oder Distanz verkleinern.
+- [ ] **Hindernis hinter der Linie:** Bot neben dem Hindernisbereich
+      vorbeifahren lassen (Rückweg). Es muss `Lane` bleiben.
 - [ ] **Auslösung:** Hindernis aufstellen. Der Wechsel auf `Obstacle` muss
-      früh genug kommen.
-- [ ] Hinweis: Die BEV reicht nur bis 0,60 m. Beim Umschalten bei 1,0 m
-      fehlen zwischen 0,6 und 1,0 m noch Spurwände, bis der Bot näher kommt.
+      früh genug kommen. Beim Wechsel hält der Bot sofort an, bis Nav2 den
+      ersten Befehl schickt.
+- [ ] Hinweis: Die BEV reicht nur bis 0,60 m. Weiter vorn kennt das
+      Spurgedächtnis nur, was die Kamera auf dem Weg dorthin gesehen hat.
 
 ---
 
@@ -110,14 +115,19 @@ Werte in `Switch_Control.yaml`. `obstacle_check_angle_deg` (20°) ist der
 
 - [ ] Freigabe mit **Leertaste**, Stopp mit Leertaste.
 - [ ] Draufsicht im Blick behalten. Die Statuszeile zeigt, was Nav2 tut
-      (z. B. „faehrt: Spurmitte“), und den letzten Abbruchgrund von
-      `controller_server`. Rot heißt jünger als 10 s.
+      (z. B. „faehrt: Bahnplaner (Spurmitte)“ oder „kein Weg gefunden“), und
+      den letzten Abbruchgrund von `controller_server`. Rot heißt jünger als
+      10 s. Der cyan Pfad muss um das Hindernis herum zwischen den Linien
+      liegen; im Lane-Modus ist kein Pfad zu sehen.
 - [ ] Im Debugbild muss `Spur -> Costmap` eine Punktzahl in Grün zeigen. Steht
       dort `still`, kommt nichts an. Dann die Ursache suchen und nicht an MPPI
       drehen.
 - [ ] Weicht er falsch oder gar nicht aus, in dieser Reihenfolge prüfen:
-      1. Liegen die Spurwände auf den echten Linien? (Phase 3)
-      2. Gibt es eine grüne Spurmitte? Ohne sie fährt Nav2 die Ersatz-Gerade.
+      1. Liegen die Spurwände auf den echten Linien und bleiben sie beim
+         Ausweichen stehen? (Phase 3)
+      2. Steht in der Statuszeile „Bahnplaner (Spurmitte)“? Bei „geradeaus“
+         fehlt die Spurmitte, bei „kein Weg gefunden“ sperren Linien oder
+         Hindernisse den Korridor für NavFn (Kreis mit 0,105 m Radius).
       3. Meldet die Statuszeile, dass die Regelschleife zu langsam ist?
          Die Prüfung mit dem echten Umriss (`consider_footprint`) kostet
          Rechenzeit.
@@ -129,8 +139,12 @@ Werte in `Switch_Control.yaml`. `obstacle_check_angle_deg` (20°) ist der
 
 - [ ] In `rqt_image_view` (Debugbild) einmal **„Publish click location“**
       anhaken.
-- [ ] Bot direkt vor oder in die Öffnung stellen, im Debugbild auf **TUNNEL
-      STARTEN** klicken. Unter dem Modus muss „(von Hand)“ stehen.
+- [ ] Bot vor die Öffnung stellen, im Debugbild auf **TUNNEL STARTEN**
+      klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot fährt mit
+      Kamera auf die Öffnung zu.
+- [ ] Kurz vor der Öffnung wechselt es auf `Tunnel`: statt des Kamerabilds
+      „Kamera aus (Tunnel)“, `ros2 topic hz /lokal/bev` verstummt, die
+      Draufsicht zeigt die geleerte Tunnelkarte (grau = unbekannt).
 - [ ] Draufsicht: Nach ~16 cm Fahrt erscheint die orange Eingangssperre an der
       Startstelle. `entrance_wall_width` (0,6 m, `Lane_Costmap.yaml`) muss
       mindestens so breit sein wie die echte Öffnung.
@@ -149,14 +163,8 @@ ros2 topic hz /lokal/bev                  # kommt die BEV?
 ros2 topic hz /detect/lane_obstacles      # kommen Spurwände an?
 ros2 topic hz /local_costmap/costmap      # lebt die Costmap?
 ros2 topic echo /lokal/debug_view_mouse_left   # kommen Klicks aus rqt_image_view an?
+ros2 topic info /control/cmd_vel -v       # genau 1 Publisher: control_driving
+ros2 topic info /cmd_vel -v               # genau 1 Publisher: notaus
 ```
 
 Weitere Befehle: `docs/Befehle.md`.
-
----
-
-## Noch offen
-
-- **`avoid_obstacle.py`:** Er prüft `scan.range_min`. Das ist eine Konstante
-  des Sensors und kein Messwert, deshalb meldet `/detect/obstacle` immer
-  `True`. Harmlos, weil kein Node das Topic liest.
