@@ -6,10 +6,12 @@ Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
 Kopie von detect_lane fuer den Nav2-Zweig; im Tunnel pausiert (Reglement).
 """
 import array
+import os
 
 import cv2
 import numpy as np
 
+from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point32, Polygon
 from rclpy.node import Node
@@ -17,6 +19,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Float64, UInt8
 
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
+from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
     ControlType, control_mode_from_msg, frange, irange, read_params, run_node)
 
@@ -76,6 +79,17 @@ class detect_lane(Node):
         self.declare_parameter('clahe_tile_grid_size', 8, irange(1, 64))
         # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
         self.declare_parameter('lane_mask_stride', 2, irange(1, 20))
+        # --- Formfilter (in cm, ueber Parameter/bev.yaml in Pixel umgerechnet) ---
+        # Spurlinien sind ~5 cm breit (+ Unschaerfe ~6 cm, an Ecken/Abzweigen ~7 cm).
+        # Wo ein Kreis dieses Durchmessers hineinpasst, ist es keine Linie (helle Waende,
+        # Papier, Spiegelungen -- in der BEV breit verschmiert) und fliegt aus der Maske.
+        self.declare_parameter('line_max_width_cm', 8.0, frange(2.0, 50.0))
+        # Reste kleiner als das (cm^2) nach dem Filtern sind Rauschen.
+        self.declare_parameter('line_min_area_cm2', 3.0, frange(0.0, 100.0))
+        # Eigener Bot vorn im Bild (Halter/Stuetzkugel, blankes Metall wirkt weiss):
+        # Bereich bis self_mask_x_cm vor der Radachse und +-self_mask_y_cm ausblenden.
+        self.declare_parameter('self_mask_x_cm', 9.0, frange(0.0, 30.0))
+        self.declare_parameter('self_mask_y_cm', 4.0, frange(0.0, 30.0))
         self._param_names = [
             'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
             'lab_b_white_l', 'lab_b_white_h',
@@ -83,7 +97,14 @@ class detect_lane(Node):
             'lab_b_yellow_l', 'lab_b_yellow_h',
             'detection_row_factor', 'min_lane_width',
             'clahe_clip_limit', 'clahe_tile_grid_size', 'lane_mask_stride',
+            'line_max_width_cm', 'line_min_area_cm2', 'self_mask_x_cm', 'self_mask_y_cm',
         ]
+        try:
+            self._bev = bev_geometry.load_bev_spec(
+                os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
+        except Exception as e:  # noqa: BLE001 -- ohne bev.yaml kein Formfilter, Masken roh
+            self._bev = None
+            self.get_logger().warn(f'bev.yaml nicht ladbar ({e}) -- Formfilter der Masken aus.')
 
         # --- Subscriber ---
         self.sub_control_mode = self.create_subscription(
@@ -150,6 +171,8 @@ class detect_lane(Node):
         kernel = np.ones((ERODE_KERNEL, ERODE_KERNEL), np.uint8)
         mask_yellow = cv2.erode(mask_yellow, kernel, iterations=1)
         mask_white = cv2.erode(mask_white, kernel, iterations=1)
+        mask_yellow = self.shape_filter(mask_yellow)
+        mask_white = self.shape_filter(mask_white)
 
         width = self.img_width
         white_alternative = int(width * WHITE_ALTERNATIVE)
@@ -391,6 +414,48 @@ class detect_lane(Node):
 
         corners = [c for _, cs in corners_per_poly for c in cs]
         return polies, horizontal, vertical, corners, intersection_corners
+
+    def shape_filter(self, mask):
+        """Nur Linienfoermiges behalten: eigenen Bot ausblenden, zu dicke Flaechen und
+        kleine Reste entfernen. Ohne bev.yaml (kein Massstab) unveraendert."""
+        b = self._bev
+        if b is None or mask.shape[:2] != (b['height'], b['width']):
+            return mask
+        px_per_cm = 0.01 / b['res']
+        mask = mask.copy()
+
+        # 1. Eigener Bot: Zeilen mit X < self_mask_x, Spalten mit |Y| < self_mask_y
+        if self.self_mask_x_cm > 0 and self.self_mask_y_cm > 0:
+            v0 = int((b['x_max'] - self.self_mask_x_cm / 100.0) / b['res'])
+            u0 = int((b['y_half'] - self.self_mask_y_cm / 100.0) / b['res'])
+            u1 = int(np.ceil((b['y_half'] + self.self_mask_y_cm / 100.0) / b['res']))
+            mask[max(0, v0):, max(0, u0):min(mask.shape[1], u1)] = 0
+
+        # 2. Dicke Flaechen: Mittelpunkte, um die ein Kreis mit Durchmesser line_max_width
+        #    ganz in die Maske passt (Abstand zum Rand > r), und alles bis 1,5 r darum
+        #    herum (der Kreis selbst + ausgefranster Rand) aus der Maske nehmen.
+        #    Wie ein Opening mit Kreiskern, per Distanztransformation aber ~3x schneller
+        #    (6 statt 22 ms bei 640x440 und 8 cm).
+        #    Helle Flaechen werden oft nur lueckenhaft erkannt (viele kleine Loecher) --
+        #    fuer die Dickenpruefung erst Luecken bis ~2 cm schliessen, entfernt wird aus
+        #    der Originalmaske. Echte Linien liegen > 2 cm auseinander und bleiben getrennt.
+        r = self.line_max_width_cm * px_per_cm / 2.0
+        g = max(3, int(round(2.0 * px_per_cm)) | 1)
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g, g)))
+        core = cv2.distanceTransform(closed, cv2.DIST_L2, 5) > r
+        if core.any():
+            to_core = cv2.distanceTransform((~core).astype(np.uint8), cv2.DIST_L2, 5)
+            mask[to_core <= 1.5 * r] = 0
+
+        # 3. Kleine Reste
+        min_px = self.line_min_area_cm2 * px_per_cm * px_per_cm
+        if min_px > 0:
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            small = np.where(stats[1:, cv2.CC_STAT_AREA] < min_px)[0] + 1
+            if small.size:
+                mask[np.isin(labels, small)] = 0
+        return mask
 
     def color_masks(self, img):
         """Gelb- und Weiss-Maske aus dem BGR-Bild: CLAHE auf L, dann Schwellen in LAB."""
