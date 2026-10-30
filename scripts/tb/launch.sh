@@ -7,6 +7,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/tb-env.sh"
 [ $? -ne 0 ] && exit 1
 
+# Bei jedem Start bauen: nach git pull / Branch-Wechsel fehlen sonst neue Programme,
+# Launch-Dateien oder Nachrichten (z.B. "executable 'ingress_node_nav2' not found").
+# Ohne Aenderungen dauert das ~2-3 s. --symlink-install ist Pflicht: dann wirken
+# Aenderungen an Python-Dateien und YAMLs auch ohne Build sofort (docs/MEMORY.md).
+echo "Baue Workspace (colcon build --symlink-install) ..."
+BUILD_LOG=$(cd "$REPO_ROOT/workspace" && colcon build --symlink-install 2>&1)
+if [ $? -ne 0 ]; then
+    echo "$BUILD_LOG" | tail -30
+    echo ""
+    echo "Build fehlgeschlagen -- es wird nichts gestartet. Fehler siehe oben."
+    exit 1
+fi
+echo "$BUILD_LOG" | grep -E "^Summary:"
+# Neu sourcen, damit neu hinzugekommene Pakete/Programme gefunden werden
+source "$REPO_ROOT/workspace/install/setup.bash"
+
 shopt -s nullglob
 launchers=("$SCRIPT_DIR/launchers/"*.sh)
 

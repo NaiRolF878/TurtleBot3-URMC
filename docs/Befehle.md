@@ -6,6 +6,9 @@ Container-Rebuild, geht immer die lange Form `bash scripts/tb/<skript>.sh`.
 
 Vor ROS-Befehlen in einem neuen Terminal: `source scripts/tb/tb-env.sh` (setzt u. a. `ROS_DOMAIN_ID=33`).
 
+`tb` baut beim Start automatisch (`colcon build --symlink-install`, ~2 s) – nach `git pull` oder
+Branch-Wechsel ist also nichts extra nötig. Wer ohne `tb` startet: vorher selbst bauen.
+
 ---
 
 ## Bot starten
