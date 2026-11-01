@@ -82,8 +82,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 ### `resolution`
 - **Was er bewirkt:** Kantenlänge einer Zelle, 0,025 m.
 - **Woher:** gewählt: Spurlinien (~2 cm) und Hindernisränder werden feiner
-  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen. Ob
-  `controller_server` damit seine 20 Hz hält, ist am Bot noch nicht geprüft.
+  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen.
   Zurück auf 0.05 heißt auch `min_frontier_cluster_cells` halbieren.
 - **Was kaputtgeht:** Andere Werte hängen an ihm: die 3,2-m-Grenze oben und
   die Quantisierung des `inflation_radius` (Abschnitt 3). Außerdem wird jede
@@ -253,7 +252,7 @@ Raster im odom-Frame (`memory_resolution`, = `resolution` der Costmaps):
 - Eine Zelle wechselt erst, wenn `line_confirm_frames` (Linie) bzw.
   `free_confirm_frames` (frei) Bilder hintereinander das Gegenteil sagen. Linien
   erscheinen nach ~3 Bildern, verschwinden nach ~10. Einzelne Fehldetektionen
-  kommen so nicht hinein. *Woher:* gewählt, am Bot noch nicht abgestimmt.
+  kommen so nicht hinein. *Woher:* gewählt.
 - Zellen außerhalb von `memory_radius` werden vergessen. Beim Tunnel-Eintritt
   wird das ganze Gedächtnis verworfen (keine Kameradaten im Tunnel).
 - Gesendet wird jedes Mal das ganze Gedächtnis auf `/detect/lane_obstacles`;

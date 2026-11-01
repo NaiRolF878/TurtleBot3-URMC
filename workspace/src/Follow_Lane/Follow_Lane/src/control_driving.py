@@ -8,7 +8,9 @@ Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 import time
 
 from geometry_msgs.msg import Twist
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from std_msgs.msg import Float64, UInt8
 
 from Follow_Lane.src.common import ControlType, control_mode_from_msg, frange, read_params, run_node
@@ -27,6 +29,11 @@ PID_SAMPLE_TIME_S = 0.1
 INTEGRAL_LIMIT = 1.0
 # Begrenzung der PID-Lenkung (rad/s); der Burger schafft ~2,84 rad/s.
 MAX_ANGULAR_VEL = 2.0
+# Max. Geschwindigkeit der Motoren 0,22 m/s (TurtleBot3-Handbuch, Burger), darum
+# bleibt das aeussere Rad (v + |omega| * WHEEL_SEPARATION / 2) darunter.
+# Gleicher Wert wie vx_max in nav2_params.yaml.
+MAX_WHEEL_VEL = 0.22
+WHEEL_SEPARATION = 0.160
 
 STOP_REPEAT = 10
 STOP_REPEAT_PERIOD_S = 0.05
@@ -48,12 +55,14 @@ class control_driving(Node):
         super().__init__('control_driving')
 
         # --- Parameter ---
-        self.declare_parameter('kp',                 5.5,  frange(0.0, 20.0))
-        self.declare_parameter('ki',                 0.15, frange(0.0, 10.0))
-        self.declare_parameter('kd',                 2.75, frange(0.0, 10.0))
-        self.declare_parameter('MAX_VEL',            0.34, frange(0.0, 10.0))
-        self.declare_parameter('speed_curve_factor', 1.0,  frange(0.0, 5.0))
-        self.declare_parameter('min_speed_factor',   0.5,  frange(0.0, 10.0))
+        # Ohne Default: nur aus Control_driving_PID.yaml, sonst startet der Node nicht.
+        self.declare_parameter('kp',                 Parameter.Type.DOUBLE, frange(0.0, 20.0))
+        self.declare_parameter('ki',                 Parameter.Type.DOUBLE, frange(0.0, 10.0))
+        self.declare_parameter('kd',                 Parameter.Type.DOUBLE, frange(0.0, 10.0))
+        self.declare_parameter('MAX_VEL',            Parameter.Type.DOUBLE, frange(0.0, 10.0))
+        self.declare_parameter('speed_curve_factor', Parameter.Type.DOUBLE, frange(0.0, 5.0))
+        self.declare_parameter('min_speed_factor',   Parameter.Type.DOUBLE, frange(0.0, 10.0))
+        self._require_params(['kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor'])
         # Zeitgrenzen in s. lane_cmd_timeout umfasst mehrere Kamerabilder,
         # nav2_cmd_timeout fuenf Perioden von controller_frequency (20 Hz),
         # mode_timeout drei Perioden von switch_control (2 Hz).
@@ -149,6 +158,20 @@ class control_driving(Node):
 
     # --- Hilfsmethoden ---
 
+    def _require_params(self, names):
+        """Beendet den Node mit Fehlermeldung, wenn ein Parameter keinen Wert hat."""
+        missing = []
+        for name in names:
+            try:
+                self.get_parameter(name)
+            except ParameterUninitializedException:
+                missing.append(name)
+        if missing:
+            self.get_logger().fatal(
+                f'Ohne Wert: {", ".join(missing)} -- Control_driving_PID.yaml nicht geladen '
+                'oder unvollstaendig. control_driving startet nicht, der Bot faehrt nicht.')
+            raise SystemExit(1)
+
     def _mode_is(self, *modes):
         """Aktueller Modus ist einer von modes und /control/mode ist nicht veraltet."""
         if self.control_mode not in modes:
@@ -175,10 +198,14 @@ class control_driving(Node):
         d = self.kd * (error - self.last_error) / PID_SAMPLE_TIME_S
         self.last_error = error
 
+        angular = max(-MAX_ANGULAR_VEL, min(MAX_ANGULAR_VEL, p + i + d))
+        linear = self.MAX_VEL * max(self.min_speed_factor, 1 - abs(error) * self.speed_curve_factor)
+        # Lenkung hat Vorrang; die Radgrenze gilt auch vor min_speed_factor.
+        linear = max(0.0, min(linear, MAX_WHEEL_VEL - abs(angular) * WHEEL_SEPARATION / 2))
+
         twist = Twist()
-        twist.linear.x = float(
-            self.MAX_VEL * max(self.min_speed_factor, 1 - abs(error) * self.speed_curve_factor))
-        twist.angular.z = float(max(-MAX_ANGULAR_VEL, min(MAX_ANGULAR_VEL, p + i + d)))
+        twist.linear.x = float(linear)
+        twist.angular.z = float(angular)
         return twist
 
     def _publish_stop(self):

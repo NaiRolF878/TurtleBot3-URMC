@@ -33,20 +33,22 @@ In `switch_control`, Werte aus `Parameter/Switch_Control.yaml` (live in rqt änd
 | `obstacle_clear_debounce` | 1,0 s | so lange frei, bevor zurück zu Lane |
 
 Im Obstacle-Modus plant `planner_server` (NavFn) jede Sekunde einen Weg um die Hindernisse zu einem Punkt
-1 m voraus auf der Spurmitte; MPPI fährt ihn ab. Am Bot noch nicht getestet.
+1 m voraus auf der Spurmitte; MPPI fährt ihn ab.
 
 Beim Wechsel Lane → Obstacle sendet `control_driving` sofort Null; der Bot steht, bis Nav2 den ersten
 Befehl schickt.
 
 Abstand beim Umfahren selbst: `inflation_radius` der Costmaps (lokal 0,20 m, global 0,3 m,
-`cost_scaling_factor` 3,0). Noch nicht am Bot abgestimmt.
+`cost_scaling_factor` 3,0).
 
 ### 3. Fahrgeschwindigkeit über dem Limit des Burger – **beobachtet** (Lane-Modus)
 
 Aufzeichnung `logs/bag-20261022-132414`: `control_driving` verlangte bis 0,40 m/s am äußeren Rad,
 der Burger schafft 0,22 m/s. Das schnellere Rad blieb stehen, der Bot drehte entgegen dem Lenkbefehl.
-`MAX_VEL` wurde auf 0,15 gesetzt; ob das Problem damit weg ist, ist **noch nicht im Fahrtest bestätigt**.
+`MAX_VEL` wurde auf 0,15 gesetzt.
 Nav2 selbst ist auf `vx_max: 0.22` begrenzt (betrifft nur Obstacle/Tunnel).
+Im Lane-Modus begrenzt `control_driving` v abhängig von ω, sodass das äußere Rad höchstens 0,22 m/s fährt
+(`MAX_WHEEL_VEL`).
 
 ### 4. Feinere Costmap – **ungetestet**
 
@@ -69,7 +71,7 @@ Zurück: Wert in `nav2_params.yaml` auf 0,05.
   das Debugbild zeigt „Kamera aus (Tunnel)“. Der Kameratreiber auf dem Bot sendet trotzdem weiter.
 - Ablauf: Auslösen setzt `TunnelEntry` (Einfahrt mit Kamera, NavFn plant durch die Öffnung). Sieht der LiDAR
   links und rechts die Tunnelwände (`tunnel_side_distance` 0,35 m), folgt ~20 cm vor der Öffnung `Tunnel`:
-  Kamera aus, Karten geleert, Eingangssperre an der Öffnung. Am Bot noch nicht getestet.
+  Kamera aus, Karten geleert, Eingangssperre an der Öffnung.
 - Verlassen: automatisch, wenn der LiDAR rundum frei ist (erst ab `Tunnel` geprüft) (`tunnel_exit_open_distance` 1,5 m,
   `tunnel_exit_open_ratio` 0,8, `tunnel_exit_debounce` 1 s), oder Knopf/Befehl mit `false`.
 

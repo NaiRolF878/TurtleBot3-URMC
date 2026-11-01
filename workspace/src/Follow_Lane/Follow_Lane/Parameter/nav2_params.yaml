@@ -71,6 +71,8 @@ controller_server:
       vx_std: 0.2
       vy_std: 0.0
       wz_std: 0.4
+      # Max. Geschwindigkeit der Motoren (TurtleBot3-Handbuch), gleicher Wert wie
+      # MAX_WHEEL_VEL in control_driving.py.
       vx_max: 0.22
       vx_min: -0.1
       vy_max: 0.0
