@@ -57,7 +57,7 @@ def generate_launch_description():
         Node(package='Follow_Lane', executable='nav2_view', name='nav2_view'),
 
         # Local Costmap + MPPI. Sendet nicht direkt an den Bot: control_driving reicht
-        # /nav2/cmd_vel nur im Obstacle- und Tunnel-Modus weiter.
+        # /nav2/cmd_vel nur in Obstacle, TunnelEntry und Tunnel weiter.
         Node(
             package='nav2_controller', executable='controller_server', name='controller_server',
             output='screen',

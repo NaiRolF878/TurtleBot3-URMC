@@ -3,7 +3,7 @@
 Ein:  /lokal/bev, /control/mode
 Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
       /detect/lane_mask (LaneMask fuer lane_costmap_node)
-Kopie von detect_lane fuer den Nav2-Zweig; im Tunnel pausiert (Reglement).
+Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 """
 import array
 import os

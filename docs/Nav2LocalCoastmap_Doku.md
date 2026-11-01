@@ -53,7 +53,7 @@ Fahrbefehle erzeugt nur `control_driving`. Er wählt je nach Modus die Quelle un
 
 | | **Lane-Modus** | **Obstacle-Modus** | **Tunnel-Modus** |
 |---|---|---|---|
-| Quelle in `control_driving` | PID auf `/detect/lane` | `/nav2/cmd_vel` (MPPI), unverändert | `/nav2/cmd_vel` (MPPI), unverändert |
+| Quelle in `control_driving` | PID auf `/detect/lane` | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert |
 | Wer nutzt die Kamera? | `control_driving` über `/detect/lane`; `lane_costmap_node` für die Spurwände | `lane_costmap_node` für die Spurwände | niemand: `ingress_node` und `detect_lane` pausieren (Reglement) |
 | Was steht in local_ und global_costmap? | LiDAR + Spurgedächtnis | LiDAR + Spurgedächtnis | LiDAR + Eingangssperre |
 | Wird geplant? | nein, nichts geplant und nichts angezeigt | ja: NavFn plant ~1×/s einen Weg um die Hindernisse, MPPI fährt ihn ab | ja: Explorer + NavFn |
@@ -119,7 +119,7 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem M
 Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `lane_max_age`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer).
 
 ### `control_driving` — die einzige Quelle für Fahrbefehle
-Wählt je nach `/control/mode` den PID (Lane) oder reicht `/nav2/cmd_vel` unverändert durch (Obstacle, Tunnel); in jedem anderen Modus Null. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen nur in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
+Wählt je nach `/control/mode` den PID (Lane) oder reicht `/nav2/cmd_vel` durch (Obstacle, Tunnel); in jedem anderen Modus Null. Würde das äußere Rad schneller als 0,22 m/s (`MAX_WHEEL_VEL`), skaliert es v und ω gemeinsam herunter, die Bahn bleibt gleich. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
 
 ### `notaus` — die Fahrfreigabe
 Letzte Stufe zwischen `/control/cmd_vel` und `/cmd_vel`. Erzeugt keine Bewegung, reicht nur nach Freigabe (Leertaste, rqt `drive`, `/notaus/set`) durch oder sendet Null, auch wenn 0,5 s (`cmd_timeout_s`) nichts kommt.
@@ -175,8 +175,8 @@ Nav2-Standardkomponente. Berechnet auf der `global_costmap` (LiDAR + Spurgedäch
 | `tunnel_side_distance` | 0.35 m | Einfahrt: links und rechts voraus muss eine Wand näher als das sein, damit auf `Tunnel` umgeschaltet wird (Kamera aus). Hängt an der Tunnelbreite: halbe Breite (0,25 m beim Testtunnel) + Reserve | Kleiner = schaltet näher an der Öffnung um; größer = früher, aber Gefahr durch andere Wände neben der Strecke |
 | `tunnel_side_angle_min_deg` / `_max_deg` | 30° / 100° | Sektoren links und rechts, in denen die Tunnelwände gesucht werden | — |
 | `tunnel_entry_debounce` | 0.2 s | So lange müssen die Wände gesehen werden | Größer = robuster, schaltet aber später um |
-| `tunnel_entry_max_distance` | 0.8 m | Sicherheitsnetz: nach so viel Strecke ab dem Umschalten gilt der Bot als drin | Etwas mehr als der Abstand, mit dem der Bot vor dem Tunnel steht |
-| `tunnel_exit_open_distance` | 1.5 m | Ab welcher Distanz ein einzelner LiDAR-Strahl als "offen/frei" zählt | Größer = strengere Anforderung an "offener Raum" |
+| `tunnel_entry_max_distance` | 0.3 m | Sicherheitsnetz: nach so viel Strecke ab dem Umschalten gilt der Bot als drin | Klein, weil der Startabstand variiert: lieber Kamera zu früh aus als im Tunnel an |
+| `tunnel_exit_open_distance` | 0.6 m | Ab welcher Distanz ein einzelner LiDAR-Strahl als "offen/frei" zählt | Größer = strenger; bei 1,5 m blieb der Bot im Raum nahe einer Wand im Tunnelmodus |
 | `tunnel_exit_open_ratio` | 0.8 | Welcher Anteil aller LiDAR-Strahlen offen sein muss, damit "offener Raum" erkannt wird | Größer = strenger (fast alles muss frei sein); kleiner = reicht schon, wenn ein Teil frei ist |
 | `tunnel_exit_debounce` | 1.0 s | Wie lange der LiDAR durchgehend offenen Raum sehen muss | Wie oben: Stabilität vs. Reaktionsgeschwindigkeit |
 

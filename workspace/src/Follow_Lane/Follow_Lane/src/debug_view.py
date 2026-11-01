@@ -35,8 +35,9 @@ TUNNEL_BUTTON = (8, 290, PANEL_W - 10, 345)
 
 # Groesse (h, w) der Kameraflaeche, solange noch kein Bild kam: /lokal/bev, 640x440.
 DEFAULT_CAMERA_SIZE = (440, 640)
-# Ohne neues Kamerabild (Tunnel, detect_lane steht) baut der Timer das Debugbild mit
-# Platzhalter neu auf, damit Modus und Tunnel-Button aktuell bleiben.
+# Ohne neues Spurbild (Tunnel, detect_lane steht) baut der Timer das Debugbild mit
+# Platzhalter neu auf, damit Modus und Tunnel-Button aktuell bleiben. Ab
+# LANE_DEBUG_STALE_S (s) gilt das letzte Spurbild als veraltet.
 REDRAW_PERIOD_S = 0.5
 LANE_DEBUG_STALE_S = 1.0
 
@@ -165,14 +166,17 @@ class debug_view(Node):
         self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
 
     def cb_timer(self):
-        if self.lane_debug_stamp is None or self.follow_lane_debug is None:
-            self.build_debug_image()
-            return
-        age = (self.get_clock().now() - self.lane_debug_stamp).nanoseconds / 1e9
-        if age > LANE_DEBUG_STALE_S:
+        age = self.lane_debug_age()
+        if age is None or age > LANE_DEBUG_STALE_S:
             self.build_debug_image()
 
     # --- Hilfsmethoden ---
+
+    def lane_debug_age(self):
+        """Sekunden seit dem letzten Spurbild, None ohne Bild."""
+        if self.lane_debug_stamp is None or self.follow_lane_debug is None:
+            return None
+        return (self.get_clock().now() - self.lane_debug_stamp).nanoseconds / 1e9
 
     def build_debug_image(self):
         camera = self.camera_view()
@@ -200,18 +204,26 @@ class debug_view(Node):
             self._tunnel_button = (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1)
 
         msg = self.bridge.cv2_to_imgmsg(final_debug_image, encoding='bgr8')
-        if self.follow_lane_debug is not None:
+        age = self.lane_debug_age()
+        if age is not None and age <= LANE_DEBUG_STALE_S:
             msg.header = self.follow_lane_debug.raw_image.header
         else:
             msg.header.stamp = self.get_clock().now().to_msg()
         self.pub_debug_image.publish(msg)
 
     def camera_view(self):
-        """Kamerabild mit Spurmarkierungen, im Tunnel oder ohne Bild ein Platzhalter.
-        None, wenn das Bild nicht dekodiert werden kann."""
-        if self.control_mode == ControlType.Tunnel or self.follow_lane_debug is None:
-            text = 'Kamera aus (Tunnel)' if self.control_mode == ControlType.Tunnel \
-                else 'kein Kamerabild'
+        """Kamerabild mit Spurmarkierungen; im Tunnel, ohne Bild oder bei veraltetem
+        Bild ein Platzhalter. None, wenn das Bild nicht dekodiert werden kann."""
+        age = self.lane_debug_age()
+        if self.control_mode == ControlType.Tunnel:
+            text = 'Kamera aus (Tunnel)'
+        elif age is None:
+            text = 'kein Kamerabild'
+        elif age > LANE_DEBUG_STALE_S:
+            text = f'Spurbild veraltet ({age:.0f} s)'
+        else:
+            text = None
+        if text is not None:
             placeholder = np.zeros((*self.camera_size, 3), dtype=np.uint8)
             cv2.putText(placeholder, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         0.9, (200, 200, 200), 2, cv2.LINE_AA)

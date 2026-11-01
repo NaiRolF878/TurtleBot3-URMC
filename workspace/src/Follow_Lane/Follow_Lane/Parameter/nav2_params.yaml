@@ -21,8 +21,8 @@
 #
 # Fahrbefehle: controller_server sendet auf /nav2/cmd_vel (Remap in
 # nav2_obstacle.launch.py). control_driving reicht sie nur in Obstacle, TunnelEntry
-# und Tunnel unveraendert weiter; die Grenzen hier (vx_max, wz_max) gelten also
-# direkt fuer den Bot.
+# und Tunnel weiter und skaliert v und omega gemeinsam, wenn das aeussere Rad
+# schneller als 0,22 m/s wuerde (MAX_WHEEL_VEL).
 #
 # Warum MPPI und nicht DWB: NavFn plant fuer einen Punkt mit robot_radius und kennt
 # die Form des Bots nicht, der Pfad ist also nur eine grobe Vorgabe. MPPIs

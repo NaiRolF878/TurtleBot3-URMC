@@ -47,8 +47,8 @@ Aufzeichnung `logs/bag-20261022-132414`: `control_driving` verlangte bis 0,40 m/
 der Burger schafft 0,22 m/s. Das schnellere Rad blieb stehen, der Bot drehte entgegen dem Lenkbefehl.
 `MAX_VEL` wurde auf 0,15 gesetzt.
 Nav2 selbst ist auf `vx_max: 0.22` begrenzt (betrifft nur Obstacle/Tunnel).
-Im Lane-Modus begrenzt `control_driving` v abhängig von ω, sodass das äußere Rad höchstens 0,22 m/s fährt
-(`MAX_WHEEL_VEL`).
+`control_driving` hält das äußere Rad unter 0,22 m/s (`MAX_WHEEL_VEL`): im Lane-Modus durch kleineres v
+(Lenkung hat Vorrang), bei Nav2 durch gemeinsames Skalieren von v und ω (Bahn bleibt gleich).
 
 ### 4. Feinere Costmap – **ungetestet**
 
@@ -72,7 +72,7 @@ Zurück: Wert in `nav2_params.yaml` auf 0,05.
 - Ablauf: Auslösen setzt `TunnelEntry` (Einfahrt mit Kamera, NavFn plant durch die Öffnung). Sieht der LiDAR
   links und rechts die Tunnelwände (`tunnel_side_distance` 0,35 m), folgt ~20 cm vor der Öffnung `Tunnel`:
   Kamera aus, Karten geleert, Eingangssperre an der Öffnung.
-- Verlassen: automatisch, wenn der LiDAR rundum frei ist (erst ab `Tunnel` geprüft) (`tunnel_exit_open_distance` 1,5 m,
+- Verlassen: automatisch, wenn der LiDAR rundum frei ist (erst ab `Tunnel` geprüft) (`tunnel_exit_open_distance` 0,6 m,
   `tunnel_exit_open_ratio` 0,8, `tunnel_exit_debounce` 1 s), oder Knopf/Befehl mit `false`.
 
 ### 6. Beim Betreten werden beide Karten geleert – **so gewollt**, beobachten

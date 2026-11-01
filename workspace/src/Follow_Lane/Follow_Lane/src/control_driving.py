@@ -2,7 +2,8 @@
 
 Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist)
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel
-Lane: PID auf den Spurfehler. Obstacle/TunnelEntry/Tunnel: /nav2/cmd_vel unveraendert.
+Lane: PID auf den Spurfehler. Obstacle/TunnelEntry/Tunnel: /nav2/cmd_vel, auf die
+Radgrenze skaliert.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 """
 import time
@@ -142,7 +143,7 @@ class control_driving(Node):
         if now < self._nav2_blocked_until:
             return
         self._nav2_time = now
-        self.pub_cmd_vel.publish(msg)
+        self.pub_cmd_vel.publish(self._limit_wheels(msg))
 
     def cb_watchdog(self):
         read_params(self, self._param_names)
@@ -206,6 +207,17 @@ class control_driving(Node):
         twist = Twist()
         twist.linear.x = float(linear)
         twist.angular.z = float(angular)
+        return twist
+
+    @staticmethod
+    def _limit_wheels(twist):
+        """Skaliert v und omega gemeinsam, bis das aeussere Rad MAX_WHEEL_VEL einhaelt.
+        Die Kruemmung bleibt, der Bot faehrt die geplante Bahn nur langsamer."""
+        outer = abs(twist.linear.x) + abs(twist.angular.z) * WHEEL_SEPARATION / 2
+        if outer > MAX_WHEEL_VEL:
+            scale = MAX_WHEEL_VEL / outer
+            twist.linear.x *= scale
+            twist.angular.z *= scale
         return twist
 
     def _publish_stop(self):

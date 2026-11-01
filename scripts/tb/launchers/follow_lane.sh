@@ -10,10 +10,10 @@
 # Laeuft schon eine Pipeline (z.B. in einem anderen Terminal)? Zwei gleichzeitig senden auf
 # dieselben Topics -- flackernde Debug-Bilder, und zwei Not-Aus-Knoten, von denen einer im STOPP
 # dauernd Null an den Bot schickt.
-PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus)( |$)'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Follow-Lane-Pipeline:"
-    ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/Follow_Lane/##; s# --ros-args.*##'
+    ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/[^/]*/##; s# --ros-args.*##'
     echo ""
     read -r -p "Beenden und neu starten? [j/N] " answer
     if [ "$answer" != "j" ] && [ "$answer" != "J" ]; then
@@ -23,12 +23,12 @@ if pgrep -f "$PATTERN" >/dev/null; then
     # Zuerst den Not-Aus (sendet beim Beenden Stopp), dann die Launch-Prozesse und Knoten
     pkill -INT -f 'lib/Follow_Lane/notaus( |$)'
     sleep 1
-    pkill -INT -f 'ros2 launch Follow_Lane follow_lane.launch.py'
+    pkill -INT -f 'ros2 launch Follow_Lane (follow_lane|nav2_obstacle).launch.py'
     sleep 3
     pkill -TERM -f "$PATTERN"
     sleep 1
     if pgrep -f "$PATTERN" >/dev/null; then
-        echo "Konnte nicht alles beenden -- bitte pruefen: ps -ef | grep Follow_Lane"
+        echo "Konnte nicht alles beenden -- bitte pruefen: ps -ef | grep -E 'Follow_Lane|nav2'"
         exit 1
     fi
     echo "Alte Pipeline beendet."

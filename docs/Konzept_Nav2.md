@@ -9,7 +9,7 @@ Variante mit Zonenaufteilung fuer den Obstacle-Modus liegt auf `LDS03-Doku`.
 
 - **switch_control** entscheidet als einziger ueber den Fahrmodus (`/control/mode`).
 - **control_driving** erzeugt als einziger Fahrbefehle (`/control/cmd_vel`): PID oder
-  die unveraenderten Befehle von Nav2.
+  die Befehle von Nav2, auf die Radgrenze skaliert.
 - **notaus** gibt sie nach Freigabe an den Bot weiter (`/cmd_vel`).
 - Alle anderen Nodes liefern nur Daten: Spurfehler, Spurgedaechtnis, Pfade, Karten.
 

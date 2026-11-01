@@ -64,7 +64,7 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
     L = Helligkeit, A = grün (<128) bis rot (>128), B = blau (<128) bis gelb
     (>128), 128 = farblos. **Gelb** erkennt man am hohen B (`lab_b_yellow_l`
     150), **Weiß** am hohen L bei A/B nahe 128 (`lab_l_white_l` 200). Die
-    Messwerte vom 22.10. stehen als Kommentar in `detect_lane.py`.
+    Messwerte vom 22.10. stehen als Kommentar in `detect_lane_nav2.py`.
   - `min_lane_width` ist in BEV-Pixeln: 80 px = 10 cm.
   - `detection_row_factor`: Suchzeile im Bild (0,80 = 80 % der Höhe).
   - Sichern: `bash scripts/tb/save-params.sh detect_lane`

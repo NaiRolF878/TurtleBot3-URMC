@@ -31,12 +31,15 @@
     tunnel_side_distance: 0.35
     tunnel_entry_debounce: 0.2
     # Sicherheitsnetz: spaetestens nach so viel Strecke (m) ab dem Umschalten gilt der
-    # Bot als drin. Etwas mehr als der Abstand, mit dem er vor dem Tunnel steht.
-    tunnel_entry_max_distance: 0.8
+    # Bot als drin. Klein, weil der Startabstand variiert: lieber Kamera zu frueh aus
+    # als im Tunnel an.
+    tunnel_entry_max_distance: 0.3
     odom_frame: odom
     robot_frame: base_footprint
 
     # --- Tunnel-Austritt (Tunnel -> vorheriger Modus), nur LiDAR ---
-    tunnel_exit_open_distance: 1.5
+    # Strahl gilt als frei ab dieser Entfernung (m). Im Tunnel (Waende 0,25 m) sind so nur
+    # die Strahlen laengs der Roehre frei, im Raum fast alle, auch nahe einer Wand.
+    tunnel_exit_open_distance: 0.6
     tunnel_exit_open_ratio: 0.8
     tunnel_exit_debounce: 1.0
