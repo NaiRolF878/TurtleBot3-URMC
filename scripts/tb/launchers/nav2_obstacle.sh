@@ -10,7 +10,7 @@
 #
 # Der Bot faehrt NICHT von selbst: erst LEERTASTE in diesem Terminal gibt die Fahrt frei,
 # nochmal Leertaste = STOPP. q oder Strg+C beendet den Not-Aus (sendet Stopp) und danach
-# alles andere.
+# alles andere. L leert Spurgedaechtnis und Costmaps (Bot angehoben: erst absetzen).
 
 # Laeuft schon eine Pipeline? Zwei gleichzeitig senden auf dieselben Topics, und ein
 # zweiter Not-Aus im STOPP schickt dauernd Null an den Bot.
@@ -73,5 +73,6 @@ echo "anhaken, dann im Debugbild auf TUNNEL STARTEN klicken."
 echo "Das zweite Bildfenster zeigt die Nav2-Draufsicht mit Statuszeile (/nav2/view)."
 echo ""
 echo "Not-Aus: LEERTASTE = Fahren/Stopp, q = beenden."
+echo "L = Spurgedaechtnis und Costmaps leeren (Bot angehoben: erst absetzen, im Stand druecken)."
 echo ""
 ros2 run Follow_Lane notaus

@@ -11,6 +11,8 @@
   letzten Befehl). Bei FAHREN werden die Befehle des Reglers durchgereicht; kommt laenger als
   `cmd_timeout_s` nichts mehr vom Regler, wird ebenfalls Null gesendet.
 * Zustand auf /notaus/drive (std_msgs/Bool, latched) fuer GUIs/andere Nodes.
+* Taste L: /control/clear_maps (std_msgs/Empty), lane_costmap_node leert Spurgedaechtnis und
+  Costmaps, wenn sie nicht mehr zur Odometrie passen (Bot angehoben). Erst absetzen, dann L.
 * Beim Beenden: mehrfach Stopp. Danach kommt nichts mehr zum Bot durch (kein Remapping mehr).
 """
 import os
@@ -28,7 +30,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.signals import SignalHandlerOptions
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Empty
 from std_srvs.srv import SetBool
 
 STOP_RATE_HZ = 10.0
@@ -48,6 +50,7 @@ class notaus(Node):
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 1)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_state = self.create_publisher(Bool, '/notaus/drive', latched)
+        self.pub_clear_maps = self.create_publisher(Empty, '/control/clear_maps', 1)
         self.create_subscription(Twist, '/control/cmd_vel', self.cb_cmd, 1)
         self.create_service(SetBool, '/notaus/set', self.cb_srv)
         self.add_on_set_parameters_callback(self.cb_params)
@@ -72,6 +75,14 @@ class notaus(Node):
         self.publish_state()
         self.get_logger().warn(f'{"FAHREN freigegeben" if drive else "STOPP"} ({source})')
         print_state(drive)
+
+    def clear_maps(self):
+        if self.pub_clear_maps.get_subscription_count() == 0:
+            self.get_logger().error('Taste L: lane_costmap_node hoert nicht -- nichts geleert.')
+        else:
+            self.pub_clear_maps.publish(Empty())
+            self.get_logger().warn('Taste L: Spurgedaechtnis und Costmaps werden geleert.')
+        print_state(self.drive)
 
     def publish_state(self):
         self.pub_state.publish(Bool(data=self.drive))
@@ -105,9 +116,9 @@ class notaus(Node):
 
 def print_state(drive):
     if drive:
-        sys.stdout.write('\r\033[K\033[1;42;30m  >> FAHREN  \033[0m   Leertaste = STOPP, q = beenden ')
+        sys.stdout.write('\r\033[K\033[1;42;30m  >> FAHREN  \033[0m   Leertaste = STOPP, L = Karten leeren, q = beenden ')
     else:
-        sys.stdout.write('\r\033[K\033[1;41;37m  || STOPP   \033[0m   Leertaste = FAHREN, q = beenden ')
+        sys.stdout.write('\r\033[K\033[1;41;37m  || STOPP   \033[0m   Leertaste = FAHREN, L = Karten leeren, q = beenden ')
     sys.stdout.flush()
 
 
@@ -123,6 +134,8 @@ def keyboard_loop(node, stop_event):
         ch = os.read(fd, 1)
         if ch == b' ':
             node.set_drive(not node.drive, 'Leertaste')
+        elif ch in (b'l', b'L'):
+            node.clear_maps()
         elif ch in (b'q', b'Q', b'\x03'):
             stop_event.set()
 

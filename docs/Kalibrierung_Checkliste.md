@@ -83,6 +83,8 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
       Wand werden nur die gelbe und die weiße Spurlinie.
 - [ ] Bot auf die Spur stellen: Beide Linien müssen nach ~3 Bildern als
       blockierte Zellreihen (in `/nav2/view` rot) erscheinen.
+- Bot angehoben oder umgesetzt? Die Karten passen dann nicht mehr zur Odometrie:
+  absetzen und im Stand **L** im Terminal drücken (leert Spurgedächtnis und Costmaps).
 - [ ] Bot von Hand ein Stück vorschieben: Die Linien neben und hinter ihm
       müssen stehen bleiben (Spurgedächtnis), obwohl die Kamera sie nicht mehr
       sieht.

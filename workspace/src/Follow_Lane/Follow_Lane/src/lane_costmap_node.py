@@ -1,7 +1,7 @@
 """Spurgedaechtnis: Spurlinien als virtuelle Waende fuer Nav2, Spurmitte als Pfad.
 
 Ein:  /detect/lane_mask (LaneMask, BEV-Pixel), /lokal/bev_view (Sichtmaske), /scan,
-      /control/mode
+      /control/mode, /control/clear_maps (Empty, Taste L im Not-Aus)
 Aus:  /detect/lane_obstacles (PointCloud2 aller gemerkten Linienzellen, fuer die
       lane_layer der Costmaps und den Linienfilter von switch_control),
       /lane/center_path (Path im odom-Frame, nur in Obstacle)
@@ -27,7 +27,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Header, UInt8
+from std_msgs.msg import Empty, Header, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
@@ -316,7 +316,8 @@ class lane_costmap_node(Node):
     Beim Tunnel-Eintritt wird das Gedaechtnis verworfen und eine leere Wolke gesendet,
     COSTMAP_CLEAR_DELAY_S spaeter werden beide Costmaps geleert. Die Reihenfolge zaehlt:
     ein lane_layer behaelt die letzte Wolke im Puffer und traegt sie nach dem Leeren
-    wieder ein; eine leere Wolke allein loescht nichts aus der Karte.
+    wieder ein; eine leere Wolke allein loescht nichts aus der Karte. Dasselbe auf
+    /control/clear_maps, wenn die Karten nicht mehr zur Odometrie passen (Bot angehoben).
 
     Die Spurmitte (nur Obstacle) liegt im odom-Frame zum Bildzeitpunkt und ist
     das Ziel, zu dem nav2_goal_publisher den Bahnplaner rechnen laesst.
@@ -379,6 +380,8 @@ class lane_costmap_node(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cb_control_mode, 1)
+        self.sub_clear_maps = self.create_subscription(
+            Empty, '/control/clear_maps', self.cb_clear_maps, 1)
         self.sub_lane_mask = self.create_subscription(
             LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
         self.sub_bev_view = self.create_subscription(
@@ -431,9 +434,11 @@ class lane_costmap_node(Node):
         entering_tunnel = new_mode == ControlType.Tunnel and self.control_mode != ControlType.Tunnel
         self.control_mode = new_mode
         if entering_tunnel:
-            self.memory.clear()
-            self._publish_empty_cloud()
-            self.clear_timer.reset()
+            self._forget_everything()
+
+    def cb_clear_maps(self, _msg):
+        self.get_logger().info('Spurgedaechtnis und Costmaps werden geleert (/control/clear_maps).')
+        self._forget_everything()
 
     def cb_bev_view(self, msg):
         if self._bev is None:
@@ -523,6 +528,12 @@ class lane_costmap_node(Node):
         except Exception as e:  # noqa: BLE001 -- Radachse ist eine brauchbare Naeherung
             self.get_logger().warn(f'Extrinsik nicht ladbar ({e}) -- Kamera bei x=0 angenommen.')
             return (0.0, 0.0)
+
+    def _forget_everything(self):
+        self.memory.clear()
+        self._seed_hints.clear()
+        self._publish_empty_cloud()
+        self.clear_timer.reset()
 
     def _clear_costmaps(self):
         # Leert alle Layer; LiDAR und Eingangssperre fuellen sich im naechsten Zyklus neu.
