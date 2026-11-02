@@ -69,7 +69,7 @@ Zurück: Wert in `nav2_params.yaml` auf 0,05.
 - Kontrolle: `ros2 topic echo /control/mode` → 7 (Einfahrt), dann 6. Not-Aus muss auf FAHREN stehen.
 - Im Tunnel verarbeiten `ingress_node` und `detect_lane` (Pipeline-Kopien `*_nav2`) keine Kamerabilder;
   das Debugbild zeigt „Kamera aus (Tunnel)“. Der Kameratreiber auf dem Bot sendet trotzdem weiter.
-- Ablauf: Auslösen setzt `TunnelEntry` (Einfahrt mit Kamera, NavFn plant durch die Öffnung). Sieht der LiDAR
+- Ablauf: Auslösen setzt `TunnelEntry` (Einfahrt mit Kamera, PID folgt der Spur bis in die Öffnung). Sieht der LiDAR
   links und rechts die Tunnelwände (`tunnel_side_distance` 0,35 m), folgt ~20 cm vor der Öffnung `Tunnel`:
   Kamera aus, Karten geleert, Eingangssperre an der Öffnung.
 - Verlassen: automatisch, wenn der LiDAR rundum frei ist (erst ab `Tunnel` geprüft) (`tunnel_exit_open_distance` 0,6 m,
@@ -77,7 +77,7 @@ Zurück: Wert in `nav2_params.yaml` auf 0,05.
 
 ### 6. Beim Betreten werden beide Karten geleert – **so gewollt**, beobachten
 
-`lane_costmap_node` leert die `local_costmap`, `keepout_zone_node` die `global_costmap`. Danach baut
+`lane_costmap_node` sendet zuerst eine leere Spurwolke und leert 0,3 s später beide Karten. Danach baut
 der LiDAR die Tunnelkarte neu auf. Alles, was vorher über die Umgebung bekannt war, ist dann weg.
 
 ### 7. Feinere Tunnelkarte – **ungetestet**

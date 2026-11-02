@@ -26,8 +26,10 @@ nicht bekannt.
 | Obstacle | Nav2: NavFn plant, MPPI fährt | LiDAR + Spurgedächtnis |
 | Tunnel | Nav2: Explorer + NavFn plant, MPPI fährt | LiDAR + Eingangssperre, **keine Kamera** (Reglement) |
 
-Beim Tunnel-Eintritt verwirft `lane_costmap_node` das Spurgedächtnis und leert
-die local_costmap, `keepout_zone_node` leert die global_costmap. Warum keiner
+Beim Tunnel-Eintritt verwirft `lane_costmap_node` das Spurgedächtnis, sendet eine
+leere Wolke und leert 0,3 s später beide Costmaps. Erst die leere Wolke, dann leeren:
+ein lane_layer behält die letzte Wolke und trägt sie nach dem Leeren sonst wieder
+ein. Die Einfahrt (TunnelEntry) fährt der PID. Warum keiner
 der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 
 ---

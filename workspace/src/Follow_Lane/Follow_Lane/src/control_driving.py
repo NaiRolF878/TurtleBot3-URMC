@@ -2,7 +2,7 @@
 
 Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist)
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel
-Lane: PID auf den Spurfehler. Obstacle/TunnelEntry/Tunnel: /nav2/cmd_vel, auf die
+Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel, auf die
 Radgrenze skaliert.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 """
@@ -16,7 +16,10 @@ from std_msgs.msg import Float64, UInt8
 
 from Follow_Lane.src.common import ControlType, control_mode_from_msg, frange, read_params, run_node
 
-NAV2_MODES = (ControlType.Obstacle, ControlType.TunnelEntry, ControlType.Tunnel)
+# TunnelEntry mit PID: auf der 20-cm-Spur vor dem Tunnel passt der Bot fuer Nav2
+# nicht zwischen die Spurwaende.
+PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
+NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
 
 # Prueft, ob die aktive Quelle noch liefert. 20 Hz = controller_frequency in
 # nav2_params.yaml, damit nav2_cmd_timeout auf eine Reglerperiode genau greift.
@@ -44,12 +47,12 @@ class control_driving(Node):
     """Vorzeichen: lane_error > 0 heisst Spurmitte links der Bildmitte, angular.z > 0
     heisst nach links drehen (REP 103).
 
-    Nach jedem Moduswechsel zaehlen nur Befehle, die danach eintreffen; der Wechsel
-    selbst sendet sofort Null, damit turtlebot3_node nicht den letzten Befehl der
-    alten Quelle weiterfaehrt. Nach dem Wechsel in den Tunnel bleibt die
-    Nav2-Quelle mode_switch_hold lang gesperrt: bis der Cancel von
-    nav2_goal_publisher greift, faehrt controller_server sonst noch das Einfahrtsziel
-    aus der Spurmitte, also aus Kameradaten.
+    Nach jedem Wechsel des Reglers zaehlen nur Befehle, die danach eintreffen; der
+    Wechsel selbst sendet sofort Null, damit turtlebot3_node nicht den letzten Befehl
+    der alten Quelle weiterfaehrt. Lane <-> TunnelEntry behaelt den PID ohne Halt.
+    Nach dem Wechsel in den Tunnel bleibt die Nav2-Quelle mode_switch_hold lang
+    gesperrt: bis der Cancel von nav2_goal_publisher greift, faehrt controller_server
+    sonst noch ein Obstacle-Ziel aus der Spurmitte, also aus Kameradaten.
     """
 
     def __init__(self):
@@ -114,17 +117,20 @@ class control_driving(Node):
             return
 
         read_params(self, self._param_names)
+        old_mode = self.control_mode
         self.control_mode = new_mode
+        if old_mode in PID_MODES and new_mode in PID_MODES:
+            return
         self._lane_time = None
         self._nav2_time = None
-        if new_mode == ControlType.Lane:
+        if new_mode in PID_MODES:
             self._reset_pid()
         if new_mode == ControlType.Tunnel:
             self._nav2_blocked_until = now + self.mode_switch_hold
         self._publish_stop()
 
     def cb_lane_error(self, msg):
-        if not self._mode_is(ControlType.Lane):
+        if not self._mode_is(*PID_MODES):
             return
         read_params(self, self._param_names)
 
@@ -148,7 +154,7 @@ class control_driving(Node):
     def cb_watchdog(self):
         read_params(self, self._param_names)
         now = time.monotonic()
-        if self._mode_is(ControlType.Lane):
+        if self._mode_is(*PID_MODES):
             fresh = self._fresh(self._lane_time, now, self.lane_cmd_timeout)
         elif self._mode_is(*NAV2_MODES):
             fresh = self._fresh(self._nav2_time, now, self.nav2_cmd_timeout)

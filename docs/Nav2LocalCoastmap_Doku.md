@@ -27,7 +27,7 @@ flowchart LR
 
     Lane -- "LiDAR: Hindernis vorn, keine Spurlinie dazwischen" --> Obstacle
     Obstacle -- "1 s nichts in 0,2 m (270 Grad)" --> Lane
-    TunnelEntry["TunnelEntry\nNav2/MPPI, Einfahrt mit Kamera"]
+    TunnelEntry["TunnelEntry\nPID-Regler, Einfahrt mit Kamera"]
     Lane -- "Tunnel-Schild (auto)\noder Button (manuell)" --> TunnelEntry
     Obstacle -- "Tunnel-Schild (auto)\noder Button (manuell)" --> TunnelEntry
     TunnelEntry -- "LiDAR: Waende links und rechts\n(kurz vor der Oeffnung)" --> Tunnel
@@ -36,8 +36,8 @@ flowchart LR
 
 - **Lane**: der normale Betrieb, PID-Regler folgt der Spur.
 - **Obstacle**: sobald der LiDAR etwas direkt vor dem Roboter erkennt und zwischen Roboter und Objekt keine Spurlinie liegt, übernimmt Nav2, plant einen Weg darum herum und fährt ihn ab — automatisch, ohne Schild. Objekte auf der anderen Seite einer Spurlinie (z. B. Hindernisse neben dem Rückweg) lösen nichts aus. Zurück zu Lane geht es, wenn 1 s lang im Umkreis von 0,2 m nichts liegt, gemessen nach vorn, zur Seite und schräg nach hinten (270°). Der Keil direkt hinter dem Bot zählt nicht, von dort kam er gerade.
-- **TunnelEntry**: Einfahrt. Der Bot steht vor dem Tunnel; wie im Obstacle-Modus plant NavFn einen Weg 1 m voraus entlang der Spurmitte, also durch die Öffnung. Die Kamera ist hier noch erlaubt. Sieht der LiDAR links und rechts voraus die Tunnelwände näher als `tunnel_side_distance`, schaltet `switch_control` auf `Tunnel` — beim 0,5 m breiten Testtunnel ~20 cm vor der Öffnung, also bevor der Bot drin ist. Sicherheitsnetz: nach `tunnel_entry_max_distance` gefahrener Strecke ebenfalls.
-- **Tunnel**: eigener Modus für den geschlossenen Raum, ohne Kamera. Beim Umschalten werden Spurgedächtnis und beide Karten geleert und die Eingangssperre an die Öffnung gesetzt; die Tunnelkarte bleibt bis zum Austritt. Erst jetzt ist die Austrittsprüfung aktiv. Ausgelöst wird der Tunnel auf zwei Wegen:
+- **TunnelEntry**: Einfahrt. Der Bot steht vor dem Tunnel und folgt wie im Lane-Modus mit dem PID der Spur bis in die Öffnung; auf der 20-cm-Spur passt er für Nav2 nicht zwischen die Spurwände. Die Kamera ist hier noch erlaubt. Sieht der LiDAR links und rechts voraus die Tunnelwände näher als `tunnel_side_distance`, schaltet `switch_control` auf `Tunnel` — beim 0,5 m breiten Testtunnel ~20 cm vor der Öffnung, also bevor der Bot drin ist. Sicherheitsnetz: nach `tunnel_entry_max_distance` gefahrener Strecke ebenfalls.
+- **Tunnel**: eigener Modus für den geschlossenen Raum, ohne Kamera. Beim Umschalten wird das Spurgedächtnis verworfen, eine leere Spurwolke gesendet, 0,3 s später werden beide Karten geleert, und die Eingangssperre an die Öffnung gesetzt; die Tunnelkarte bleibt bis zum Austritt. Erst jetzt ist die Austrittsprüfung aktiv. Ausgelöst wird der Tunnel auf zwei Wegen:
   - **Schild:** ein Erkennungsmodell sendet `6` (`std_msgs/UInt8`) auf `/detect/sign`. Das Modell ist noch nicht gebaut. Die Schildnummern stehen in `SignType` (`common.py`), getrennt von den Modusnummern; welcher Modus aus einem Schild folgt, entscheidet `switch_control`.
   - **Button „TUNNEL STARTEN“ im Debugbild:** Jede Challenge läuft einzeln, vor Ort gibt es also keinen Auslöser für die Zustandsmaschine. Der Bot steht dabei vor der Öffnung. In TunnelEntry und Tunnel wird daraus „TUNNEL ABBRECHEN“. Nach dem automatischen Austritt springt der Button von selbst zurück.
 
@@ -109,7 +109,7 @@ flowchart TB
     NA -->|"/cmd_vel"| MOT[Motoren]
 ```
 
-Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem Modus außer Tunnel, die Spurmitte nur in Obstacle und TunnelEntry, und leert beim Wechsel auf Tunnel Gedächtnis und local_costmap. `nav2_goal_publisher` plant nur in Obstacle, TunnelEntry und Tunnel. `keepout_zone_node` und `tunnel_explorer_node` arbeiten nur im Tunnel-Modus.** Außerhalb ihres jeweiligen Modus veröffentlichen sie nichts.
+Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem Modus außer Tunnel, die Spurmitte nur in Obstacle. Beim Wechsel auf Tunnel verwirft er das Gedächtnis, sendet eine leere Wolke und leert 0,3 s später beide Costmaps. `nav2_goal_publisher` plant nur in Obstacle und Tunnel. `keepout_zone_node` und `tunnel_explorer_node` arbeiten nur im Tunnel-Modus.** Außerhalb ihres jeweiligen Modus veröffentlichen sie nichts.
 
 ---
 
@@ -119,7 +119,7 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem M
 Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `lane_max_age`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer).
 
 ### `control_driving` — die einzige Quelle für Fahrbefehle
-Wählt je nach `/control/mode` den PID (Lane) oder reicht `/nav2/cmd_vel` durch (Obstacle, Tunnel); in jedem anderen Modus Null. Würde das äußere Rad schneller als 0,22 m/s (`MAX_WHEEL_VEL`), skaliert es v und ω gemeinsam herunter, die Bahn bleibt gleich. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
+Wählt je nach `/control/mode` den PID (Lane, TunnelEntry) oder reicht `/nav2/cmd_vel` durch (Obstacle, Tunnel); in jedem anderen Modus Null. Würde das äußere Rad schneller als 0,22 m/s (`MAX_WHEEL_VEL`), skaliert es v und ω gemeinsam herunter, die Bahn bleibt gleich. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
 
 ### `notaus` — die Fahrfreigabe
 Letzte Stufe zwischen `/control/cmd_vel` und `/cmd_vel`. Erzeugt keine Bewegung, reicht nur nach Freigabe (Leertaste, rqt `drive`, `/notaus/set`) durch oder sendet Null, auch wenn 0,5 s (`cmd_timeout_s`) nichts kommt.

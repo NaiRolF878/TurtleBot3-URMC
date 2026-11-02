@@ -59,7 +59,7 @@ TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
 MODE_SOURCE = {
     ControlType.Lane:     'PID',
     ControlType.Obstacle: 'Nav2/MPPI',
-    ControlType.TunnelEntry: 'Nav2/MPPI',
+    ControlType.TunnelEntry: 'PID',
     ControlType.Tunnel:   'Nav2/MPPI',
 }
 

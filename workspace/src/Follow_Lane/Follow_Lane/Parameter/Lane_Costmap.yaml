@@ -1,6 +1,6 @@
 /lane_costmap_node:
   ros__parameters:
-    # Spurgedaechtnis fuer die lane_layer und Spurmitte (nur Obstacle und TunnelEntry), in jedem
+    # Spurgedaechtnis fuer die lane_layer und Spurmitte (nur Obstacle), in jedem
     # Modus ausser Tunnel (Kamera dort verboten), siehe Docstring in lane_costmap_node.py.
     # Pixel -> Meter und Reichweite kommen aus Parameter/bev.yaml (dieselbe Datei,
     # mit der ingress_node /lokal/bev erzeugt). Wurde die Kamera verstellt, die

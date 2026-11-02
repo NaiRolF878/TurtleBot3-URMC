@@ -140,8 +140,8 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
 - [ ] In `rqt_image_view` (Debugbild) einmal **„Publish click location“**
       anhaken.
 - [ ] Bot vor die Öffnung stellen, im Debugbild auf **TUNNEL STARTEN**
-      klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot fährt mit
-      Kamera auf die Öffnung zu.
+      klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot folgt mit
+      Kamera und PID der Spur auf die Öffnung zu.
 - [ ] Kurz vor der Öffnung wechselt es auf `Tunnel`: statt des Kamerabilds
       „Kamera aus (Tunnel)“, `ros2 topic hz /lokal/bev` verstummt, die
       Draufsicht zeigt die geleerte Tunnelkarte (grau = unbekannt).

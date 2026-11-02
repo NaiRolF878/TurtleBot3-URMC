@@ -2,13 +2,12 @@
 
 Ein:  /control/mode, TF odom <- base_footprint
 Aus:  /detect/tunnel_entrance_obstacle (PointCloud2, odom), /tunnel/entrance_pose
-      (PoseStamped); leert beim Tunnel-Eintritt die global_costmap.
+      (PoseStamped)
 """
 import math
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -67,8 +66,6 @@ class keepout_zone_node(Node):
         self.pub_entrance = self.create_publisher(
             PointCloud2, self.get_parameter('output_topic').value, 1)
         self.pub_entrance_pose = self.create_publisher(PoseStamped, '/tunnel/entrance_pose', 1)
-        self.clear_global_costmap = self.create_client(
-            ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
 
         # --- Timer ---
         self.timer = self.create_timer(
@@ -96,8 +93,6 @@ class keepout_zone_node(Node):
         if was_tunnel != is_tunnel:
             self.entrance_pose = None
             self._wall_active = False
-        if is_tunnel and not was_tunnel:
-            self._clear_global_costmap()
 
     def cb_timer(self):
         if self.control_mode != ControlType.Tunnel:
@@ -130,14 +125,6 @@ class keepout_zone_node(Node):
         self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, self._wall_points()))
 
     # --- Hilfsmethoden ---
-
-    def _clear_global_costmap(self):
-        if not self.clear_global_costmap.service_is_ready():
-            self.get_logger().warn(
-                'global_costmap-Clear-Service nicht erreichbar -- laeuft planner_server?',
-                throttle_duration_sec=5.0)
-            return
-        self.clear_global_costmap.call_async(ClearEntireCostmap.Request())
 
     def _distance_past_entrance(self):
         """Wie weit der Bot in Einfahrtrichtung vor der Eintrittslinie steht (m)."""

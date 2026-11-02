@@ -4,8 +4,9 @@ Ein:  /detect/lane_mask (LaneMask, BEV-Pixel), /lokal/bev_view (Sichtmaske), /sc
       /control/mode
 Aus:  /detect/lane_obstacles (PointCloud2 aller gemerkten Linienzellen, fuer die
       lane_layer der Costmaps und den Linienfilter von switch_control),
-      /lane/center_path (Path im odom-Frame, nur in Obstacle und TunnelEntry)
-Im Tunnel nichts: die Kamera ist dort laut Reglement verboten.
+      /lane/center_path (Path im odom-Frame, nur in Obstacle)
+Im Tunnel nichts ausser einer leeren Wolke beim Eintritt: die Kamera ist dort laut
+Reglement verboten.
 """
 import math
 import os
@@ -36,9 +37,12 @@ from Follow_Lane.src.common import (
     irange, pose2d_from_transform, read_params, run_node, scan_points, transform_points)
 
 EXTRINSICS = os.path.join('camera_info', 'extrinsics_800x600.yaml')
-CENTER_PATH_MODES = (ControlType.Obstacle, ControlType.TunnelEntry)
+CENTER_PATH_MODES = (ControlType.Obstacle,)
 # LiDAR-Scan aelter als das (s) taugt nicht mehr fuer den Sichtschatten.
 SCAN_MAX_AGE_S = 0.5
+# So lange (s) nach der leeren Wolke werden die Costmaps geleert: bis dahin ist sie in
+# beiden lane_layer angekommen.
+COSTMAP_CLEAR_DELAY_S = 0.3
 
 
 def _bin_medians(pts, x_min, x_max, bin_size):
@@ -162,10 +166,14 @@ class lane_costmap_node(Node):
 
     In jedem Modus ausser Tunnel, damit der Korridor beim Umschalten auf Obstacle
     schon in der Karte steht. Vor der ersten /control/mode nichts, damit ein Neustart
-    im Tunnel keine Kameradaten durchlaesst. Beim Tunnel-Eintritt wird das Gedaechtnis
-    verworfen und die local_costmap geleert.
+    im Tunnel keine Kameradaten durchlaesst.
 
-    Die Spurmitte (nur Obstacle und TunnelEntry) liegt im odom-Frame zum Bildzeitpunkt und ist
+    Beim Tunnel-Eintritt wird das Gedaechtnis verworfen und eine leere Wolke gesendet,
+    COSTMAP_CLEAR_DELAY_S spaeter werden beide Costmaps geleert. Die Reihenfolge zaehlt:
+    ein lane_layer behaelt die letzte Wolke im Puffer und traegt sie nach dem Leeren
+    wieder ein; eine leere Wolke allein loescht nichts aus der Karte.
+
+    Die Spurmitte (nur Obstacle) liegt im odom-Frame zum Bildzeitpunkt und ist
     das Ziel, zu dem nav2_goal_publisher den Bahnplaner rechnen laesst.
 
     Pixel -> Meter ueber Parameter/bev.yaml: X vorwaerts ab Radachse, Y nach links, am
@@ -228,8 +236,18 @@ class lane_costmap_node(Node):
             PointCloud2, self.get_parameter('output_topic').value, 1)
         self.pub_center_path = self.create_publisher(
             Path, self.get_parameter('center_path_topic').value, 1)
-        self.clear_local_costmap = self.create_client(
-            ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
+        self.clear_clients = {
+            'local_costmap': (self.create_client(
+                ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap'),
+                'controller_server'),
+            'global_costmap': (self.create_client(
+                ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap'),
+                'planner_server'),
+        }
+
+        # --- Timer ---
+        self.clear_timer = self.create_timer(COSTMAP_CLEAR_DELAY_S, self.cb_clear_timer)
+        self.clear_timer.cancel()
 
         # --- Zustand ---
         self.tf_buffer = Buffer()
@@ -238,6 +256,7 @@ class lane_costmap_node(Node):
         self.memory = {}               # (ix, iy) im odom-Raster -> [ist_linie, gegenstimmen]
         self._widths = deque(maxlen=self.get_parameter('center_width_history').value)
         self._size_error_logged = False
+        self._last_cloud_stamp = None
         self._view_points = None       # sichtbare BEV-Stuetzpunkte (K, 2) in robot_frame
         self._scan = None
         self._scan_time = None
@@ -257,7 +276,8 @@ class lane_costmap_node(Node):
         self.control_mode = new_mode
         if entering_tunnel:
             self.memory.clear()
-            self._clear_local_costmap()
+            self._publish_empty_cloud()
+            self.clear_timer.reset()
 
     def cb_bev_view(self, msg):
         if self._bev is None:
@@ -273,6 +293,10 @@ class lane_costmap_node(Node):
         vs, us = np.nonzero(view[::step, :msg.width:step] > 0)
         self._view_points = np.column_stack(
             bev_pixels_to_ground(self._bev, us * step, vs * step))
+
+    def cb_clear_timer(self):
+        self.clear_timer.cancel()
+        self._clear_costmaps()
 
     def cb_scan(self, scan):
         self._scan = scan
@@ -343,14 +367,25 @@ class lane_costmap_node(Node):
             self.get_logger().warn(f'Extrinsik nicht ladbar ({e}) -- Kamera bei x=0 angenommen.')
             return (0.0, 0.0)
 
-    def _clear_local_costmap(self):
+    def _clear_costmaps(self):
         # Leert alle Layer; LiDAR und Eingangssperre fuellen sich im naechsten Zyklus neu.
-        if not self.clear_local_costmap.service_is_ready():
-            self.get_logger().error(
-                'local_costmap-Clear-Service nicht erreichbar -- alte Spurwaende bleiben '
-                'in der Karte. Laeuft controller_server?')
+        for costmap, (client, server) in self.clear_clients.items():
+            if not client.service_is_ready():
+                self.get_logger().error(
+                    f'{costmap}-Clear-Service nicht erreichbar -- alte Spurwaende bleiben '
+                    f'in der Karte. Laeuft {server}?')
+                continue
+            client.call_async(ClearEntireCostmap.Request())
+
+    def _publish_empty_cloud(self):
+        # Stempel der letzten Wolke: zu dem hat die Costmap sicher eine TF. Ohne
+        # bisherige Wolke steht auch nichts im Puffer.
+        if self._last_cloud_stamp is None:
             return
-        self.clear_local_costmap.call_async(ClearEntireCostmap.Request())
+        header = Header()
+        header.stamp = self._last_cloud_stamp
+        header.frame_id = self.robot_frame
+        self.pub_lane_obstacles.publish(point_cloud2.create_cloud_xyz32(header, []))
 
     def _pixels_to_ground(self, xs, ys, stride):
         """Linienpixel -> (forward, lateral) in Metern, base_footprint."""
@@ -445,6 +480,7 @@ class lane_costmap_node(Node):
         header.stamp = stamp
         header.frame_id = self.robot_frame
         self.pub_lane_obstacles.publish(point_cloud2.create_cloud_xyz32(header, points))
+        self._last_cloud_stamp = stamp
 
     def _update_center_path(self, yellow, white, robot_pose, stamp):
         half_width = float(np.median(self._widths)) / 2.0 if self._widths else None
