@@ -77,10 +77,10 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
 
 - [ ] `nav2_obstacle.sh` starten, noch **nicht** freigeben (keine Leertaste).
 - [ ] Ein Klebeband quer in gemessenem Abstand vor den Bot legen, z. B. 40 cm
-      vor der Radachse. In RViz das Display `Spurgedaechtnis (nicht im Tunnel)`
-      bzw. die Draufsicht `/nav2/view` ansehen: Das Band muss dort
-      erscheinen, wo es real liegt. Die Draufsicht hat einen 0,5-m-Maßstab
-      unten rechts.
+      vor der Radachse. In der Draufsicht `/nav2/view` muss es als weiße Linie
+      dort erscheinen, wo es real liegt. Die Draufsicht hat einen
+      0,5-m-Maßstab unten rechts. Rot (Wand) wird ein Querband bewusst nicht:
+      Wand werden nur die gelbe und die weiße Spurlinie.
 - [ ] Bot auf die Spur stellen: Beide Linien müssen nach ~3 Bildern als
       blockierte Zellreihen (in `/nav2/view` rot) erscheinen.
 - [ ] Bot von Hand ein Stück vorschieben: Die Linien neben und hinter ihm

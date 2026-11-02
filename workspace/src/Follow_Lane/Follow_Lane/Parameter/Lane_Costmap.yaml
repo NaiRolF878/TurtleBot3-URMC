@@ -19,6 +19,15 @@
     shadow_radius: 0.03          # m, Sichtschatten je LiDAR-Punkt
     shadow_margin: 0.05          # m
 
+    # Wand werden nur gelbe und weisse Spurlinie: jede wird vom Bot aus verfolgt,
+    # nur Pixel bis line_margin um ihre Mitte zaehlen (Querlinien, Papier, helle
+    # Flaechen nicht). Pixel am Hindernis und in seinem LiDAR-Schatten fallen weg.
+    line_margin: 0.04            # m, halbe Klebebandbreite (~2,5 cm) + Reserve
+    trace_step: 0.03             # m
+    trace_max_turn_deg: 35.0     # je Schritt; 35 Grad auf 3 cm folgt Kurven bis r ~5 cm
+    trace_max_gap: 0.09          # m, laengere Luecken beenden die Linie
+    trace_parallel_deg: 60.0     # knickt eine Linie gegen die andere staerker ab, endet sie
+
     # Spurmitte: keine Spurbreite einstellen, sie wird laufend gemessen.
     center_path_topic: /lane/center_path
     center_bin_size: 0.05        # m, Tiefe eines Streifens

@@ -38,8 +38,9 @@ lane_costmap_node --Spurwaende, Spurmitte--> nav2_goal_publisher --Ziel/Pfad--> 
 Spurerkennung in LAB (detect_lane_nav2) -> PID in control_driving. Kalibrierung:
 `Kalibrierung_Checkliste.md`.
 
-**Hindernisse auf der Strecke (Obstacle).** lane_costmap_node merkt sich die Spurlinien
-als virtuelle Waende, NavFn plant zwischen ihnen um das Hindernis herum, MPPI faehrt
+**Hindernisse auf der Strecke (Obstacle).** lane_costmap_node merkt sich die gelbe und
+die weisse Spurlinie als virtuelle Waende (verfolgt, Querlinien und helle Flaechen
+nicht), NavFn plant zwischen ihnen um das Hindernis herum, MPPI faehrt
 den Weg ab. Kollision ueber den Umriss des Burgers, unabhaengig von der Spurbreite.
 
 **Tunnel (TunnelEntry, Tunnel).** Einfahrt mit Kamera und PID auf der 20-cm-Spur

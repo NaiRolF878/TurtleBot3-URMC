@@ -38,7 +38,8 @@ class switch_control(Node):
     hinter dem Bot bleibt aussen vor: aus dieser Richtung kam er gerade.
 
     Die Linien kommen aus dem Spurgedaechtnis von lane_costmap_node, kennen also auch
-    Linien neben und hinter dem Bot, die die Kamera gerade nicht sieht. Ist es aelter
+    Linien neben und hinter dem Bot, die die Kamera gerade nicht sieht. Es enthaelt
+    nur die gelbe und die weisse Spurlinie: eine Querlinie vor dem Hindernis trennt nicht. Ist es aelter
     als lane_max_age, zaehlt jeder Punkt (lieber zu oft Obstacle als ein Hindernis
     uebersehen). Entfernungen und Winkel gelten ab dem LiDAR, die Linienpruefung ab
     der Bot-Mitte (base_footprint).
