@@ -22,6 +22,14 @@ from Follow_Lane.src.common import (
     ControlType, control_mode_from_msg, frange, irange, read_params, run_node,
     yaw_from_quaternion)
 
+# Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar. Gemeint sind
+# einzelne LiDAR-Strahlen ins Unbekannte (1-2 Zellen): Waende sind in der Costmap schon
+# um robot_radius aufgeblasen, eine Engstelle fuer die Bot-MITTE darf schmal sein (am
+# Tunneleingang gemessen ~20 cm).
+MIN_PASSAGE_M = 0.075
+# Liegt die naechste befahrbare Flaeche weiter vom Bot weg, steht er in keiner.
+MAX_START_GAP_M = 0.15
+
 
 class tunnel_explorer_node(Node):
     """Frontier-Zellen der global_costmap (frei, direkt neben Unbekanntem), zu
@@ -45,7 +53,10 @@ class tunnel_explorer_node(Node):
         self.declare_parameter('recompute_rate', 1.0, frange(0.2, 10.0))
         self.declare_parameter('arrival_radius', 0.3, frange(0.05, 2.0))
         self.declare_parameter('stall_timeout', 10.0, frange(1.0, 60.0))
-        self.declare_parameter('free_cost_threshold', 50, irange(1, 99))
+        # OccupancyGrid-Skala 0..100 (99 inscribed, 100 lethal): 99 = alles, was NavFn
+        # befahren darf. Mit 50 galt im ~50 cm breiten Tunnel durch die Inflation keine
+        # Zelle als frei, und der Explorer fand nie ein Ziel.
+        self.declare_parameter('free_cost_threshold', 99, irange(1, 100))
         # In Zellen der global_costmap, haengt also an deren resolution.
         self.declare_parameter('min_frontier_cluster_cells', 6, irange(1, 1000))
         self.declare_parameter('entrance_weight', 1.0, frange(0.0, 10.0))
@@ -182,18 +193,41 @@ class tunnel_explorer_node(Node):
         candidate = self._pick_frontier(self.latest_costmap, robot_pose, self.entrance_pose)
         if candidate is None:
             self.get_logger().warn(
-                'Keine Frontier-Kandidaten gefunden -- Tunnel schon vollstaendig erkundet '
-                'oder Karte noch zu leer.', throttle_duration_sec=5.0)
+                'Kein erreichbares Ziel im Tunnel -- am weitesten Punkt angekommen, Karte '
+                'noch zu leer oder der Bot steht in keiner befahrbaren Flaeche.',
+                throttle_duration_sec=5.0)
             return
-        self._request_path(candidate)
+        x, y, kind = candidate
+        self.get_logger().info(f'Ziel ({kind}): x={x:.2f} y={y:.2f}', throttle_duration_sec=2.0)
+        self._request_path((x, y))
 
     def _pick_frontier(self, grid_msg, robot_pose, entrance_pose):
+        """Ziel (x, y, art) im odom-Frame oder None. art: 'Frontier' oder, wenn es im
+        Tunnel keine erreichbare gibt, 'weitester Punkt' (moeglichst weit vom Eingang)."""
         info = grid_msg.info
         h, w = info.height, info.width
         grid = np.asarray(grid_msg.data, dtype=np.int16).reshape(h, w)
 
         free = (grid >= 0) & (grid < self.free_cost_threshold)
         unknown = grid == -1
+
+        # Nur Flaechen, durch die der Bot passt: Opening entfernt alles schmaler als
+        # MIN_PASSAGE_M, z.B. einzelne LiDAR-Strahlen ins Unbekannte, an deren Ende
+        # sonst ein unerreichbares Ziel lag. Davon nur, was mit dem Bot verbunden ist.
+        k = max(1, int(round(MIN_PASSAGE_M / info.resolution)))
+        free = cv2.morphologyEx(free.astype(np.uint8), cv2.MORPH_OPEN,
+                                np.ones((k, k), np.uint8)).astype(bool)
+        if not np.any(free):
+            return None
+        _, regions = cv2.connectedComponents(free.astype(np.uint8), connectivity=8)
+        rows_f, cols_f = np.nonzero(free)
+        rc = (robot_pose[0] - info.origin.position.x) / info.resolution - 0.5
+        rr = (robot_pose[1] - info.origin.position.y) / info.resolution - 0.5
+        nearest = np.argmin((cols_f - rc) ** 2 + (rows_f - rr) ** 2)
+        if math.hypot(cols_f[nearest] - rc, rows_f[nearest] - rr) * info.resolution \
+                > MAX_START_GAP_M:
+            return None
+        free = regions == regions[rows_f[nearest], cols_f[nearest]]
 
         padded_unknown = np.pad(unknown, 1, mode='constant', constant_values=False)
         neighbor_unknown = np.zeros_like(unknown)
@@ -210,9 +244,6 @@ class tunnel_explorer_node(Node):
         ahead = ((xs[None, :] - ex) * math.cos(eyaw) + (ys[:, None] - ey) * math.sin(eyaw)) > 0.0
 
         frontier = (free & neighbor_unknown & ahead).astype(np.uint8)
-        if not np.any(frontier):
-            return None
-
         num_labels, labels = cv2.connectedComponents(frontier, connectivity=8)
 
         best_score = None
@@ -222,8 +253,11 @@ class tunnel_explorer_node(Node):
             if rows.size < self.min_frontier_cluster_cells:
                 continue
 
-            world_x = info.origin.position.x + (float(np.mean(cols)) + 0.5) * info.resolution
-            world_y = info.origin.position.y + (float(np.mean(rows)) + 0.5) * info.resolution
+            # Die Zelle des Clusters, die seinem Schwerpunkt am naechsten liegt: der
+            # Schwerpunkt selbst kann im Unbekannten liegen, dahin plant NavFn nicht.
+            i = np.argmin((cols - cols.mean()) ** 2 + (rows - rows.mean()) ** 2)
+            world_x = info.origin.position.x + (cols[i] + 0.5) * info.resolution
+            world_y = info.origin.position.y + (rows[i] + 0.5) * info.resolution
             dist_from_entrance = math.hypot(world_x - entrance_pose[0], world_y - entrance_pose[1])
             dist_from_robot = math.hypot(world_x - robot_pose[0], world_y - robot_pose[1])
             score = (self.entrance_weight * dist_from_entrance
@@ -231,8 +265,21 @@ class tunnel_explorer_node(Node):
 
             if best_score is None or score > best_score:
                 best_score = score
-                best_point = (world_x, world_y)
-        return best_point
+                best_point = (world_x, world_y, 'Frontier')
+        if best_point is not None:
+            return best_point
+
+        # Keine Frontier, z.B. weil der LiDAR den ganzen Tunnel schon sieht: dann so weit
+        # wie moeglich vom Eingang weg, zum weitesten erreichbaren Punkt im Tunnel.
+        rows, cols = np.nonzero(free & ahead)
+        if rows.size == 0:
+            return None
+        xs_f = info.origin.position.x + (cols + 0.5) * info.resolution
+        ys_f = info.origin.position.y + (rows + 0.5) * info.resolution
+        i = np.argmax(np.hypot(xs_f - ex, ys_f - ey))
+        if math.hypot(xs_f[i] - robot_pose[0], ys_f[i] - robot_pose[1]) <= self.arrival_radius:
+            return None
+        return (xs_f[i], ys_f[i], 'weitester Punkt')
 
     def _request_path(self, target_xy):
         if not self.plan_client.server_is_ready():
