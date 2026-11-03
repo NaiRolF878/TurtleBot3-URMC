@@ -3,8 +3,7 @@
 # gespeicherte Karte, kein AMCL, kein SLAM: beide Costmaps fahren im odom-Frame mit,
 # fuer die kurzen Abschnitte reicht reine Odometrie.
 #
-# 1) Obstacle-Modus und Tunnel-Einfahrt (TunnelEntry, bis kurz vor die Oeffnung):
-#    nav2_goal_publisher laesst planner_server etwa jede Sekunde einen
+# 1) Obstacle-Modus: nav2_goal_publisher laesst planner_server etwa jede Sekunde einen
 #    Weg zu einem Punkt ~1 m voraus auf der Spurmitte rechnen, um die
 #    LiDAR-Hindernisse herum und zwischen den Spurlinien (lane_layer, gespeist aus dem
 #    Spurgedaechtnis von lane_costmap_node). MPPI faehrt ihn ab und prueft dabei
@@ -14,15 +13,15 @@
 # 2) Tunnel-Exploration: tunnel_explorer_node sucht auf der global_costmap
 #    Frontier-Punkte (Rand zwischen bekannt-frei und unbekannt) und laesst
 #    planner_server (allow_unknown:false, plant also nie ins Unbekannte) einen Pfad
-#    dorthin rechnen. Die Kamera ist im Tunnel laut Reglement verboten: beide
-#    lane_layer bleiben leer (lane_costmap_node sendet nichts), die Costmaps werden
-#    beim Wechsel von TunnelEntry nach Tunnel geleert und sehen danach nur LiDAR und
-#    Eingangssperre; die Tunnelkarte bleibt bis zum Austritt.
+#    dorthin rechnen. Die Kamera ist im Tunnel laut Reglement verboten: beim Wechsel
+#    von TunnelEntry nach Tunnel sendet lane_costmap_node eine leere Wolke und leert
+#    danach beide Costmaps; sie sehen dann nur LiDAR und Eingangssperre, die
+#    Tunnelkarte bleibt bis zum Austritt. Die Einfahrt (TunnelEntry) faehrt der PID.
 #
 # Fahrbefehle: controller_server sendet auf /nav2/cmd_vel (Remap in
-# nav2_obstacle.launch.py). control_driving reicht sie nur in Obstacle, TunnelEntry
-# und Tunnel unveraendert weiter; die Grenzen hier (vx_max, wz_max) gelten also
-# direkt fuer den Bot.
+# nav2_obstacle.launch.py). control_driving reicht sie nur in Obstacle und Tunnel
+# weiter und skaliert v und omega gemeinsam, wenn das aeussere Rad
+# schneller als 0,22 m/s wuerde (MAX_WHEEL_VEL).
 #
 # Warum MPPI und nicht DWB: NavFn plant fuer einen Punkt mit robot_radius und kennt
 # die Form des Bots nicht, der Pfad ist also nur eine grobe Vorgabe. MPPIs
@@ -71,6 +70,8 @@ controller_server:
       vx_std: 0.2
       vy_std: 0.0
       wz_std: 0.4
+      # Max. Geschwindigkeit der Motoren (TurtleBot3-Handbuch), gleicher Wert wie
+      # MAX_WHEEL_VEL in control_driving.py.
       vx_max: 0.22
       vx_min: -0.1
       vy_max: 0.0
@@ -342,8 +343,8 @@ local_costmap:
       # hier). clearing:true raeumt per Strahl vom Bot aus frei und traegt danach
       # alle Punkte wieder ein: gemerkte Linien bleiben, vergessene verschwinden.
       # Muss vor inflation_layer stehen (siehe CostCritic). Im Tunnel-Modus leer:
-      # lane_costmap_node sendet dort nichts und leert beim Eintritt die Karte
-      # (Kamera laut Reglement verboten).
+      # lane_costmap_node sendet beim Eintritt eine leere Wolke, leert danach die
+      # Karte und sendet dann nichts mehr (Kamera laut Reglement verboten).
       lane_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true

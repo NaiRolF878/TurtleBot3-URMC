@@ -1,7 +1,7 @@
-"""Gibt Nav2 im Obstacle-, TunnelEntry- und Tunnel-Modus die Fahrt vor; im Lane-Modus ruht er.
+"""Gibt Nav2 im Obstacle- und Tunnel-Modus die Fahrt vor; sonst ruht er.
 
-Ein:  /control/mode, /lane/center_path (Obstacle, TunnelEntry), /tunnel/explore_path (Tunnel), TF
-Aus:  ComputePathToPose an planner_server (Obstacle, TunnelEntry), FollowPath an controller_server,
+Ein:  /control/mode, /lane/center_path (Obstacle), /tunnel/explore_path (Tunnel), TF
+Aus:  ComputePathToPose an planner_server (Obstacle), FollowPath an controller_server,
       /nav2/active_path (Path, latched: der Pfad, dem Nav2 gerade folgt; leer, wenn keiner),
       /nav2/status (String, fuer nav2_view)
 """
@@ -25,7 +25,7 @@ from Follow_Lane.src.common import (
     yaw_from_quaternion)
 
 # Modi, in denen nav2_goal_publisher selbst ein Ziel setzt und planen laesst.
-PLAN_MODES = (ControlType.Obstacle, ControlType.TunnelEntry)
+PLAN_MODES = (ControlType.Obstacle,)
 ACTIVE_MODES = PLAN_MODES + (ControlType.Tunnel,)
 
 # Antwortet planner_server so lange nicht, gilt die Anfrage als verloren.
@@ -46,15 +46,12 @@ GOAL_STATUS_TEXT = {
 
 
 class nav2_goal_publisher(Node):
-    """Obstacle und TunnelEntry: Ziel ist ein Punkt goal_distance voraus auf der Spurmitte von
+    """Obstacle: Ziel ist ein Punkt goal_distance voraus auf der Spurmitte von
     lane_costmap_node (ueber ihr Ende hinaus in ihrer Richtung verlaengert). Ist sie
     aelter als center_path_max_age, liegt das Ziel geradeaus. planner_server (NavFn)
     rechnet auf der global_costmap (LiDAR + Spurgedaechtnis) einen Weg darum herum,
     controller_server (MPPI) faehrt ihn ab. Alle replan_period wird neu geplant, damit
     neu gesehene Hindernisse und Linien einfliessen.
-
-    In TunnelEntry fuehrt die Spurmitte zur Tunneloeffnung; NavFn plant durch sie
-    hindurch, soweit der LiDAR schon hineinsieht.
 
     Tunnel: der Pfad von tunnel_explorer_node.
 

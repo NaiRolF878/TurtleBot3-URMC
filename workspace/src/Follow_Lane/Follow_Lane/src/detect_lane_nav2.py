@@ -3,10 +3,11 @@
 Ein:  /lokal/bev, /control/mode
 Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
       /detect/lane_mask (LaneMask fuer lane_costmap_node)
-Kopie von detect_lane fuer den Nav2-Zweig; im Tunnel pausiert (Reglement).
+Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 """
 import array
 import os
+import time
 
 import cv2
 import numpy as np
@@ -25,7 +26,8 @@ from Follow_Lane.src.common import (
 
 # Kantenlaenge des Erosionskerns (px), entfernt Einzelpixel aus den Farbmasken.
 ERODE_KERNEL = 5
-# Ersatzspalte als Anteil der Bildbreite, wenn eine Linie nicht gefunden wird.
+# Ersatzspalte als Anteil der Bildbreite, wenn eine Linie weder gefunden noch
+# gehalten wird.
 WHITE_ALTERNATIVE = 0.65
 YELLOW_ALTERNATIVE = 0.35
 # Kreuzungserkennung: Mindestlaenge einer Kante (px), Konturen kleiner als
@@ -90,6 +92,11 @@ class detect_lane(Node):
         # Bereich bis self_mask_x_cm vor der Radachse und +-self_mask_y_cm ausblenden.
         self.declare_parameter('self_mask_x_cm', 9.0, frange(0.0, 30.0))
         self.declare_parameter('self_mask_y_cm', 4.0, frange(0.0, 30.0))
+        # --- Linien-Tracking ---
+        # Hoechstens so weit (cm) darf sich eine Linie von Bild zu Bild bewegen.
+        self.declare_parameter('line_max_jump_cm', 5.0, frange(0.5, 40.0))
+        # So lange (s) wird die letzte Position einer verlorenen Linie gehalten.
+        self.declare_parameter('line_hold_time', 1.0, frange(0.0, 10.0))
         self._param_names = [
             'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
             'lab_b_white_l', 'lab_b_white_h',
@@ -98,6 +105,7 @@ class detect_lane(Node):
             'detection_row_factor', 'min_lane_width',
             'clahe_clip_limit', 'clahe_tile_grid_size', 'lane_mask_stride',
             'line_max_width_cm', 'line_min_area_cm2', 'self_mask_x_cm', 'self_mask_y_cm',
+            'line_max_jump_cm', 'line_hold_time',
         ]
         try:
             self._bev = bev_geometry.load_bev_spec(
@@ -129,6 +137,10 @@ class detect_lane(Node):
         self.is_running = False
         self.img_height = None   # Groesse des Bilds, pro Frame gesetzt
         self.img_width = None
+        # Je Linie (Spalte, Zeitpunkt der letzten Detektion) oder None; eigener Logger
+        # je Linie, damit die gedrosselten Meldungen sich nicht gegenseitig verschlucken.
+        self._anchor = {'Gelb': None, 'Weiss': None}
+        self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
 
         self.get_logger().info('Started detect_lane Node (Nav2-Zweig).')
 
@@ -177,11 +189,14 @@ class detect_lane(Node):
         width = self.img_width
         white_alternative = int(width * WHITE_ALTERNATIVE)
         yellow_alternative = int(width * YELLOW_ALTERNATIVE)
+        now = time.monotonic()
 
         # Gelb fest am konfigurierten detection_row_factor
         center_yellow_y = int(self.img_height * self.detection_row_factor)
-        center_yellow_x = self.get_x_for_driving(
-            mask_yellow, center_yellow_y, yellow_alternative, left_line=True)
+        raw_yellow = self.get_x_for_driving(
+            mask_yellow, center_yellow_y, left_line=True,
+            last_known=self.anchor_column('Gelb', now))
+        center_yellow_x = self.track_line('Gelb', raw_yellow, yellow_alternative, now)
 
         # Weisse Maske: alles links von gelb + min_lane_width ausblenden
         mask_white_filtered = mask_white.copy()
@@ -189,15 +204,17 @@ class detect_lane(Node):
         mask_white_filtered[:, :corridor_start] = 0
 
         # Weiss sucht weiter unten, falls nicht gefunden
+        last_white = self.anchor_column('Weiss', now)
         detection_row_factor = self.detection_row_factor
         center_white_y = int(self.img_height * detection_row_factor)
-        center_white_x = self.get_x_for_driving(
-            mask_white_filtered, center_white_y, white_alternative, left_line=False)
-        while center_white_x == white_alternative and detection_row_factor <= 0.95:
+        raw_white = self.get_x_for_driving(
+            mask_white_filtered, center_white_y, left_line=False, last_known=last_white)
+        while raw_white is None and detection_row_factor <= 0.95:
             detection_row_factor += 0.05
             center_white_y = int(self.img_height * detection_row_factor)
-            center_white_x = self.get_x_for_driving(
-                mask_white_filtered, center_white_y, white_alternative, left_line=False)
+            raw_white = self.get_x_for_driving(
+                mask_white_filtered, center_white_y, left_line=False, last_known=last_white)
+        center_white_x = self.track_line('Weiss', raw_white, white_alternative, now)
 
         if center_white_x <= center_yellow_x:
             if center_white_x > int(width * 0.4):
@@ -476,25 +493,68 @@ class detect_lane(Node):
                                 tileGridSize=(tile_size, tile_size))
         return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
 
-    def get_x_for_driving(self, mask, distance, no_lane_value, left_line):
-        """Spalte der Linienkante um Zeile distance (+/-50 Zeilen, Median), sonst
-        no_lane_value. left_line: rechte Kante der Linie (zur Spur hin), sonst linke."""
+    # Linien-Tracking entsprechend zur Duckiebot Challenge (DuckieRace,
+    # intersection_handling) umgebaut: naechste Kante zur letzten Position, verlorene
+    # Linie halten, Sprung pro Bild begrenzen. Zusaetzlich: Haltezeit, Sprung in cm.
+    # Frage an FaFelF: Gab es einen Grund, warum du dies anders geloest hast?
+
+    def anchor_column(self, name, now):
+        """Letzte Spalte der Linie, None ohne Detektion in den letzten line_hold_time s."""
+        anchor = self._anchor[name]
+        if anchor is not None and now - anchor[1] > self.line_hold_time:
+            self._anchor[name] = anchor = None
+        return None if anchor is None else anchor[0]
+
+    def track_line(self, name, raw, fallback, now):
+        """Endgueltige Spalte der Linie aus der Detektion raw (None = keine Kante)."""
+        log = self._line_log[name]
+        last = self.anchor_column(name, now)
+        if raw is None:
+            if last is None:
+                log.warn(f'keine Kanten -- Ersatzspalte {fallback}', throttle_duration_sec=2.0)
+                return fallback
+            log.warn(f'keine Kanten -- halte letzte Position {last}', throttle_duration_sec=2.0)
+            return last
+        max_jump = self.max_jump_px()
+        if last is not None and max_jump is not None and abs(raw - last) > max_jump:
+            clamped = last + int(np.sign(raw - last) * max_jump)
+            log.warn(f'Sprung {abs(raw - last)} px -- begrenzt auf {clamped}',
+                     throttle_duration_sec=2.0)
+            raw = clamped
+        self._anchor[name] = (raw, now)
+        return raw
+
+    def max_jump_px(self):
+        """line_max_jump_cm in Pixeln, None ohne bev.yaml (dann unbegrenzt)."""
+        if self._bev is None or (self.img_height, self.img_width) != (
+                self._bev['height'], self._bev['width']):
+            return None
+        return max(1, int(round(self.line_max_jump_cm / 100.0 / self._bev['res'])))
+
+    def get_x_for_driving(self, mask, distance, left_line, last_known=None):
+        """Spalte der Linienkante um Zeile distance (+/-50 Zeilen, Median), None ohne
+        Kante. Gesucht wird nur die Kante zur Spur hin: bei left_line (gelb) die rechte,
+        sonst die linke. Je Zeile die naechste zu last_known, ohne last_known die
+        aeusserste."""
         grad = cv2.Sobel(mask, cv2.CV_16S, 1, 0, ksize=3, scale=1, delta=0,
                          borderType=cv2.BORDER_DEFAULT)
-        # Betrag, sonst enthaelt th1 nur linke Kanten (rechte sind negativ) und [-1]/[0] liefern dasselbe
-        abs_grad = cv2.convertScaleAbs(grad)
-        _, th1 = cv2.threshold(abs_grad, 127, 255, cv2.THRESH_BINARY)
+        # Rechte Kante = hell -> dunkel (negativ), linke = dunkel -> hell (positiv).
+        # Mit beiden Kantenarten rastet das Tracking auf der falschen Kante derselben Linie ein.
+        edges = (-grad if left_line else grad) > 127
 
         a = []
         for row in range(max(0, distance - 50), min(len(mask), distance + 50)):
-            hits = np.where(th1[row] == 255)[0]
+            hits = np.flatnonzero(edges[row])
             if hits.size == 0:
                 continue
-            a.append(hits[-1] if left_line else hits[0])
+            if last_known is not None:
+                a.append(hits[np.argmin(np.abs(hits - last_known))])
+            else:
+                a.append(hits[-1] if left_line else hits[0])
 
         if len(a) > 10:
             return int(np.median(a))
-        return no_lane_value
+        return None
 
     # --- Beenden ---
 

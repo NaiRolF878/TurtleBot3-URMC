@@ -64,7 +64,7 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
     L = Helligkeit, A = grün (<128) bis rot (>128), B = blau (<128) bis gelb
     (>128), 128 = farblos. **Gelb** erkennt man am hohen B (`lab_b_yellow_l`
     150), **Weiß** am hohen L bei A/B nahe 128 (`lab_l_white_l` 200). Die
-    Messwerte vom 22.10. stehen als Kommentar in `detect_lane.py`.
+    Messwerte vom 22.10. stehen als Kommentar in `detect_lane_nav2.py`.
   - `min_lane_width` ist in BEV-Pixeln: 80 px = 10 cm.
   - `detection_row_factor`: Suchzeile im Bild (0,80 = 80 % der Höhe).
   - Sichern: `bash scripts/tb/save-params.sh detect_lane`
@@ -77,12 +77,14 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
 
 - [ ] `nav2_obstacle.sh` starten, noch **nicht** freigeben (keine Leertaste).
 - [ ] Ein Klebeband quer in gemessenem Abstand vor den Bot legen, z. B. 40 cm
-      vor der Radachse. In RViz das Display `Spurgedaechtnis (nicht im Tunnel)`
-      bzw. die Draufsicht `/nav2/view` ansehen: Das Band muss dort
-      erscheinen, wo es real liegt. Die Draufsicht hat einen 0,5-m-Maßstab
-      unten rechts.
+      vor der Radachse. In der Draufsicht `/nav2/view` muss es als weiße Linie
+      dort erscheinen, wo es real liegt. Die Draufsicht hat einen
+      0,5-m-Maßstab unten rechts. Rot (Wand) wird ein Querband bewusst nicht:
+      Wand werden nur die gelbe und die weiße Spurlinie.
 - [ ] Bot auf die Spur stellen: Beide Linien müssen nach ~3 Bildern als
       blockierte Zellreihen (in `/nav2/view` rot) erscheinen.
+- Bot angehoben oder umgesetzt? Die Karten passen dann nicht mehr zur Odometrie:
+  absetzen und im Stand **L** im Terminal drücken (leert Spurgedächtnis und Costmaps).
 - [ ] Bot von Hand ein Stück vorschieben: Die Linien neben und hinter ihm
       müssen stehen bleiben (Spurgedächtnis), obwohl die Kamera sie nicht mehr
       sieht.
@@ -140,8 +142,8 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
 - [ ] In `rqt_image_view` (Debugbild) einmal **„Publish click location“**
       anhaken.
 - [ ] Bot vor die Öffnung stellen, im Debugbild auf **TUNNEL STARTEN**
-      klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot fährt mit
-      Kamera auf die Öffnung zu.
+      klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot folgt mit
+      Kamera und PID der Spur auf die Öffnung zu.
 - [ ] Kurz vor der Öffnung wechselt es auf `Tunnel`: statt des Kamerabilds
       „Kamera aus (Tunnel)“, `ros2 topic hz /lokal/bev` verstummt, die
       Draufsicht zeigt die geleerte Tunnelkarte (grau = unbekannt).

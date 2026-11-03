@@ -9,7 +9,7 @@ Variante mit Zonenaufteilung fuer den Obstacle-Modus liegt auf `LDS03-Doku`.
 
 - **switch_control** entscheidet als einziger ueber den Fahrmodus (`/control/mode`).
 - **control_driving** erzeugt als einziger Fahrbefehle (`/control/cmd_vel`): PID oder
-  die unveraenderten Befehle von Nav2.
+  die Befehle von Nav2, auf die Radgrenze skaliert.
 - **notaus** gibt sie nach Freigabe an den Bot weiter (`/cmd_vel`).
 - Alle anderen Nodes liefern nur Daten: Spurfehler, Spurgedaechtnis, Pfade, Karten.
 
@@ -17,7 +17,7 @@ Variante mit Zonenaufteilung fuer den Obstacle-Modus liegt auf `LDS03-Doku`.
 |---------------|--------------------------------------------------------------------|------------------------------|
 | `Lane`        | Start, Ende von Obstacle; nach dem Tunnel der Modus davor          | PID auf den Spurfehler       |
 | `Obstacle`    | LiDAR-Punkt im Kegel voraus naeher als `obstacle_trigger_distance`, keine Spurlinie dazwischen | Nav2 (`/nav2/cmd_vel`) |
-| `TunnelEntry` | Button im Debugbild oder Tunnelschild                              | Nav2 (`/nav2/cmd_vel`)       |
+| `TunnelEntry` | Button im Debugbild oder Tunnelschild                              | PID auf den Spurfehler       |
 | `Tunnel`      | LiDAR sieht die Tunnelwaende oder Einfahrtsstrecke erreicht        | Nav2 (`/nav2/cmd_vel`)       |
 
 Jeder andere Modus, veraltete Eingangsdaten oder ein fehlendes `/control/mode`
@@ -38,12 +38,14 @@ lane_costmap_node --Spurwaende, Spurmitte--> nav2_goal_publisher --Ziel/Pfad--> 
 Spurerkennung in LAB (detect_lane_nav2) -> PID in control_driving. Kalibrierung:
 `Kalibrierung_Checkliste.md`.
 
-**Hindernisse auf der Strecke (Obstacle).** lane_costmap_node merkt sich die Spurlinien
-als virtuelle Waende, NavFn plant zwischen ihnen um das Hindernis herum, MPPI faehrt
+**Hindernisse auf der Strecke (Obstacle).** lane_costmap_node merkt sich die gelbe und
+die weisse Spurlinie als virtuelle Waende (verfolgt, Querlinien und helle Flaechen
+nicht), NavFn plant zwischen ihnen um das Hindernis herum, MPPI faehrt
 den Weg ab. Kollision ueber den Umriss des Burgers, unabhaengig von der Spurbreite.
 
-**Tunnel (TunnelEntry, Tunnel).** Einfahrt mit Kamera ueber die Spurmitte, ab der
-Oeffnung nur LiDAR (Kamera laut Reglement verboten). tunnel_explorer_node sucht den
+**Tunnel (TunnelEntry, Tunnel).** Einfahrt mit Kamera und PID auf der 20-cm-Spur
+(dort passt der Bot fuer Nav2 nicht zwischen die Spurwaende), ab der Oeffnung nur
+LiDAR (Kamera laut Reglement verboten). tunnel_explorer_node sucht den
 Ausgang, keepout_zone_node sperrt den Eingang.
 
 ## Detaildoku

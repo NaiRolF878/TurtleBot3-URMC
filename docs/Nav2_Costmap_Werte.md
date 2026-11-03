@@ -26,8 +26,10 @@ nicht bekannt.
 | Obstacle | Nav2: NavFn plant, MPPI fährt | LiDAR + Spurgedächtnis |
 | Tunnel | Nav2: Explorer + NavFn plant, MPPI fährt | LiDAR + Eingangssperre, **keine Kamera** (Reglement) |
 
-Beim Tunnel-Eintritt verwirft `lane_costmap_node` das Spurgedächtnis und leert
-die local_costmap, `keepout_zone_node` leert die global_costmap. Warum keiner
+Beim Tunnel-Eintritt verwirft `lane_costmap_node` das Spurgedächtnis, sendet eine
+leere Wolke und leert 0,3 s später beide Costmaps. Erst die leere Wolke, dann leeren:
+ein lane_layer behält die letzte Wolke und trägt sie nach dem Leeren sonst wieder
+ein. Die Einfahrt (TunnelEntry) fährt der PID. Warum keiner
 der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 
 ---
@@ -82,8 +84,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 ### `resolution`
 - **Was er bewirkt:** Kantenlänge einer Zelle, 0,025 m.
 - **Woher:** gewählt: Spurlinien (~2 cm) und Hindernisränder werden feiner
-  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen. Ob
-  `controller_server` damit seine 20 Hz hält, ist am Bot noch nicht geprüft.
+  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen.
   Zurück auf 0.05 heißt auch `min_frontier_cluster_cells` halbieren.
 - **Was kaputtgeht:** Andere Werte hängen an ihm: die 3,2-m-Grenze oben und
   die Quantisierung des `inflation_radius` (Abschnitt 3). Außerdem wird jede
@@ -239,11 +240,23 @@ Konfiguration abgeleitet und nicht auf dem Bot beobachtet.
 | `memory_resolution` / `memory_radius` | 0.025 m / 2.0 m |
 | `line_confirm_frames` / `free_confirm_frames` | 3 / 10 |
 | `shadow_radius` / `shadow_margin` | 0.03 m / 0.05 m |
+| `line_margin` | 0.04 m |
+| `trace_step` / `trace_max_turn_deg` / `trace_max_gap` | 0.03 m / 35° / 0.09 m |
+| `trace_parallel_deg` | 60° |
 
 ### Spurgedächtnis
 Die Kamera sieht nur 5–60 cm voraus. Damit Nav2 auch die Linien neben und hinter
 dem Bot kennt, merkt sich `lane_costmap_node` die Linien in einem ortsfesten
 Raster im odom-Frame (`memory_resolution`, = `resolution` der Costmaps):
+- Linienpixel sind nur die der gelben und der weißen Spurlinie. Jede Linie wird
+  vom bot-nahen Ende aus in Schritten von `trace_step` verfolgt (Median der Pixel
+  voraus, höchstens `trace_max_turn_deg` Drehung je Schritt, Lücken bis
+  `trace_max_gap`), Weiß rechts von Gelb. Nur Pixel bis `line_margin` um diese
+  Mitte zählen; knickt eine Linie gegen die andere um mehr als
+  `trace_parallel_deg` ab, endet sie dort. Querlinien, Papier und helle Flächen
+  neben der Strecke werden so keine Wand. Pixel am Hindernis und in seinem
+  LiDAR-Schatten fallen vorher weg: Die BEV zieht hohe helle Gegenstände lang.
+  *Woher:* gewählt.
 - Pro Kamerabild bekommt jede **sichtbare** Zelle eine Stimme: „Linie“, wenn ein
   Linienpixel darin liegt, sonst „frei“. Sichtbar heißt: in der Sichtmaske
   `/lokal/bev_view` (die BEV-Ecken liegen außerhalb des Kamerabilds) und nicht
@@ -253,7 +266,7 @@ Raster im odom-Frame (`memory_resolution`, = `resolution` der Costmaps):
 - Eine Zelle wechselt erst, wenn `line_confirm_frames` (Linie) bzw.
   `free_confirm_frames` (frei) Bilder hintereinander das Gegenteil sagen. Linien
   erscheinen nach ~3 Bildern, verschwinden nach ~10. Einzelne Fehldetektionen
-  kommen so nicht hinein. *Woher:* gewählt, am Bot noch nicht abgestimmt.
+  kommen so nicht hinein. *Woher:* gewählt.
 - Zellen außerhalb von `memory_radius` werden vergessen. Beim Tunnel-Eintritt
   wird das ganze Gedächtnis verworfen (keine Kameradaten im Tunnel).
 - Gesendet wird jedes Mal das ganze Gedächtnis auf `/detect/lane_obstacles`;
@@ -370,9 +383,10 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
   die BEV dort unscharf.
 - Sieht ein Bild nur eine Linie (Lücke in Weiß, verdeckt), gilt die gelernte
   Breite. Ist sie noch unbekannt, gibt es in diesem Bild keinen Pfad.
-- Gelbe oder weiße Linien, die quer durch den Hindernisbereich laufen, würden
-  die Anpassung verfälschen. Das muss man vor Ort in RViz prüfen (Anzeige
-  „Aktiver Pfad (Nav2)“ im Obstacle-Modus).
+- Die Spurmitte nutzt dieselben gefilterten Linienpixel wie das Gedächtnis,
+  Querlinien verfälschen sie also nicht. Sie ist aber ein Polynom Y(X): In engen
+  Kurven, die im Sichtbereich fast quer laufen, passt sie schlecht. Das muss man
+  vor Ort in RViz prüfen (Anzeige „Aktiver Pfad (Nav2)“ im Obstacle-Modus).
 
 ---
 

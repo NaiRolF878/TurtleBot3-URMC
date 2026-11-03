@@ -27,7 +27,7 @@ flowchart LR
 
     Lane -- "LiDAR: Hindernis vorn, keine Spurlinie dazwischen" --> Obstacle
     Obstacle -- "1 s nichts in 0,2 m (270 Grad)" --> Lane
-    TunnelEntry["TunnelEntry\nNav2/MPPI, Einfahrt mit Kamera"]
+    TunnelEntry["TunnelEntry\nPID-Regler, Einfahrt mit Kamera"]
     Lane -- "Tunnel-Schild (auto)\noder Button (manuell)" --> TunnelEntry
     Obstacle -- "Tunnel-Schild (auto)\noder Button (manuell)" --> TunnelEntry
     TunnelEntry -- "LiDAR: Waende links und rechts\n(kurz vor der Oeffnung)" --> Tunnel
@@ -36,8 +36,8 @@ flowchart LR
 
 - **Lane**: der normale Betrieb, PID-Regler folgt der Spur.
 - **Obstacle**: sobald der LiDAR etwas direkt vor dem Roboter erkennt und zwischen Roboter und Objekt keine Spurlinie liegt, übernimmt Nav2, plant einen Weg darum herum und fährt ihn ab — automatisch, ohne Schild. Objekte auf der anderen Seite einer Spurlinie (z. B. Hindernisse neben dem Rückweg) lösen nichts aus. Zurück zu Lane geht es, wenn 1 s lang im Umkreis von 0,2 m nichts liegt, gemessen nach vorn, zur Seite und schräg nach hinten (270°). Der Keil direkt hinter dem Bot zählt nicht, von dort kam er gerade.
-- **TunnelEntry**: Einfahrt. Der Bot steht vor dem Tunnel; wie im Obstacle-Modus plant NavFn einen Weg 1 m voraus entlang der Spurmitte, also durch die Öffnung. Die Kamera ist hier noch erlaubt. Sieht der LiDAR links und rechts voraus die Tunnelwände näher als `tunnel_side_distance`, schaltet `switch_control` auf `Tunnel` — beim 0,5 m breiten Testtunnel ~20 cm vor der Öffnung, also bevor der Bot drin ist. Sicherheitsnetz: nach `tunnel_entry_max_distance` gefahrener Strecke ebenfalls.
-- **Tunnel**: eigener Modus für den geschlossenen Raum, ohne Kamera. Beim Umschalten werden Spurgedächtnis und beide Karten geleert und die Eingangssperre an die Öffnung gesetzt; die Tunnelkarte bleibt bis zum Austritt. Erst jetzt ist die Austrittsprüfung aktiv. Ausgelöst wird der Tunnel auf zwei Wegen:
+- **TunnelEntry**: Einfahrt. Der Bot steht vor dem Tunnel und folgt wie im Lane-Modus mit dem PID der Spur bis in die Öffnung; auf der 20-cm-Spur passt er für Nav2 nicht zwischen die Spurwände. Die Kamera ist hier noch erlaubt. Sieht der LiDAR links und rechts voraus die Tunnelwände näher als `tunnel_side_distance`, schaltet `switch_control` auf `Tunnel` — beim 0,5 m breiten Testtunnel ~20 cm vor der Öffnung, also bevor der Bot drin ist. Sicherheitsnetz: nach `tunnel_entry_max_distance` gefahrener Strecke ebenfalls.
+- **Tunnel**: eigener Modus für den geschlossenen Raum, ohne Kamera. Beim Umschalten wird das Spurgedächtnis verworfen, eine leere Spurwolke gesendet, 0,3 s später werden beide Karten geleert, und die Eingangssperre an die Öffnung gesetzt; die Tunnelkarte bleibt bis zum Austritt. Erst jetzt ist die Austrittsprüfung aktiv. Ausgelöst wird der Tunnel auf zwei Wegen:
   - **Schild:** ein Erkennungsmodell sendet `6` (`std_msgs/UInt8`) auf `/detect/sign`. Das Modell ist noch nicht gebaut. Die Schildnummern stehen in `SignType` (`common.py`), getrennt von den Modusnummern; welcher Modus aus einem Schild folgt, entscheidet `switch_control`.
   - **Button „TUNNEL STARTEN“ im Debugbild:** Jede Challenge läuft einzeln, vor Ort gibt es also keinen Auslöser für die Zustandsmaschine. Der Bot steht dabei vor der Öffnung. In TunnelEntry und Tunnel wird daraus „TUNNEL ABBRECHEN“. Nach dem automatischen Austritt springt der Button von selbst zurück.
 
@@ -53,7 +53,7 @@ Fahrbefehle erzeugt nur `control_driving`. Er wählt je nach Modus die Quelle un
 
 | | **Lane-Modus** | **Obstacle-Modus** | **Tunnel-Modus** |
 |---|---|---|---|
-| Quelle in `control_driving` | PID auf `/detect/lane` | `/nav2/cmd_vel` (MPPI), unverändert | `/nav2/cmd_vel` (MPPI), unverändert |
+| Quelle in `control_driving` | PID auf `/detect/lane` | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert |
 | Wer nutzt die Kamera? | `control_driving` über `/detect/lane`; `lane_costmap_node` für die Spurwände | `lane_costmap_node` für die Spurwände | niemand: `ingress_node` und `detect_lane` pausieren (Reglement) |
 | Was steht in local_ und global_costmap? | LiDAR + Spurgedächtnis | LiDAR + Spurgedächtnis | LiDAR + Eingangssperre |
 | Wird geplant? | nein, nichts geplant und nichts angezeigt | ja: NavFn plant ~1×/s einen Weg um die Hindernisse, MPPI fährt ihn ab | ja: Explorer + NavFn |
@@ -109,7 +109,7 @@ flowchart TB
     NA -->|"/cmd_vel"| MOT[Motoren]
 ```
 
-Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem Modus außer Tunnel, die Spurmitte nur in Obstacle und TunnelEntry, und leert beim Wechsel auf Tunnel Gedächtnis und local_costmap. `nav2_goal_publisher` plant nur in Obstacle, TunnelEntry und Tunnel. `keepout_zone_node` und `tunnel_explorer_node` arbeiten nur im Tunnel-Modus.** Außerhalb ihres jeweiligen Modus veröffentlichen sie nichts.
+Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem Modus außer Tunnel, die Spurmitte nur in Obstacle. Beim Wechsel auf Tunnel verwirft er das Gedächtnis, sendet eine leere Wolke und leert 0,3 s später beide Costmaps. `nav2_goal_publisher` plant nur in Obstacle und Tunnel. `keepout_zone_node` und `tunnel_explorer_node` arbeiten nur im Tunnel-Modus.** Außerhalb ihres jeweiligen Modus veröffentlichen sie nichts.
 
 ---
 
@@ -119,18 +119,18 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem M
 Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `lane_max_age`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer).
 
 ### `control_driving` — die einzige Quelle für Fahrbefehle
-Wählt je nach `/control/mode` den PID (Lane) oder reicht `/nav2/cmd_vel` unverändert durch (Obstacle, Tunnel); in jedem anderen Modus Null. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen nur in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
+Wählt je nach `/control/mode` den PID (Lane, TunnelEntry) oder reicht `/nav2/cmd_vel` durch (Obstacle, Tunnel); in jedem anderen Modus Null. Würde das äußere Rad schneller als 0,22 m/s (`MAX_WHEEL_VEL`), skaliert es v und ω gemeinsam herunter, die Bahn bleibt gleich. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
 
 ### `notaus` — die Fahrfreigabe
-Letzte Stufe zwischen `/control/cmd_vel` und `/cmd_vel`. Erzeugt keine Bewegung, reicht nur nach Freigabe (Leertaste, rqt `drive`, `/notaus/set`) durch oder sendet Null, auch wenn 0,5 s (`cmd_timeout_s`) nichts kommt.
+Letzte Stufe zwischen `/control/cmd_vel` und `/cmd_vel`. Erzeugt keine Bewegung, reicht nur nach Freigabe (Leertaste, rqt `drive`, `/notaus/set`) durch oder sendet Null, auch wenn 0,5 s (`cmd_timeout_s`) nichts kommt. Taste L sendet `/control/clear_maps`.
 
 ### `debug_view` — das Debugbild mit Tunnel-Button
 Zeichnet das Debugbild auf `/lokal/debug_view`, angezeigt in `rqt_image_view`. Im Tunnel steht statt des Kamerabilds ein Platzhalter. Unten im Mode-Panel liegt der Tunnel-Button. Ein Klick darauf kommt als Klickposition von `rqt_image_view` auf `/lokal/debug_view_mouse_left` an. Dafür muss in `rqt_image_view` einmal die Checkbox **„Publish click location“** angehakt sein.
 
 ### `lane_costmap_node` — das Spurgedächtnis (nicht im Tunnel)
-Wandelt die von der Kamera erkannten Spurlinien-Pixel aus der metrischen Vogelperspektive `/lokal/bev` über `Parameter/bev.yaml` in Meter um und merkt sie sich in einem ortsfesten Raster (odom-Frame, 2,5 cm). Eine Zelle wird erst nach `line_confirm_frames` (3) Bildern in Folge zur Linie und erst nach `free_confirm_frames` (10) Bildern in Folge ohne Linie wieder frei. Abgestimmt wird nur, was die Kamera gerade sieht (Sichtmaske `/lokal/bev_view` von `ingress_node`); Zellen im Sichtschatten eines LiDAR-Hindernisses bekommen keine „frei“-Stimme, weil das Hindernis die Linie dort nur verdeckt. So kennt Nav2 auch Linien neben und hinter dem Bot, die die Kamera (5–60 cm voraus) nicht mehr sieht.
+Wandelt die von der Kamera erkannten Spurlinien-Pixel aus der metrischen Vogelperspektive `/lokal/bev` über `Parameter/bev.yaml` in Meter um. Wand werden nur die gelbe und die weiße Spurlinie: Jede wird vom bot-nahen Ende aus verfolgt (auch durch enge Kurven), nur Pixel bis `line_margin` um ihre Mitte zählen. Querlinien, Papier und helle Flächen neben der Strecke werden so keine Wand; knickt eine Linie gegen die andere ab (Querlinie in L-Form), endet sie dort. Pixel am Hindernis und in seinem LiDAR-Schatten fallen vorher weg, weil die BEV hohe helle Gegenstände lang zieht. Diese Linien merkt er sich in einem ortsfesten Raster (odom-Frame, 2,5 cm). Eine Zelle wird erst nach `line_confirm_frames` (3) Bildern in Folge zur Linie und erst nach `free_confirm_frames` (10) Bildern in Folge ohne Linie wieder frei. Abgestimmt wird nur, was die Kamera gerade sieht (Sichtmaske `/lokal/bev_view` von `ingress_node`); Zellen im Sichtschatten eines LiDAR-Hindernisses bekommen keine „frei“-Stimme, weil das Hindernis die Linie dort nur verdeckt. So kennt Nav2 auch Linien neben und hinter dem Bot, die die Kamera (5–60 cm voraus) nicht mehr sieht.
 
-Gesendet wird jedes Mal das ganze Gedächtnis im Umkreis von 2 m auf `/detect/lane_obstacles` — an die `lane_layer` beider Costmaps und an `switch_control`. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Die Spurmitte (`/lane/center_path`, mit laufend gemessener Spurbreite) sendet er nur im Obstacle-Modus. Im Tunnel sendet er nichts und verwirft beim Eintritt das Gedächtnis und leert die local_costmap.
+Gesendet wird jedes Mal das ganze Gedächtnis im Umkreis von 2 m auf `/detect/lane_obstacles` — an die `lane_layer` beider Costmaps und an `switch_control`. Sendet auch im Lane-Modus, damit der Korridor beim Umschalten schon in der Karte steht. Die Spurmitte (`/lane/center_path`, mit laufend gemessener Spurbreite) sendet er nur im Obstacle-Modus. Im Tunnel sendet er nur beim Eintritt eine leere Wolke, verwirft das Gedächtnis und leert 0,3 s später beide Costmaps. Dasselbe passiert in jedem Modus auf `/control/clear_maps` (Taste L), wenn die Karten nicht mehr zur Odometrie passen. Die Eingangssperre bleibt dabei stehen.
 
 ### `nav2_view` — die Draufsicht mit Statuszeile
 Zeichnet auf `/nav2/view` ein Bild davon, was Nav2 sieht und plant: im Tunnel die `global_costmap`, sonst die `local_costmap` mit den Spurwänden. Grün ist befahrbar (dunkler = nah am Hindernis), rot blockiert, grau unbekannt, gelb/weiß die erkannten Spurlinien (`/detect/lane_mask`). Blau der Umriss des Bots (`/local_costmap/published_footprint`) mit Fahrtrichtung (magenta), cyan der Pfad, dem Nav2 gerade folgt (`/nav2/active_path`), mit Ziel (X) — nur während einer Fahrt, im Lane-Modus nie, orange die Eingangssperre, hellblau die LiDAR-Punkte. Unten eine Legende. Die Ausrichtung ist fest (odom-X nach rechts), sodass Wände stillstehen und nur der Bot sich bewegt.
@@ -175,8 +175,8 @@ Nav2-Standardkomponente. Berechnet auf der `global_costmap` (LiDAR + Spurgedäch
 | `tunnel_side_distance` | 0.35 m | Einfahrt: links und rechts voraus muss eine Wand näher als das sein, damit auf `Tunnel` umgeschaltet wird (Kamera aus). Hängt an der Tunnelbreite: halbe Breite (0,25 m beim Testtunnel) + Reserve | Kleiner = schaltet näher an der Öffnung um; größer = früher, aber Gefahr durch andere Wände neben der Strecke |
 | `tunnel_side_angle_min_deg` / `_max_deg` | 30° / 100° | Sektoren links und rechts, in denen die Tunnelwände gesucht werden | — |
 | `tunnel_entry_debounce` | 0.2 s | So lange müssen die Wände gesehen werden | Größer = robuster, schaltet aber später um |
-| `tunnel_entry_max_distance` | 0.8 m | Sicherheitsnetz: nach so viel Strecke ab dem Umschalten gilt der Bot als drin | Etwas mehr als der Abstand, mit dem der Bot vor dem Tunnel steht |
-| `tunnel_exit_open_distance` | 1.5 m | Ab welcher Distanz ein einzelner LiDAR-Strahl als "offen/frei" zählt | Größer = strengere Anforderung an "offener Raum" |
+| `tunnel_entry_max_distance` | 0.3 m | Sicherheitsnetz: nach so viel Strecke ab dem Umschalten gilt der Bot als drin | Klein, weil der Startabstand variiert: lieber Kamera zu früh aus als im Tunnel an |
+| `tunnel_exit_open_distance` | 0.6 m | Ab welcher Distanz ein einzelner LiDAR-Strahl als "offen/frei" zählt | Größer = strenger; bei 1,5 m blieb der Bot im Raum nahe einer Wand im Tunnelmodus |
 | `tunnel_exit_open_ratio` | 0.8 | Welcher Anteil aller LiDAR-Strahlen offen sein muss, damit "offener Raum" erkannt wird | Größer = strenger (fast alles muss frei sein); kleiner = reicht schon, wenn ein Teil frei ist |
 | `tunnel_exit_debounce` | 1.0 s | Wie lange der LiDAR durchgehend offenen Raum sehen muss | Wie oben: Stabilität vs. Reaktionsgeschwindigkeit |
 
@@ -193,7 +193,11 @@ Die Tunnelausfahrt läuft bewusst nur über den LiDAR — die Kamera ist in der 
 | `free_confirm_frames` | 10 | So viele Bilder in Folge ohne Linie (sichtbar, nicht verdeckt), bis eine Linie vergessen wird | Größer = Linien halten länger, falsche bleiben aber auch länger |
 | `memory_radius` | 2.0 m | Weiter entfernte Zellen werden vergessen | Nicht größer als die Reichweite der `lane_layer` (2,0 m) |
 | `memory_resolution` | 0.025 m | Zellgröße des Gedächtnisses | = `resolution` der Costmaps |
-| `shadow_radius` / `shadow_margin` | 0.03 / 0.05 m | Sichtschatten eines LiDAR-Punkts für die Kamera | Größer = verdeckte Linien werden sicherer behalten |
+| `shadow_radius` / `shadow_margin` | 0.03 / 0.05 m | Sichtschatten eines LiDAR-Punkts für die Kamera; Linienpixel darin fallen weg | Größer = verdeckte Linien werden sicherer behalten |
+| `line_margin` | 0.04 m | Pixel bis so weit um die verfolgte Linienmitte werden Wand | Halbe Klebebandbreite plus Reserve; zu klein = Wand lückenhaft, zu groß = Reste von Querlinien |
+| `trace_step` / `trace_max_turn_deg` | 0.03 m / 35° | Schrittweite und größte Drehung je Schritt beim Verfolgen | 35° auf 3 cm folgt Kurven bis r ≈ 5 cm |
+| `trace_max_gap` | 0.09 m | Längere Lücken in einer Linie beenden sie | Größer = überbrückt mehr, kann aber auf Fremdes springen |
+| `trace_parallel_deg` | 60° | Knickt eine Linie gegen die andere stärker ab, endet sie (Querlinie in L-Form) | Kleiner = schneidet früher, auch in Spurverbreiterungen |
 
 Sendet in jedem Modus außer Tunnel. Pixel → Meter und Reichweite (bis 0,60 m) kommen aus `Parameter/bev.yaml`, nicht aus dieser Datei. Details: `docs/Nav2_Costmap_Werte.md`, Abschnitt 4.
 

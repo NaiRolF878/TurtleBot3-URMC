@@ -38,7 +38,8 @@ class switch_control(Node):
     hinter dem Bot bleibt aussen vor: aus dieser Richtung kam er gerade.
 
     Die Linien kommen aus dem Spurgedaechtnis von lane_costmap_node, kennen also auch
-    Linien neben und hinter dem Bot, die die Kamera gerade nicht sieht. Ist es aelter
+    Linien neben und hinter dem Bot, die die Kamera gerade nicht sieht. Es enthaelt
+    nur die gelbe und die weisse Spurlinie: eine Querlinie vor dem Hindernis trennt nicht. Ist es aelter
     als lane_max_age, zaehlt jeder Punkt (lieber zu oft Obstacle als ein Hindernis
     uebersehen). Entfernungen und Winkel gelten ab dem LiDAR, die Linienpruefung ab
     der Bot-Mitte (base_footprint).
@@ -87,10 +88,10 @@ class switch_control(Node):
         self.declare_parameter('tunnel_entry_debounce', 0.2, frange(0.0, 5.0))
         # Sicherheitsnetz, falls die Waende nie erkannt werden: spaetestens nach dieser
         # Strecke (m) ab dem Umschalten gilt der Bot als drin und die Kamera geht aus.
-        self.declare_parameter('tunnel_entry_max_distance', 0.8, frange(0.05, 5.0))
+        self.declare_parameter('tunnel_entry_max_distance', 0.3, frange(0.05, 5.0))
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('tunnel_exit_open_distance', 1.5, frange(0.1, 10.0))
+        self.declare_parameter('tunnel_exit_open_distance', 0.6, frange(0.1, 10.0))
         self.declare_parameter('tunnel_exit_open_ratio', 0.8, frange(0.0, 1.0))
         self.declare_parameter('tunnel_exit_debounce', 1.0, frange(0.0, 10.0))
         self._param_names = [
