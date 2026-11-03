@@ -183,8 +183,10 @@ class detect_lane(Node):
         kernel = np.ones((ERODE_KERNEL, ERODE_KERNEL), np.uint8)
         mask_yellow = cv2.erode(mask_yellow, kernel, iterations=1)
         mask_white = cv2.erode(mask_white, kernel, iterations=1)
-        mask_yellow = self.shape_filter(mask_yellow)
-        mask_white = self.shape_filter(mask_white)
+        # Formfilter (shape_filter) bewusst NICHT hier: er stanzt runde Loecher in echte
+        # Linien, wo sie in der BEV breiter als line_max_width_cm wirken (Querlinien sind in
+        # Fahrtrichtung verschmiert, Abzweige). Er wirkt nur auf die Costmap im Obstacle-Modus
+        # (publish_lane_mask).
 
         width = self.img_width
         white_alternative = int(width * WHITE_ALTERNATIVE)
@@ -277,6 +279,12 @@ class detect_lane(Node):
 
         # Schon hier ausduennen: lane_costmap_node verwirft ohnehin die meisten Punkte
         # wieder, in voller Aufloesung waeren es zehntausende int32 pro Frame.
+        # Nur im Obstacle-Modus: helle Flaechen (Waende, Papier, Spiegelungen) und den eigenen
+        # Bot aus den Spurwaenden nehmen, damit Nav2 beim Ausweichen nicht an Scheinwaenden scheitert.
+        if self.control_mode == ControlType.Obstacle:
+            mask_yellow = self.shape_filter(mask_yellow)
+            mask_white = self.shape_filter(mask_white)
+
         stride = max(1, int(self.lane_mask_stride))
         yellow_ys, yellow_xs = np.where(mask_yellow[::stride, ::stride] > 0)
         white_ys, white_xs = np.where(mask_white[::stride, ::stride] > 0)
