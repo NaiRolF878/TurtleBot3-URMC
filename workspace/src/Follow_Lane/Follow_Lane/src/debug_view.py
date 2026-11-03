@@ -87,7 +87,7 @@ class debug_view(Node):
             String, '/control/tunnel_source', self.cb_tunnel_source, 1)
         self.sub_cmd_vel = self.create_subscription(
             Twist, '/control/cmd_vel', self.cb_cmd_vel, 1)
-        self.sub_odom = self.create_subscription(Odometry, '/odom', self.cb_odom, 1)
+        self.sub_odom = self.create_subscription(Odometry, '/odom_filtered', self.cb_odom, 1)
         self.sub_battery_state = self.create_subscription(
             BatteryState, '/battery_state', self.cb_battery_state, qos_profile_sensor_data)
         # Nur zum Mitzaehlen: bestaetigt im Debugbild, dass die Kette

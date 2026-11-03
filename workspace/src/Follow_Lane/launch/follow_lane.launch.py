@@ -49,6 +49,9 @@ def launch_setup(context, *args, **kwargs):
     # Die *_nav2-Nodes pausieren im Tunnel. Sie laufen als ingress_node/detect_lane,
     # damit rqt, save-params.sh und ros2 param gleich funktionieren.
     return [
+        # odom -> base_footprint ohne Radwert-Ausreisser; der Bot sendet die TF dafuer
+        # nicht selbst (bot-up.sh, BOT_ODOM_TF=false).
+        Node(package='Follow_Lane', executable='odom_filter', name='odom_filter'),
         Node(package='Follow_Lane', executable='ingress_node_nav2', name='ingress_node'),
         Node(
             package='Follow_Lane', executable='detect_lane_nav2', name='detect_lane',
