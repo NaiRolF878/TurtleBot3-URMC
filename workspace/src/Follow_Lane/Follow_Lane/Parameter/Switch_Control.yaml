@@ -2,18 +2,18 @@
   ros__parameters:
     # --- Eintritt Lane -> Obstacle ---
     # Halbwinkel: 20.0 heisst 40 Grad Gesamtkegel, bei 1 m also ca. +/-0.36 m seitlich.
-    obstacle_check_angle_deg: 20.0
+    obstacle_check_angle_deg: 45.0
     # LiDAR-Punkt im Kegel naeher als das (m, ab LiDAR) -> Obstacle, sofern keine
     # Spurlinie zwischen Bot und Punkt liegt. Der PID beachtet Hindernisse nicht; je
     # kleiner der Wert, desto weniger Weg bleibt Nav2 zum Ausweichen. Wird vor Ort
     # abgestimmt.
-    obstacle_trigger_distance: 0.20
+    obstacle_trigger_distance: 0.30
 
     # --- Austritt Obstacle -> Lane ---
     # Halbwinkel 135 = 270 Grad: vorn, seitlich und schraeg hinten. Der Keil direkt
     # hinter dem Bot zaehlt nicht, aus dieser Richtung kam er gerade.
     obstacle_clear_angle_deg: 135.0
-    obstacle_clear_distance: 0.20
+    obstacle_clear_distance: 0.40
     # So lange (s) muss der Bereich frei sein, bevor es zurueck zu Lane geht.
     obstacle_clear_debounce: 1.0
 
