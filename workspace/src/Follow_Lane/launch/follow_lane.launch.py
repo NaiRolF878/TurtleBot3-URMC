@@ -70,9 +70,9 @@ def generate_launch_description():
         # Ueberschreibbar, z.B. fuer eine zweite Streckenkonfiguration:
         #   ros2 launch Follow_Lane follow_lane.launch.py detect_params:=/pfad/zur/datei.yaml
         DeclareLaunchArgument('detect_params',
-            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_PI_CAM2_V3.yaml')),
+            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_LAB.yaml')),
         DeclareLaunchArgument('control_params',
-            default_value=os.path.join(PARAM_DIR, 'Control_driving_PID.yaml')),
+            default_value=os.path.join(PARAM_DIR, 'Control_driving_PID_Wide.yaml')),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
     ])
