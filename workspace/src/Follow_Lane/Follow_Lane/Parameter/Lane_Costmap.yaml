@@ -12,8 +12,8 @@
 
     # Spurgedaechtnis: eine Zelle wird erst nach so vielen Kamerabildern in Folge zur
     # Linie bzw. wieder frei.
-    memory_resolution: 0.025     # m, = resolution der Costmaps
-    memory_radius: 2.0           # m, = obstacle_max_range der lane_layer
+    memory_resolution: 0.01      # m, = resolution der local_costmap (global 2,5 cm)
+    memory_radius: 2.0           # m, Sendeumkreis (gemerkt wird alles), = obstacle_max_range der lane_layer
     line_confirm_frames: 3
     free_confirm_frames: 10
     shadow_radius: 0.03          # m, Sichtschatten je LiDAR-Punkt
@@ -22,7 +22,9 @@
     # Wand werden nur gelbe und weisse Spurlinie: jede wird vom Bot aus verfolgt,
     # nur Pixel bis line_margin um ihre Mitte zaehlen (Querlinien, Papier, helle
     # Flaechen nicht). Pixel am Hindernis und in seinem LiDAR-Schatten fallen weg.
-    line_margin: 0.04            # m, halbe Klebebandbreite (~2,5 cm) + Reserve
+    # m, 0 = nur die Linienmitte wird Wand. Mit 0.04 waren die Linien in der Costmap
+    # 8-10 cm breit und liessen in der 20-cm-Spur keinen Platz fuer den Bot (17,8 cm).
+    line_margin: 0.0
     trace_step: 0.03             # m
     trace_max_turn_deg: 35.0     # je Schritt; 35 Grad auf 3 cm folgt Kurven bis r ~5 cm
     trace_max_gap: 0.09          # m, laengere Luecken beenden die Linie
@@ -43,6 +45,8 @@
     center_path_max_age: 1.0
     goal_distance: 1.0
     replan_period: 1.0
+    # Planwege, die weiter als das (m) hinter die Radachse fuehren, werden verworfen.
+    max_path_backward: 0.12
     robot_frame: base_footprint
     odom_frame: odom
     watchdog_rate: 2.0

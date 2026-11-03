@@ -59,6 +59,9 @@ TRACE_THIN_CELL = 0.01
 TRACE_MIN_POINTS = 5
 TRACE_MAX_LENGTH = 1.5
 NEAR_RES = 0.005
+# Winkelraster (rad) der Sichtschatten-Tabelle: 0,25 Grad, an der Sichtgrenze (0,6 m)
+# ~2,6 mm -- weit unter memory_resolution.
+SHADOW_BIN = math.radians(0.25)
 
 
 def _bin_medians(pts, x_min, x_max, bin_size):
@@ -338,8 +341,8 @@ class lane_costmap_node(Node):
         self.declare_parameter('pixel_stride', 2, irange(1, 20))
         # Zellgroesse (m), gleich der resolution der Costmaps.
         self.declare_parameter('memory_resolution', 0.025, frange(0.005, 0.2))
-        # Weiter entfernte Zellen werden vergessen; nicht ueber die Reichweite der
-        # lane_layer (obstacle_max_range in nav2_params.yaml) hinaus.
+        # Weiter entfernte Zellen bleiben gemerkt, werden aber nicht gesendet; nicht ueber
+        # die Reichweite der lane_layer (obstacle_max_range in nav2_params.yaml) hinaus.
         self.declare_parameter('memory_radius', 2.0, frange(0.5, 10.0))
         self.declare_parameter('line_confirm_frames', 3, irange(1, 100))
         # Groesser als line_confirm_frames: ein Hindernis oder der eigene Schatten kann
@@ -353,7 +356,8 @@ class lane_costmap_node(Node):
         # Wand. Schrittweite, groesste Drehung je Schritt (enge Kurven), groesste
         # ueberbrueckte Luecke. Knickt eine Linie gegen die andere um mehr als
         # trace_parallel_deg ab, endet sie dort (Querlinie in L-Form).
-        self.declare_parameter('line_margin', 0.04, frange(0.01, 0.2))
+        # 0: nur Pixel direkt auf der verfolgten Mittellinie (ein Rasterpunkt NEAR_RES breit).
+        self.declare_parameter('line_margin', 0.0, frange(0.0, 0.2))
         self.declare_parameter('trace_step', 0.03, frange(0.005, 0.2))
         self.declare_parameter('trace_max_turn_deg', 35.0, frange(1.0, 90.0))
         self.declare_parameter('trace_max_gap', 0.09, frange(0.0, 0.5))
@@ -636,12 +640,9 @@ class lane_costmap_node(Node):
             # Freie Zellen ohne Gegenstimme muss sich niemand merken.
             if not state[0] and state[1] == 0:
                 del self.memory[cell]
-
-        rx, ry, _ = robot_pose
-        limit = (self.memory_radius / self.memory_resolution) ** 2
-        cx, cy = rx / self.memory_resolution, ry / self.memory_resolution
-        for cell in [c for c in self.memory if (c[0] + 0.5 - cx) ** 2 + (c[1] + 0.5 - cy) ** 2 > limit]:
-            del self.memory[cell]
+        # Entfernte Zellen werden nicht vergessen, nur nicht gesendet (_publish_memory):
+        # ein Odometrie-Sprung setzte den Bot sonst fuer ein Bild weit weg und loeschte
+        # das ganze Gedaechtnis. Geleert wird nur beim Tunnel-Eintritt und mit Taste L.
 
     def _shadowed(self, points, unknown=True):
         """Welche Punkte (robot_frame) verdeckt ein LiDAR-Hindernis fuer die Kamera,
@@ -663,19 +664,30 @@ class lane_costmap_node(Node):
         hits = hits[hits[:, 0] > 0.0]
         if hits.size == 0:
             return np.zeros(len(points), dtype=bool)
+        # Tabelle ueber den Winkel: je Raster die naechste Schattengrenze aller Keile, die
+        # es ueberdecken. Statt jeden Punkt gegen jeden Treffer zu pruefen (bei 1-cm-Raster
+        # ~17000 x 180, 40 ms je Bild) nur ein Nachschlagen je Punkt.
+        ang_h, dist_h = np.arctan2(hits[:, 1], hits[:, 0]), np.hypot(hits[:, 0], hits[:, 1])
+        half = np.arctan2(self.shadow_radius, dist_h)
+        n_bins = int(math.ceil(2.0 * math.pi / SHADOW_BIN))
+        start = np.floor((ang_h - half + math.pi) / SHADOW_BIN).astype(int)
+        stop = np.floor((ang_h + half + math.pi) / SHADOW_BIN).astype(int)
+        edge = np.full(n_bins, np.inf)
+        for b0, b1, d in zip(start, stop, dist_h - self.shadow_margin):
+            idx = np.arange(b0, b1 + 1) % n_bins
+            edge[idx] = np.minimum(edge[idx], d)
+
         rel = points - self._camera_xy
         ang_p, dist_p = np.arctan2(rel[:, 1], rel[:, 0]), np.hypot(rel[:, 0], rel[:, 1])
-        ang_h, dist_h = np.arctan2(hits[:, 1], hits[:, 0]), np.hypot(hits[:, 0], hits[:, 1])
-        d_ang = np.abs(np.arctan2(np.sin(ang_p[:, None] - ang_h), np.cos(ang_p[:, None] - ang_h)))
-        in_wedge = d_ang <= np.arctan2(self.shadow_radius, dist_h)
-        behind = dist_p[:, None] >= dist_h - self.shadow_margin
-        return (in_wedge & behind).any(axis=1)
+        bins = np.floor((ang_p + math.pi) / SHADOW_BIN).astype(int) % n_bins
+        return dist_p >= edge[bins]
 
     def _publish_memory(self, robot_pose, stamp):
         lines = [c for c, state in self.memory.items() if state[0]]
         if lines:
             centers = (np.asarray(lines, dtype=np.float64) + 0.5) * self.memory_resolution
             local = inverse_transform_points(robot_pose, centers)
+            local = local[np.hypot(local[:, 0], local[:, 1]) <= self.memory_radius]
             points = [(float(x), float(y), 0.0) for x, y in local]
         else:
             points = []

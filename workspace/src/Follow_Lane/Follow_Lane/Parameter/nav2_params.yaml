@@ -69,7 +69,9 @@ controller_server:
       batch_size: 1000
       vx_std: 0.2
       vy_std: 0.0
-      wz_std: 0.4
+      # Streuung der ausprobierten Drehraten (kein Kostengewicht). Mit 0.4 kamen enge
+      # Kurven und Drehen auf der Stelle kaum vor, MPPI wich lieber rueckwaerts aus.
+      wz_std: 0.8
       # Max. Geschwindigkeit der Motoren (TurtleBot3-Handbuch), gleicher Wert wie
       # MAX_WHEEL_VEL in control_driving.py.
       vx_max: 0.22
@@ -216,14 +218,17 @@ global_costmap:
       # schmale Hindernisse fallen zwischen zwei Strahlen durch.
       width: 7
       height: 7
-      # Wie local_costmap. 7x7 m -> 280x280 Zellen. Bei 0.05 auch
+      # 7x7 m -> 280x280 Zellen. Bewusst groeber als local_costmap (1 cm): ab ~0,6 m
+      # liegen die LiDAR-Strahlen weiter als 1 cm auseinander, dazwischen bliebe es
+      # "unbekannt", und unbekannt ist fuer NavFn gesperrt. Bei 0.05 auch
       # tunnel_explorer_node.min_frontier_cluster_cells (Lane_Costmap.yaml) halbieren,
       # er zaehlt Zellen.
       resolution: 0.025
       # Kreis statt Footprint: NavFn plant fuer einen Punkt und prueft keine
-      # Roboterform. 0.105 liegt 1,6 cm ueber der halben Breite des Burger
-      # (178 mm) -- in der Enclosure kostet jede Wandberuehrung einen Punkt.
-      robot_radius: 0.105
+      # Roboterform. 0.09 = halbe Breite des Burger (178 mm). Mit 0.105 waren die
+      # Spurlinien um je 10,5 cm gesperrt und der Planer fand zwischen nahen Linien
+      # keine Luecke mehr (2026-11-03). Den echten Umriss prueft MPPI.
+      robot_radius: 0.09
       # Nie gesehene Zellen bleiben "unbekannt" (-1), statt als frei zu gelten. Der
       # Tunnel-Explorer sucht genau die Grenze frei/unbekannt; ohne das findet er nie
       # ein Ziel. Zusammen mit allow_unknown:false plant NavFn nur durch Gesehenes.
@@ -241,6 +246,9 @@ global_costmap:
           data_type: "LaserScan"
           clearing: true
           marking: true
+          # Pflicht: Humble-Default je Quelle ist 0.0, der LiDAR liegt auf z=0.182 --
+          # ohne diese Zeile verwirft die Ebene jeden Scanpunkt (markiert und raeumt nie).
+          max_obstacle_height: 2.0
           obstacle_max_range: 3.0
           obstacle_min_range: 0.0
           raytrace_max_range: 3.5
@@ -309,10 +317,11 @@ local_costmap:
       # 10 Hz nur Rechenzeit.
       width: 4
       height: 4
-      # Spurlinien (~2 cm) und Hindernisraender werden feiner als bei 5 cm, aber ~4x
-      # so viele Zellen. Auf 0.05, falls controller_server seine 20 Hz nicht schafft
-      # ("Control loop missed its desired rate").
-      resolution: 0.025
+      # 1 cm: in der 20-cm-Spur rundet jede Linienzelle sonst bis 1,25 cm je Seite auf,
+      # MPPI prueft hier den echten Umriss. 400x400 Zellen (~6x so viele wie bei 2,5 cm).
+      # Groeber (0.025), falls controller_server seine 20 Hz nicht schafft
+      # ("Control loop missed its desired rate"). Die global_costmap bleibt bei 2,5 cm.
+      resolution: 0.01
       # Umriss des Burger relativ zu base_footprint (Radachse), aus 138 x 178 mm
       # und der URDF: Rumpf 3,7 cm vor bis 10,1 cm hinter der Achse, +/-6,9 cm
       # breit; Raeder +/-8,9 cm aussen, 3,3 cm Radius. Konvexe Huelle aus beidem.
@@ -332,6 +341,9 @@ local_costmap:
           data_type: "LaserScan"
           clearing: true
           marking: true
+          # Pflicht: Humble-Default je Quelle ist 0.0, der LiDAR liegt auf z=0.182 --
+          # ohne diese Zeile verwirft die Ebene jeden Scanpunkt (markiert und raeumt nie).
+          max_obstacle_height: 2.0
           obstacle_max_range: 3.0
           obstacle_min_range: 0.0
           raytrace_max_range: 3.5
@@ -404,7 +416,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.20
+        inflation_radius: 0.2
 
 lifecycle_manager_navigation:
   ros__parameters:

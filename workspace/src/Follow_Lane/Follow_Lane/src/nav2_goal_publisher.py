@@ -80,6 +80,11 @@ class nav2_goal_publisher(Node):
         # und Rechner muessen dafuer nicht synchron laufen.
         self.declare_parameter('center_path_max_age', 1.0, frange(0.1, 10.0))
         self.declare_parameter('replan_period', 1.0, frange(0.2, 10.0))
+        # Ein Planweg mit einem Punkt mehr als so weit (m) hinter der Radachse wird
+        # verworfen: NavFn kennt keine Fahrtrichtung und fuehrt sonst hinter dem Bot
+        # aussen um die Spurlinien herum, wo die Kamera nie hingesehen hat. Etwas mehr
+        # als das Heck (0.101), damit Pfade aus der eigenen Zelle heraus durchgehen.
+        self.declare_parameter('max_path_backward', 0.12, frange(0.0, 2.0))
         self.declare_parameter('watchdog_rate', 2.0, frange(0.2, 10.0))
 
         # --- Subscriber ---
@@ -184,6 +189,16 @@ class nav2_goal_publisher(Node):
             self.get_logger().warn(
                 'planner_server findet keinen Weg um das Hindernis (Linien oder Hindernisse '
                 'sperren den Korridor?).', throttle_duration_sec=2.0)
+            return
+        backward = self._backward_extent(path)
+        if backward is None:
+            return
+        if backward > self.get_parameter('max_path_backward').value:
+            # Ein laufendes Ziel nach vorn bleibt aktiv; ohne eins steht der Bot.
+            self._set_status('Weg fuehrt nach hinten -- verworfen')
+            self.get_logger().warn(
+                f'Planweg fuehrt {backward:.2f} m hinter den Bot -- verworfen (nur Wege '
+                'nach vorn).', throttle_duration_sec=2.0)
             return
         self._send_goal(path, f'Bahnplaner ({self._path_source})')
 
@@ -319,6 +334,23 @@ class nav2_goal_publisher(Node):
         goal.pose.orientation.z = math.sin(yaw / 2.0)
         goal.pose.orientation.w = math.cos(yaw / 2.0)
         return goal
+
+    def _backward_extent(self, path):
+        """Wie weit (m) der Pfad hinter die Radachse reicht (0 = nie dahinter), None
+        ohne Roboterpose. Der Pfad liegt im odom-Frame (global_frame des Planers)."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                path.header.frame_id, self.get_parameter('robot_frame').value,
+                rclpy.time.Time())
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().warn(f'Keine Roboterpose fuer die Pfadpruefung: {e}',
+                                   throttle_duration_sec=2.0)
+            return None
+        rx, ry, ryaw = pose2d_from_transform(tf)
+        c, s = math.cos(ryaw), math.sin(ryaw)
+        ahead = min(c * (p.pose.position.x - rx) + s * (p.pose.position.y - ry)
+                    for p in path.poses)
+        return max(0.0, -ahead)
 
     def _fresh_center_path(self):
         if self._center_path_received is None or len(self._latest_center_path.poses) < 2:
