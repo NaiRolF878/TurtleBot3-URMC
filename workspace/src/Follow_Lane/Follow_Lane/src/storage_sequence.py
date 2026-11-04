@@ -28,6 +28,8 @@ from Follow_Lane.src.common import (
 
 S = StorageState
 
+ODOM_FRAME = 'odom'
+ROBOT_FRAME = 'base_footprint'
 TICK_PERIOD_S = 0.1
 STATE_PUBLISH_PERIOD_S = 0.5
 # Zustaende, die eine Folge von Grundbewegungen abfahren und dann weiterschalten.
@@ -604,7 +606,7 @@ class StorageSequence:
     def _new_maneuver(self, kind, max_vel):
         self._maneuver_id += 1
         m = Maneuver()
-        m.header.frame_id = self.node.odom_frame
+        m.header.frame_id = ODOM_FRAME
         m.header.stamp = self.node.get_clock().now().to_msg()
         m.id = self._maneuver_id
         m.type = kind
@@ -688,7 +690,7 @@ class StorageSequence:
     def _robot_pose(self):
         try:
             tf = self.node.tf_buffer.lookup_transform(
-                self.node.odom_frame, self.node.robot_frame, rclpy.time.Time())
+                ODOM_FRAME, ROBOT_FRAME, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.node.get_logger().warn(f'Keine Roboterpose fuer Storage: {e}',
                                         throttle_duration_sec=5.0)

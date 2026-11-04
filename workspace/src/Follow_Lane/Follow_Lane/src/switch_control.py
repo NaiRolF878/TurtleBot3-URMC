@@ -1,6 +1,7 @@
 """Zustandsmaschine fuer den Fahrmodus, einziger Publisher von /control/mode.
 
 Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request,
+      /detect/lines_lost, /tunnel/outside,
       dazu die Eingaenge der Storage-Aufgabe (storage_sequence.py)
 Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
       dazu die Ausgaenge der Storage-Aufgabe (Zustand, Grundbewegungen, Magnet)
@@ -15,20 +16,34 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
+from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from Follow_Lane.src.common import (
-    ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, run_node,
-    scan_points, transform_points)
+    ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, require_params,
+    run_node, scan_points, transform_points)
 from Follow_Lane.src.storage_sequence import StorageSequence
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als mode_timeout nichts hoert.
 MODE_PUBLISH_PERIOD_S = 0.5
+# So lange (s) muessen beide Spurlinien fehlen, bis die Kamera ausgeht: mehrere Bilder,
+# aber die Bot-Nase ist dann noch vor dem Linienende (Suchzeile endet ~10 cm vor der Achse).
+LINES_LOST_S = 0.2
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
+
+# Halbwinkel des Austrittsbereichs: 135 = 270 Grad ohne den Keil hinten.
+OBSTACLE_CLEAR_ANGLE_DEG = 135.0
+OBSTACLE_CLEAR_DEBOUNCE_S = 1.0
+# Ein Linienpunkt naeher als LINE_BLOCK_TOLERANCE an der Strecke Bot -> Hindernis trennt beide.
+# Linienpunkte bis LINE_OBSTACLE_MARGIN vor dem Hindernis zaehlen nicht: steht es auf der
+# Linie, ragt es in die Fahrbahn.
+LINE_BLOCK_TOLERANCE = 0.02
+LINE_OBSTACLE_MARGIN = 0.05
+LANE_MAX_AGE_S = 0.5
 
 
 class switch_control(Node):
@@ -36,13 +51,14 @@ class switch_control(Node):
     obstacle_trigger_distance, und zwischen Bot und Punkt liegt keine Spurlinie. Ein
     Objekt hinter einer Linie gehoert nicht zur eigenen Fahrbahn.
 
-    Obstacle -> Lane: obstacle_clear_debounce lang kein solcher Punkt naeher als
-    obstacle_clear_distance im Bereich +/-obstacle_clear_angle_deg. Der Keil direkt
+    Obstacle -> Lane: OBSTACLE_CLEAR_DEBOUNCE_S lang kein solcher Punkt naeher als
+    obstacle_clear_distance im Bereich +/-OBSTACLE_CLEAR_ANGLE_DEG. Der Keil direkt
     hinter dem Bot bleibt aussen vor: aus dieser Richtung kam er gerade.
 
     Die Linien kommen aus dem Spurgedaechtnis von lane_costmap_node, kennen also auch
-    Linien neben und hinter dem Bot, die die Kamera gerade nicht sieht. Ist es aelter
-    als lane_max_age, zaehlt jeder Punkt (lieber zu oft Obstacle als ein Hindernis
+    Linien neben und hinter dem Bot, die die Kamera gerade nicht sieht. Es enthaelt
+    nur die gelbe und die weisse Spurlinie: eine Querlinie vor dem Hindernis trennt nicht. Ist es aelter
+    als LANE_MAX_AGE_S, zaehlt jeder Punkt (lieber zu oft Obstacle als ein Hindernis
     uebersehen). Entfernungen und Winkel gelten ab dem LiDAR, die Linienpruefung ab
     der Bot-Mitte (base_footprint).
 
@@ -52,14 +68,12 @@ class switch_control(Node):
     Ausloeser gibt. Der Bot steht dabei vor dem Tunnel und faehrt mit Kamera auf die
     Oeffnung zu; die Einfahrt ist laut Reglement noch erlaubt.
 
-    TunnelEntry -> Tunnel, bevor der Bot drin ist: der LiDAR sieht links und rechts
-    voraus Waende naeher als tunnel_side_distance (die Tunnelwaende neben der
-    Oeffnung), oder der Bot ist seit dem Umschalten tunnel_entry_max_distance
-    gefahren. Ab dann keine Kamera mehr.
+    TunnelEntry -> Tunnel, bevor der Bot drin ist: beide Spurlinien enden kurz vor dem
+    Bot, denn sie reichen nur bis zur Oeffnung. Ab dann keine Kamera mehr. Durch die Tuer
+    faehrt er nur mit LiDAR (tunnel_explorer_node).
 
-    Tunnel -> Modus von vor dem Tunnel, sobald der LiDAR rundum freien Raum sieht.
-    Diese Pruefung laeuft erst ab Tunnel, nicht schon vor der Oeffnung, wo es meist
-    auch frei ist. Beides jederzeit von Hand abbrechbar (False).
+    Tunnel -> Modus von vor dem Tunnel, sobald tunnel_explorer_node meldet, dass der Bot
+    ausserhalb der Wand-Huelle ist. Beides jederzeit von Hand abbrechbar (False).
 
     Storage (Palette, Button im Debugbild auf /control/storage_request): den Ablauf
     fuehrt StorageSequence, sie setzt die Modi Lane, Stop, Dock und Maneuver. Solange
@@ -72,46 +86,16 @@ class switch_control(Node):
         super().__init__('switch_control')
 
         # --- Parameter ---
-        # Halbwinkel: der Kegel ist doppelt so breit.
-        self.declare_parameter('obstacle_check_angle_deg', 30.0, frange(1.0, 90.0))
-        self.declare_parameter('obstacle_trigger_distance', 0.4, frange(0.05, 3.0))
-        # Halbwinkel des Austrittsbereichs: 135 = 270 Grad ohne den Keil hinten.
-        self.declare_parameter('obstacle_clear_angle_deg', 135.0, frange(1.0, 180.0))
-        self.declare_parameter('obstacle_clear_distance', 0.2, frange(0.05, 3.0))
-        self.declare_parameter('obstacle_clear_debounce', 1.0, frange(0.0, 10.0))
-        # Ein Linienpunkt naeher als line_block_tolerance an der Strecke Bot -> Hindernis
-        # trennt beide. Linienpunkte bis line_obstacle_margin vor dem Hindernis zaehlen
-        # nicht: steht es auf der Linie, ragt es in die Fahrbahn.
-        self.declare_parameter('line_block_tolerance', 0.02, frange(0.0, 0.2))
-        self.declare_parameter('line_obstacle_margin', 0.05, frange(0.0, 0.5))
-        self.declare_parameter('lane_max_age', 0.5, frange(0.05, 5.0))
-        # Seitensektoren (Grad ab geradeaus, links positiv, rechts gespiegelt), in denen
-        # die Tunnelwaende neben der Oeffnung gesucht werden. Ab 30 Grad: Hindernisse
-        # direkt voraus zaehlen nicht als Wand.
-        self.declare_parameter('tunnel_side_angle_min_deg', 30.0, frange(0.0, 90.0))
-        self.declare_parameter('tunnel_side_angle_max_deg', 100.0, frange(0.0, 180.0))
-        # Haengt an der Tunnelbreite: halbe Breite plus Reserve. Kleiner = es wird
-        # spaeter umgeschaltet, also naeher an der Oeffnung.
-        self.declare_parameter('tunnel_side_distance', 0.35, frange(0.05, 2.0))
-        self.declare_parameter('tunnel_entry_debounce', 0.2, frange(0.0, 5.0))
-        # Sicherheitsnetz, falls die Waende nie erkannt werden: spaetestens nach dieser
-        # Strecke (m) ab dem Umschalten gilt der Bot als drin und die Kamera geht aus.
-        self.declare_parameter('tunnel_entry_max_distance', 0.8, frange(0.05, 5.0))
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('tunnel_exit_open_distance', 1.5, frange(0.1, 10.0))
-        self.declare_parameter('tunnel_exit_open_ratio', 0.8, frange(0.0, 1.0))
-        self.declare_parameter('tunnel_exit_debounce', 1.0, frange(0.0, 10.0))
+        # Vor Ort einstellen, Werte nur in Switch_Control.yaml. Halbwinkel: der Kegel ist
+        # doppelt so breit.
+        self.declare_parameter('obstacle_check_angle_deg', Parameter.Type.DOUBLE, frange(1.0, 90.0))
+        self.declare_parameter('obstacle_trigger_distance', Parameter.Type.DOUBLE, frange(0.05, 3.0))
+        self.declare_parameter('obstacle_clear_distance', Parameter.Type.DOUBLE, frange(0.05, 3.0))
+        self._param_names = ['obstacle_check_angle_deg', 'obstacle_trigger_distance',
+                             'obstacle_clear_distance']
         # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop.
-        self.declare_parameter('initial_mode', 'Lane')
-        self._param_names = [
-            'obstacle_check_angle_deg', 'obstacle_trigger_distance',
-            'obstacle_clear_angle_deg', 'obstacle_clear_distance', 'obstacle_clear_debounce',
-            'line_block_tolerance', 'line_obstacle_margin', 'lane_max_age',
-            'tunnel_side_angle_min_deg', 'tunnel_side_angle_max_deg', 'tunnel_side_distance',
-            'tunnel_entry_debounce', 'tunnel_entry_max_distance', 'odom_frame', 'robot_frame',
-            'tunnel_exit_open_distance', 'tunnel_exit_open_ratio', 'tunnel_exit_debounce',
-        ]
+        self.declare_parameter('initial_mode', Parameter.Type.STRING)
+        require_params(self, self._param_names + ['initial_mode'])
         read_params(self, self._param_names)
 
         # --- Subscriber ---
@@ -123,6 +107,10 @@ class switch_control(Node):
         self.sub_sign = self.create_subscription(UInt8, '/detect/sign', self.cb_sign, 1)
         self.sub_tunnel_request = self.create_subscription(
             Bool, '/control/tunnel_request', self.cb_tunnel_request, 1)
+        self.sub_lines_lost = self.create_subscription(
+            Bool, '/detect/lines_lost', self.cb_lines_lost, 1)
+        self.sub_tunnel_outside = self.create_subscription(
+            Bool, '/tunnel/outside', self.cb_tunnel_outside, 1)
 
         # --- Publisher ---
         self.pub_control_mode = self.create_publisher(UInt8, '/control/mode', 1)
@@ -138,14 +126,12 @@ class switch_control(Node):
         self._mode_before_tunnel = None
         self._tunnel_source = ''          # 'auto' (Schild) oder 'manuell' (Button)
         self._obstacle_clear_since = None
-        self._tunnel_entry_since = None
-        self._tunnel_entry_start = None   # (x, y) im odom_frame beim Umschalten
-        self._tunnel_exit_since = None
+        self._lines_seen_time = None      # zuletzt eine Spurlinie gesehen (TunnelEntry)
         self._lane_points = None          # (N, 2) im Frame der Wolke
         self._lane_frame = None
         self._lane_time = None
         self._scanner_poses = {}          # (Ziel-Frame, Scanner-Frame) -> (x, y, yaw)
-        # Braucht tf_buffer, odom_frame und robot_frame, daher zuletzt.
+        # Braucht tf_buffer, daher zuletzt.
         self.storage = StorageSequence(self)
 
         self.get_logger().info(f'Started switch_control Node ({self.control_mode.name}).')
@@ -153,6 +139,7 @@ class switch_control(Node):
     # --- Callbacks ---
 
     def cb_timer(self):
+        self._update_tunnel_entry()
         self._publish_mode()
 
     def cb_lane_obstacles(self, cloud):
@@ -182,14 +169,21 @@ class switch_control(Node):
             self.get_logger().info('Tunnel von Hand abgebrochen.')
             self._leave_tunnel()
 
+    def cb_lines_lost(self, msg):
+        if self.control_mode == ControlType.TunnelEntry and not msg.data:
+            self._lines_seen_time = time.monotonic()
+        self._update_tunnel_entry()
+
+    def cb_tunnel_outside(self, msg):
+        if msg.data and self.control_mode == ControlType.Tunnel:
+            self.get_logger().info('Bot ist ausserhalb der Wand-Huelle.')
+            self._leave_tunnel()
+
     def cb_scan(self, scan):
         read_params(self, self._param_names)
 
-        if self.control_mode == ControlType.TunnelEntry:
-            self._update_tunnel_entry(scan)
-        elif self.control_mode == ControlType.Tunnel:
-            self._update_tunnel_exit(scan)
-        elif self.control_mode == ControlType.Lane and not self.storage.active:
+        self._update_tunnel_entry()
+        if self.control_mode == ControlType.Lane and not self.storage.active:
             if self._obstacle_in_lane(scan, self.obstacle_check_angle_deg,
                                       self.obstacle_trigger_distance):
                 self._set_mode(ControlType.Obstacle, 'Hindernis in der Fahrbahn')
@@ -205,8 +199,6 @@ class switch_control(Node):
         self.control_mode = new_mode
         # Entprell-Zeitstempel gelten nur fuer den Modus, in dem sie gesetzt wurden.
         self._obstacle_clear_since = None
-        self._tunnel_entry_since = None
-        self._tunnel_exit_since = None
         # Sofort senden, nicht erst mit dem Timer: control_driving schaltet sonst
         # bis zu MODE_PUBLISH_PERIOD_S spaeter um.
         self._publish_mode()
@@ -234,57 +226,23 @@ class switch_control(Node):
             return
         self._mode_before_tunnel = self.control_mode
         self._tunnel_source = source
-        self._tunnel_entry_start = self._robot_xy()
+        self._lines_seen_time = time.monotonic()
         self._set_mode(ControlType.TunnelEntry, f'Tunnel ausgeloest ({source})')
 
-    def _update_tunnel_entry(self, scan):
-        if self._side_walls(scan):
-            now = self.get_clock().now()
-            if self._tunnel_entry_since is None:
-                self._tunnel_entry_since = now
-            elif (now - self._tunnel_entry_since).nanoseconds / 1e9 >= self.tunnel_entry_debounce:
-                self._set_mode(ControlType.Tunnel, 'Tunnelwaende links und rechts')
-                return
-        else:
-            self._tunnel_entry_since = None
-
-        if self._tunnel_entry_start is None:
-            self._tunnel_entry_start = self._robot_xy()
-            return
-        position = self._robot_xy()
-        if position is not None and math.dist(position, self._tunnel_entry_start) \
-                >= self.tunnel_entry_max_distance:
-            self._set_mode(ControlType.Tunnel, 'Einfahrtsstrecke erreicht, Tunnelwaende nicht erkannt')
-
-    def _side_walls(self, scan):
-        """Sieht der LiDAR links und rechts voraus eine Wand naeher als tunnel_side_distance?"""
-        angles, ranges, _ = scan_points(scan)
-        near = ranges < self.tunnel_side_distance
-        lo = math.radians(self.tunnel_side_angle_min_deg)
-        hi = math.radians(self.tunnel_side_angle_max_deg)
-        left = near & (angles >= lo) & (angles <= hi)
-        right = near & (angles <= -lo) & (angles >= -hi)
-        return bool(left.any() and right.any())
-
-    def _robot_xy(self):
-        try:
-            tf = self.tf_buffer.lookup_transform(self.odom_frame, self.robot_frame, rclpy.time.Time())
-        except (LookupException, ConnectivityException, ExtrapolationException) as e:
-            self.get_logger().warn(f'Keine Roboterpose fuer die Tunnel-Einfahrt: {e}',
-                                   throttle_duration_sec=5.0)
-            return None
-        x, y, _ = pose2d_from_transform(tf)
-        return (x, y)
+    def _update_tunnel_entry(self):
+        """Ohne neue Bilder gilt die Spur ebenfalls als zu Ende."""
+        if self.control_mode == ControlType.TunnelEntry \
+                and time.monotonic() - self._lines_seen_time >= LINES_LOST_S:
+            self._set_mode(ControlType.Tunnel, 'Spurlinien enden')
 
     def _leave_tunnel(self):
         restored = self._mode_before_tunnel or ControlType.Lane
         self._mode_before_tunnel = None
         self._tunnel_source = ''
-        self._tunnel_entry_start = None
         self._set_mode(restored, 'Tunnel verlassen')
 
     def _update_obstacle_exit(self, scan):
-        if self._obstacle_in_lane(scan, self.obstacle_clear_angle_deg,
+        if self._obstacle_in_lane(scan, OBSTACLE_CLEAR_ANGLE_DEG,
                                   self.obstacle_clear_distance):
             self._obstacle_clear_since = None
             return
@@ -292,7 +250,7 @@ class switch_control(Node):
         now = self.get_clock().now()
         if self._obstacle_clear_since is None:
             self._obstacle_clear_since = now
-        elif (now - self._obstacle_clear_since).nanoseconds / 1e9 >= self.obstacle_clear_debounce:
+        elif (now - self._obstacle_clear_since).nanoseconds / 1e9 >= OBSTACLE_CLEAR_DEBOUNCE_S:
             self._set_mode(ControlType.Lane, 'Kein Hindernis mehr in der Naehe')
 
     def _obstacle_in_lane(self, scan, half_angle_deg, distance):
@@ -314,13 +272,13 @@ class switch_control(Node):
     def _fresh_lane_points(self):
         if self._lane_time is None or self._lane_points is None:
             return None
-        if time.monotonic() - self._lane_time > self.lane_max_age:
+        if time.monotonic() - self._lane_time > LANE_MAX_AGE_S:
             return None
         return self._lane_points
 
     def _behind_line(self, points, lanes):
         """Fuer jeden Punkt (M, 2): liegt ein Linienpunkt auf der Strecke vom Ursprung
-        (Bot-Mitte) zum Punkt, mehr als line_obstacle_margin vor ihm?"""
+        (Bot-Mitte) zum Punkt, mehr als LINE_OBSTACLE_MARGIN vor ihm?"""
         if lanes.size == 0:
             return np.zeros(len(points), dtype=bool)
         dist = np.hypot(points[:, 0], points[:, 1])
@@ -331,8 +289,8 @@ class switch_control(Node):
             return np.zeros(len(points), dtype=bool)
         along = lanes @ unit.T                                    # (N, M)
         across = np.abs(lanes[:, :1] * unit[:, 1] - lanes[:, 1:] * unit[:, 0])
-        between = (along > 0.0) & (along < dist - self.line_obstacle_margin)
-        return ((across <= self.line_block_tolerance) & between).any(axis=0)
+        between = (along > 0.0) & (along < dist - LINE_OBSTACLE_MARGIN)
+        return ((across <= LINE_BLOCK_TOLERANCE) & between).any(axis=0)
 
     def _scanner_pose(self, target_frame, scanner_frame):
         """Lage des Scanners im target_frame. Fest montiert, daher einmal nachschlagen."""
@@ -347,34 +305,6 @@ class switch_control(Node):
                 return None
             self._scanner_poses[key] = pose2d_from_transform(tf)
         return self._scanner_poses[key]
-
-    def _update_tunnel_exit(self, scan):
-        if not self._is_open_space(scan):
-            self._tunnel_exit_since = None
-            return
-
-        now = self.get_clock().now()
-        if self._tunnel_exit_since is None:
-            self._tunnel_exit_since = now
-        elif (now - self._tunnel_exit_since).nanoseconds / 1e9 >= self.tunnel_exit_debounce:
-            self._leave_tunnel()
-
-    def _is_open_space(self, scan):
-        ranges = np.asarray(scan.ranges, dtype=np.float64)
-        if ranges.size == 0:
-            return False
-
-        # inf = kein Echo = frei. Nicht als ungueltig verwerfen, sonst bleiben nur
-        # die kurzen Messwerte uebrig und der Tunnel liesse sich nie verlassen.
-        no_echo = ~np.isfinite(ranges)
-        far = np.isfinite(ranges) & (ranges > self.tunnel_exit_open_distance)
-        # Werte unter range_min sind Artefakte, nicht "frei".
-        too_close = np.isfinite(ranges) & (ranges <= scan.range_min)
-        if np.count_nonzero(too_close) == ranges.size:
-            return False
-
-        open_ratio = np.count_nonzero(no_echo | far) / ranges.size
-        return open_ratio >= self.tunnel_exit_open_ratio
 
     # --- Beenden ---
 

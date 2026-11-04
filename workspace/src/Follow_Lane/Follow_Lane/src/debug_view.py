@@ -42,8 +42,9 @@ INFO_LINE_CHARS = 24
 
 # Groesse (h, w) der Kameraflaeche, solange noch kein Bild kam: /lokal/bev, 640x440.
 DEFAULT_CAMERA_SIZE = (440, 640)
-# Ohne neues Kamerabild (Tunnel, detect_lane steht) baut der Timer das Debugbild mit
-# Platzhalter neu auf, damit Modus und Tunnel-Button aktuell bleiben.
+# Ohne neues Spurbild (Tunnel, detect_lane steht) baut der Timer das Debugbild mit
+# Platzhalter neu auf, damit Modus und Tunnel-Button aktuell bleiben. Ab
+# LANE_DEBUG_STALE_S (s) gilt das letzte Spurbild als veraltet.
 REDRAW_PERIOD_S = 0.5
 LANE_DEBUG_STALE_S = 1.0
 
@@ -62,12 +63,15 @@ MODE_COLOR = {
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
 
+# Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
+CLICK_TOPIC = '/lokal/debug_view_mouse_left'
+
 # Welche Quelle control_driving je Modus auf /control/cmd_vel durchreicht; in allen
 # anderen Modi sendet er Null.
 MODE_SOURCE = {
     ControlType.Lane:     'PID',
     ControlType.Obstacle: 'Nav2/MPPI',
-    ControlType.TunnelEntry: 'Nav2/MPPI',
+    ControlType.TunnelEntry: 'PID',
     ControlType.Tunnel:   'Nav2/MPPI',
     ControlType.Dock:     'Kamera',
     ControlType.Maneuver: 'odom',
@@ -85,9 +89,6 @@ class debug_view(Node):
     def __init__(self):
         super().__init__('debug_view')
 
-        # --- Parameter ---
-        self.declare_parameter('click_topic', '/lokal/debug_view_mouse_left')
-
         # --- Subscriber ---
         self.sub_lane_debug = self.create_subscription(
             FollowLaneDebug, '/detect/lane_debug', self.cb_lane_debug, 1)
@@ -97,7 +98,7 @@ class debug_view(Node):
             String, '/control/tunnel_source', self.cb_tunnel_source, 1)
         self.sub_cmd_vel = self.create_subscription(
             Twist, '/control/cmd_vel', self.cb_cmd_vel, 1)
-        self.sub_odom = self.create_subscription(Odometry, '/odom', self.cb_odom, 1)
+        self.sub_odom = self.create_subscription(Odometry, '/odom_filtered', self.cb_odom, 1)
         self.sub_battery_state = self.create_subscription(
             BatteryState, '/battery_state', self.cb_battery_state, qos_profile_sensor_data)
         # Nur zum Mitzaehlen: bestaetigt im Debugbild, dass die Kette
@@ -105,7 +106,7 @@ class debug_view(Node):
         self.sub_lane_obstacles = self.create_subscription(
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         self.sub_click = self.create_subscription(
-            Point, self.get_parameter('click_topic').value, self.cb_click, 1)
+            Point, CLICK_TOPIC, self.cb_click, 1)
         self.sub_storage_state = self.create_subscription(
             String, '/control/storage_state', self.cb_storage_state, 1)
         self.sub_storage_info = self.create_subscription(
@@ -199,14 +200,17 @@ class debug_view(Node):
         return x0 <= point.x <= x1 and y0 <= point.y <= y1
 
     def cb_timer(self):
-        if self.lane_debug_stamp is None or self.follow_lane_debug is None:
-            self.build_debug_image()
-            return
-        age = (self.get_clock().now() - self.lane_debug_stamp).nanoseconds / 1e9
-        if age > LANE_DEBUG_STALE_S:
+        age = self.lane_debug_age()
+        if age is None or age > LANE_DEBUG_STALE_S:
             self.build_debug_image()
 
     # --- Hilfsmethoden ---
+
+    def lane_debug_age(self):
+        """Sekunden seit dem letzten Spurbild, None ohne Bild."""
+        if self.lane_debug_stamp is None or self.follow_lane_debug is None:
+            return None
+        return (self.get_clock().now() - self.lane_debug_stamp).nanoseconds / 1e9
 
     def build_debug_image(self):
         camera = self.camera_view()
@@ -235,18 +239,26 @@ class debug_view(Node):
                 setattr(self, name, (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1))
 
         msg = self.bridge.cv2_to_imgmsg(final_debug_image, encoding='bgr8')
-        if self.follow_lane_debug is not None:
+        age = self.lane_debug_age()
+        if age is not None and age <= LANE_DEBUG_STALE_S:
             msg.header = self.follow_lane_debug.raw_image.header
         else:
             msg.header.stamp = self.get_clock().now().to_msg()
         self.pub_debug_image.publish(msg)
 
     def camera_view(self):
-        """Kamerabild mit Spurmarkierungen, im Tunnel oder ohne Bild ein Platzhalter.
-        None, wenn das Bild nicht dekodiert werden kann."""
-        if self.control_mode == ControlType.Tunnel or self.follow_lane_debug is None:
-            text = 'Kamera aus (Tunnel)' if self.control_mode == ControlType.Tunnel \
-                else 'kein Kamerabild'
+        """Kamerabild mit Spurmarkierungen; im Tunnel, ohne Bild oder bei veraltetem
+        Bild ein Platzhalter. None, wenn das Bild nicht dekodiert werden kann."""
+        age = self.lane_debug_age()
+        if self.control_mode == ControlType.Tunnel:
+            text = 'Kamera aus (Tunnel)'
+        elif age is None:
+            text = 'kein Kamerabild'
+        elif age > LANE_DEBUG_STALE_S:
+            text = f'Spurbild veraltet ({age:.0f} s)'
+        else:
+            text = None
+        if text is not None:
             placeholder = np.zeros((*self.camera_size, 3), dtype=np.uint8)
             cv2.putText(placeholder, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         0.9, (200, 200, 200), 2, cv2.LINE_AA)

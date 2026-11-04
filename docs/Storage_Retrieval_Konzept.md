@@ -55,7 +55,8 @@ Das Konzept kommt ohne feste Streckenwerte aus:
 - Die Lage jeder Zone misst der Bot selbst bei der Erkundung.
 - Die Zonenmitte ergibt sich aus den Zonenlinien.
 - Die Zielzone wird vor dem Start eingegeben.
-- Toleranzen, Geschwindigkeiten und Wiederholungen sind Parameter (rqt, `Parameter/Storage.yaml`).
+- Toleranzen, Geschwindigkeiten und Wiederholungen sind Parameter (rqt): Ablauf und Detektoren in
+  `Parameter/Storage.yaml`, die Regler von control_driving in `Parameter/Control_driving_PID_Wide.yaml`.
 
 ## Ablauf
 
@@ -179,6 +180,9 @@ Zonenlinien laufen als `geometry_msgs/PoseArray` in `odom`.
 | `Maneuver` (9) | Grundbewegung aus `/control/maneuver` in `odom`: auf Winkel drehen, Strecke fahren, Punkte anfahren (vor- oder rueckwaerts). Meldet die id auf `/control/maneuver_status` |
 | `Lane`, `Stop` (vorhanden) | Spurfolge bei der Erkundung, Nullbefehl beim Lesen, Greifen und Ablegen |
 
+`Dock` und `Maneuver` laufen wie die Nav2-Befehle durch die Radgrenze (`MAX_WHEEL_VEL`). Mit den
+Startwerten greift sie dort nicht.
+
 ```
 storage_sign_node / storage_sign_model_node --/detect/storage_sign------------.
 storage_zone_node --/detect/zone_boundaries, /detect/zone_cross_lines---------+
@@ -192,9 +196,13 @@ detect_lane_nav2 --/detect/lane--> control_driving <--/detect/pallet-- pallet_no
 switch_control --/lokal/magnet_control--> magnet_controll (auf dem Bot, GPIO 17)
 ```
 
-**Start:** `storage.launch.py` (ueber `storage.sh`) startet `follow_lane.launch.py` mit
-`Parameter/Storage.yaml` und die vier Storage-Nodes, ohne Nav2. `Storage.yaml` setzt
-`initial_mode: Stop` fuer switch_control.
+**Start:** `storage.launch.py` (ueber `storage.sh`) startet `follow_lane.launch.py` (mit
+`odom_filter`, der die TF odom -> base_footprint liefert) mit `Parameter/Storage.yaml` und die vier
+Storage-Nodes, ohne Nav2. `Storage.yaml` setzt `initial_mode: Stop` fuer switch_control und
+ueberschreibt damit `initial_mode: Lane` aus `Switch_Control.yaml`. control_driving und
+switch_control haben keine Code-Defaults: Ihre Pflichtwerte stehen in
+`Control_driving_PID_Wide.yaml` und `Switch_Control.yaml`, damit auch `follow_lane.launch.py` und
+`nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 
 ## Entscheidungen
 
@@ -253,7 +261,11 @@ switch_control --/lokal/magnet_control--> magnet_controll (auf dem Bot, GPIO 17)
   deshalb faehrt der Transport per `Maneuver` statt `Lane`.
 - **Rueckfall und `zone_order`:** Eine Rueckfall-Stelle bekommt die naechste Ziffer aus
   `zone_order`, auch wenn sie keine Zone ist. Mit `zone_order` daher `fallback_step: 0.0`.
-- **Gleich halten:** `contact_gap_px` (switch_control) und `dock_contact_gap_px` (control_driving).
+- **Gleich halten:** `contact_gap_px` (switch_control, `Storage.yaml`) und `dock_contact_gap_px`
+  (control_driving, `Control_driving_PID_Wide.yaml`).
+- **Spur-Tracking nach Drehungen:** `detect_lane_nav2` verfolgt die Linien mit Anker
+  (`LINE_MAX_JUMP_CM`, `LINE_HOLD_TIME_S`) und laeuft auch in `Maneuver` weiter. Ob die Spurfolge
+  nach `ZURUECKDREHEN` sofort wieder die richtigen Linien findet **[V]**, am Bot pruefen.
 - **Geschwindigkeiten mit Last:** `carry_max_vel` 0,05 m/s, am Bot festlegen.
 - **Odometrie:** Genauigkeit von Drehung und Strecke ueber ca. 1 m am Bot messen.
 - **Trainiertes Modell:** Daten, Training, Rechner (Bot oder PC), Laufzeit; dann `model_path`.

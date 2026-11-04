@@ -40,7 +40,6 @@ setup(
         'console_scripts': [
             'control_driving      = Follow_Lane.src.control_driving:main',
             'debug_view           = Follow_Lane.src.debug_view:main',
-            'detect_lane          = Follow_Lane.src.detect_lane:main',
             'detect_lane_nav2     = Follow_Lane.src.detect_lane_nav2:main',
             'ingress_node         = Follow_Lane.src.ingress_node:main',
             'ingress_node_nav2    = Follow_Lane.src.ingress_node_nav2:main',
@@ -50,6 +49,7 @@ setup(
             'nav2_goal_publisher  = Follow_Lane.src.nav2_goal_publisher:main',
             'nav2_view            = Follow_Lane.src.nav2_view:main',
             'notaus               = Follow_Lane.src.notaus:main',
+            'odom_filter          = Follow_Lane.src.odom_filter:main',
             'pallet_node          = Follow_Lane.src.pallet_node:main',
             'storage_sign_model_node = Follow_Lane.src.storage_sign_model_node:main',
             'storage_sign_node    = Follow_Lane.src.storage_sign_node:main',

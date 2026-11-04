@@ -25,7 +25,7 @@
     sign_min_share: 0.6
     pallet_min_ratio: 0.5
     position_hold_time: 1.0
-    # gleich halten mit dock_contact_gap_px von control_driving
+    # gleich halten mit dock_contact_gap_px in Control_driving_PID_Wide.yaml
     contact_gap_px: 3.0
     contact_frames: 3
     dock_check_gap_px: 30.0
@@ -44,26 +44,6 @@
     step_timeout: 30.0
     # magnet_controll auf dem Bot; scripts/tb/bot/magnet_node.py hoert auf /magnet/cmd.
     magnet_topic: /lokal/magnet_control
-
-/control_driving:
-  ros__parameters:
-    maneuver_max_vel: 0.08
-    maneuver_min_vel: 0.02
-    maneuver_max_ang: 1.0
-    maneuver_min_ang: 0.3
-    maneuver_k_lin: 1.5
-    maneuver_k_ang: 2.5
-    maneuver_dist_tol: 0.01
-    maneuver_yaw_tol_deg: 2.0
-    maneuver_waypoint_tol: 0.03
-    maneuver_rotate_first_deg: 30.0
-    dock_vel: 0.03
-    dock_min_factor: 0.3
-    dock_slow_gap_px: 80.0
-    dock_contact_gap_px: 3.0
-    dock_k_ang: 1.5
-    dock_align_tol: 0.08
-    dock_cmd_timeout: 0.5
 
 /storage_zone_node:
   ros__parameters:

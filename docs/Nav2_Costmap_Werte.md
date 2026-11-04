@@ -26,8 +26,10 @@ nicht bekannt.
 | Obstacle | Nav2: NavFn plant, MPPI fährt | LiDAR + Spurgedächtnis |
 | Tunnel | Nav2: Explorer + NavFn plant, MPPI fährt | LiDAR + Eingangssperre, **keine Kamera** (Reglement) |
 
-Beim Tunnel-Eintritt verwirft `lane_costmap_node` das Spurgedächtnis und leert
-die local_costmap, `keepout_zone_node` leert die global_costmap. Warum keiner
+Beim Tunnel-Eintritt verwirft `lane_costmap_node` das Spurgedächtnis, sendet eine
+leere Wolke und leert 0,3 s später beide Costmaps. Erst die leere Wolke, dann leeren:
+ein lane_layer behält die letzte Wolke und trägt sie nach dem Leeren sonst wieder
+ein. Die Einfahrt (TunnelEntry) fährt der PID. Warum keiner
 der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 
 ---
@@ -39,7 +41,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 | `rolling_window` | `true` | `true` |
 | `width` / `height` | 4 / 4 m | 7 / 7 m |
 | `resolution` | 0.025 m | 0.025 m |
-| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.105 m |
+| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.09 m |
 | `global_frame` | `odom` | `odom` |
 
 ### `rolling_window`
@@ -82,9 +84,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 ### `resolution`
 - **Was er bewirkt:** Kantenlänge einer Zelle, 0,025 m.
 - **Woher:** gewählt: Spurlinien (~2 cm) und Hindernisränder werden feiner
-  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen. Ob
-  `controller_server` damit seine 20 Hz hält, ist am Bot noch nicht geprüft.
-  Zurück auf 0.05 heißt auch `min_frontier_cluster_cells` halbieren.
+  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen.
 - **Was kaputtgeht:** Andere Werte hängen an ihm: die 3,2-m-Grenze oben und
   die Quantisierung des `inflation_radius` (Abschnitt 3). Außerdem wird jede
   Linie auf ganze Zellen vergröbert. Wo nur wenige Zentimeter Luft sind, kann
@@ -155,7 +155,7 @@ ankommt.
   eingetragen. Gemerkte Linien bleiben so stehen, vom Gedächtnis vergessene
   verschwinden. Das wirkt nur auf die Zellen des `lane_layer`.
 - **`obstacle_max_range` / `raytrace_max_range` 2.0:** Gemessen ab
-  `base_footprint`. *Woher:* gewählt, = `memory_radius` des Gedächtnisses. Wer
+  `base_footprint`. *Woher:* gewählt, = `MEMORY_RADIUS` des Gedächtnisses. Wer
   einen der beiden Werte ändert, muss den anderen mitziehen.
 
 ### `entrance_layer` (Tunnel-Eingangssperre)
@@ -233,17 +233,29 @@ Konfiguration abgeleitet und nicht auf dem Bot beobachtet.
 
 | Wert | aktuell |
 |---|---|
-| `pixel_stride` | 2 |
-| `robot_frame` | `base_footprint` |
+| `PIXEL_STRIDE` | 2 |
+| `ROBOT_FRAME` | `base_footprint` |
 | Umrechnung Pixel → Meter | aus `Parameter/bev.yaml` |
-| `memory_resolution` / `memory_radius` | 0.025 m / 2.0 m |
+| `MEMORY_RESOLUTION` / `MEMORY_RADIUS` | 0.01 m / 2.0 m |
 | `line_confirm_frames` / `free_confirm_frames` | 3 / 10 |
-| `shadow_radius` / `shadow_margin` | 0.03 m / 0.05 m |
+| `SHADOW_RADIUS` / `SHADOW_MARGIN` | 0.03 m / 0.05 m |
+| `line_margin` | 0.04 m |
+| `TRACE_STEP` / `TRACE_MAX_TURN_DEG` / `TRACE_MAX_GAP` | 0.03 m / 35° / 0.09 m |
+| `TRACE_PARALLEL_DEG` | 60° |
 
 ### Spurgedächtnis
 Die Kamera sieht nur 5–60 cm voraus. Damit Nav2 auch die Linien neben und hinter
 dem Bot kennt, merkt sich `lane_costmap_node` die Linien in einem ortsfesten
-Raster im odom-Frame (`memory_resolution`, = `resolution` der Costmaps):
+Raster im odom-Frame (`MEMORY_RESOLUTION`, = `resolution` der Costmaps):
+- Linienpixel sind nur die der gelben und der weißen Spurlinie. Jede Linie wird
+  vom bot-nahen Ende aus in Schritten von `TRACE_STEP` verfolgt (Median der Pixel
+  voraus, höchstens `TRACE_MAX_TURN_DEG` Drehung je Schritt, Lücken bis
+  `TRACE_MAX_GAP`), Weiß rechts von Gelb. Nur Pixel bis `line_margin` um diese
+  Mitte zählen; knickt eine Linie gegen die andere um mehr als
+  `TRACE_PARALLEL_DEG` ab, endet sie dort. Querlinien, Papier und helle Flächen
+  neben der Strecke werden so keine Wand. Pixel am Hindernis und in seinem
+  LiDAR-Schatten fallen vorher weg: Die BEV zieht hohe helle Gegenstände lang.
+  *Woher:* gewählt.
 - Pro Kamerabild bekommt jede **sichtbare** Zelle eine Stimme: „Linie“, wenn ein
   Linienpixel darin liegt, sonst „frei“. Sichtbar heißt: in der Sichtmaske
   `/lokal/bev_view` (die BEV-Ecken liegen außerhalb des Kamerabilds) und nicht
@@ -253,8 +265,8 @@ Raster im odom-Frame (`memory_resolution`, = `resolution` der Costmaps):
 - Eine Zelle wechselt erst, wenn `line_confirm_frames` (Linie) bzw.
   `free_confirm_frames` (frei) Bilder hintereinander das Gegenteil sagen. Linien
   erscheinen nach ~3 Bildern, verschwinden nach ~10. Einzelne Fehldetektionen
-  kommen so nicht hinein. *Woher:* gewählt, am Bot noch nicht abgestimmt.
-- Zellen außerhalb von `memory_radius` werden vergessen. Beim Tunnel-Eintritt
+  kommen so nicht hinein. *Woher:* gewählt.
+- Zellen außerhalb von `MEMORY_RADIUS` werden vergessen. Beim Tunnel-Eintritt
   wird das ganze Gedächtnis verworfen (keine Kameradaten im Tunnel).
 - Gesendet wird jedes Mal das ganze Gedächtnis auf `/detect/lane_obstacles`;
   `switch_control` nutzt es zusätzlich für den Linienfilter.
@@ -297,15 +309,15 @@ das nicht nachgemessen.
   etwa 0,23 m ins Bild. Bis 0,60 m bleiben gut 30 cm, in denen die Breite
   gemessen und die Mitte berechnet wird (siehe „Spurmitte“).
 
-### `pixel_stride`
-- **Was er bewirkt:** Nur Pixel, deren x und y Vielfache von `pixel_stride`
+### `PIXEL_STRIDE`
+- **Was er bewirkt:** Nur Pixel, deren x und y Vielfache von `PIXEL_STRIDE`
   sind, werden umgerechnet.
-- **Woher:** gewählt. Er wirkt zusammen mit `lane_mask_stride` (Default 2 in
+- **Woher:** gewählt. Er wirkt zusammen mit `LANE_MASK_STRIDE` (Default 2 in
   `detect_lane`, nicht in einer YAML gesetzt), das schon beim Senden ausdünnt.
-  Solange beide 2 sind, dünnt `pixel_stride` nichts weiter aus. Bei 1,25 mm/px
+  Solange beide 2 sind, dünnt `PIXEL_STRIDE` nichts weiter aus. Bei 1,25 mm/px
   sind das 2,5 mm Abstand, weit unter einer Costmap-Zelle.
 
-### `robot_frame`
+### `ROBOT_FRAME`
 - `base_footprint` liegt in der TurtleBot3-URDF (burger) am Boden direkt unter
   der Radachse und passt damit zur Konvention der BEV (X ab Radachse). Nicht
   ändern, solange `bev.yaml` ab Radachse rechnet.
@@ -338,22 +350,22 @@ Umschalten schon bekannt ist.
    schräg steht und die Linien kurz nicht sieht.
 
 Sieht ein Bild nur eine Linie (Lücke in Weiß, enge Kurve, Hindernis verdeckt),
-gilt die Breite aus den letzten Bildern (`center_width_history`). ROBOTIS
+gilt die Breite aus den letzten Bildern (`CENTER_WIDTH_HISTORY`). ROBOTIS
 versetzt an dieser Stelle um feste 280 Pixel; hier wird die Breite gemessen,
 damit derselbe Code auf der 20-cm-Spur und im breiteren Hindernisbereich
 funktioniert.
 
 | Wert | aktuell | Herkunft |
 |---|---|---|
-| `center_path_topic` | `/lane/center_path` | gewählt |
-| `odom_frame` | `odom` | = `global_frame` der Costmaps |
-| `center_bin_size` | 0.05 m | gewählt; Streifentiefe und Abstand der Posen im Pfad |
-| `center_min_points` | 3 | gewählt; darunter kein Pfad |
-| `center_width_history` | 20 Bilder | gewählt; Median der gemessenen Breite |
+| `CENTER_PATH_TOPIC` | `/lane/center_path` | gewählt |
+| `ODOM_FRAME` | `odom` | = `global_frame` der Costmaps |
+| `CENTER_BIN_SIZE` | 0.05 m | gewählt; Streifentiefe und Abstand der Posen im Pfad |
+| `CENTER_MIN_POINTS` | 3 | gewählt; darunter kein Pfad |
+| `CENTER_WIDTH_HISTORY` | 20 Bilder | gewählt; Median der gemessenen Breite |
 
 **Offline geprüft** (synthetische Spuren direkt auf das BEV-Raster aus
 `bev.yaml` gelegt, Sichtfeld aus der aktuellen Extrinsik ausgeblendet,
-`lane_mask_stride` 2 wie in `detect_lane`, nicht auf dem Bot). Das prüft die
+`LANE_MASK_STRIDE` 2 wie in `detect_lane`, nicht auf dem Bot). Das prüft die
 Rechnung, nicht die Genauigkeit der Extrinsik:
 
 | Fall | Pfad von–bis | Abweichung von der echten Mitte |
@@ -370,9 +382,10 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
   die BEV dort unscharf.
 - Sieht ein Bild nur eine Linie (Lücke in Weiß, verdeckt), gilt die gelernte
   Breite. Ist sie noch unbekannt, gibt es in diesem Bild keinen Pfad.
-- Gelbe oder weiße Linien, die quer durch den Hindernisbereich laufen, würden
-  die Anpassung verfälschen. Das muss man vor Ort in RViz prüfen (Anzeige
-  „Aktiver Pfad (Nav2)“ im Obstacle-Modus).
+- Die Spurmitte nutzt dieselben gefilterten Linienpixel wie das Gedächtnis,
+  Querlinien verfälschen sie also nicht. Sie ist aber ein Polynom Y(X): In engen
+  Kurven, die im Sichtbereich fast quer laufen, passt sie schlecht. Das muss man
+  vor Ort in RViz prüfen (Anzeige „Aktiver Pfad (Nav2)“ im Obstacle-Modus).
 
 ---
 
@@ -386,8 +399,7 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
 | `vx_max` | nav2_params | 0.22 m/s |
 | `prune_distance` | nav2_params | 1.7 m |
 | `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m (Abstand des Planziels) |
-| `center_path_max_age` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 s |
-| `replan_period` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 s |
+| `CENTER_PATH_MAX_AGE_S` | `nav2_goal_publisher.py` | 1.0 s |
 
 ### Die Zusammenhänge
 
@@ -420,11 +432,12 @@ Bedingungen:
   gewählt, durch die Kartengröße begrenzt.
 - **Ziel im Obstacle-Modus:** ein Punkt `goal_distance` (1,0 m) voraus auf der
   Spurmitte (Abschnitt 4), über ihr Ende (~0,6 m) hinaus in ihrer Richtung
-  verlängert, solange sie jünger ist als `center_path_max_age` (Empfangszeit,
+  verlängert, solange sie jünger ist als `CENTER_PATH_MAX_AGE_S` (Empfangszeit,
   damit die Uhren von Bot und Rechner nicht synchron sein müssen). Sonst liegt
   das Ziel geradeaus. `planner_server` (NavFn) rechnet auf der global_costmap
-  einen Weg dorthin, MPPI fährt ihn ab. Neu geplant wird alle `replan_period`
-  und sobald ein Weg erreicht oder abgebrochen ist. Nach dem Umschalten wartet
+  einen Weg dorthin, MPPI fährt ihn ab. Neu geplant wird nur bei Bedarf: gesperrte
+  Zelle auf dem Pfad, bis auf `goal_distance`/2 abgefahren, Weg erreicht oder
+  abgebrochen. Kein Takt, sonst springen die Wege. Nach dem Umschalten wartet
   die erste Planung bis zu 0,5 s auf die erste Spurmitte. *Woher:* gewählt.
 
 ---
@@ -460,8 +473,8 @@ ergibt das:
 - **`PathFollowCritic` Schwelle 0.5:** muss deutlich unter der Pfadlänge (~1 m)
   liegen. Bei 1.4 m würde die Kritik nie greifen, ausgerechnet die, die den
   Vorwärtsdrang halten soll.
-- **`GoalAngleCritic` abgeschaltet:** Das Planziel wird jede Sekunde neu
-  gesetzt, seine Endausrichtung spielt keine Rolle. Eingeschaltet würde die
+- **`GoalAngleCritic` abgeschaltet:** Das Planziel rollt mit, seine
+  Endausrichtung spielt keine Rolle. Eingeschaltet würde die
   Kritik den Bot ab 0,5 m vor dem Ziel auf dessen Ausrichtung drehen, auch
   wenn er gerade an einem Hindernis vorbei muss. Der `goal_checker` lässt das
   Ziel mit `yaw_goal_tolerance` 3.15 ohnehin durchgehen.
@@ -546,5 +559,3 @@ halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
   `lane_costmap_node` neu starten. Beide lesen die Datei nur beim Start.
 - **Andere Höchstgeschwindigkeit** (`vx_max`) oder anderer `goal_distance` →
   `time_steps` nach der Formel in Abschnitt 5 nachrechnen.
-- **Enclosure-Öffnung gemessen** → `entrance_wall_width` (Block
-  `/keepout_zone_node` in `Lane_Costmap.yaml`) an die echte Breite anpassen.

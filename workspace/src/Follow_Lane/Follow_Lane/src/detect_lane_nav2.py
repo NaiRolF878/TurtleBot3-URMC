@@ -2,27 +2,51 @@
 
 Ein:  /lokal/bev, /control/mode
 Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
-      /detect/lane_mask (LaneMask fuer lane_costmap_node)
-Kopie von detect_lane fuer den Nav2-Zweig; im Tunnel pausiert (Reglement).
+      /detect/lane_mask (LaneMask fuer lane_costmap_node),
+      /detect/lines_lost (Bool, nur TunnelEntry)
+Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 """
 import array
+import os
+import time
 
 import cv2
 import numpy as np
 
+from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point32, Polygon
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Float64, UInt8
+from std_msgs.msg import Bool, Float64, UInt8
 
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
+from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, irange, read_params, run_node)
+    ControlType, control_mode_from_msg, frange, irange, read_params, require_params, run_node)
 
+# Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
+LANE_MASK_STRIDE = 2
+# Formfilter (in cm, ueber Parameter/bev.yaml in Pixel umgerechnet), nur fuer Nav2 und das
+# Spurende, der PID arbeitet ohne ihn. Spurlinien sind ~5 cm breit (+ Unschaerfe ~6 cm, an
+# Ecken/Abzweigen ~7 cm). Wo ein Kreis dieses Durchmessers hineinpasst, ist es keine Linie
+# (helle Waende, Papier, Spiegelungen -- in der BEV breit verschmiert).
+LINE_MAX_WIDTH_CM = 8.0
+# Reste kleiner als das (cm^2) nach dem Filtern sind Rauschen.
+LINE_MIN_AREA_CM2 = 3.0
+# Eigener Bot vorn im Bild (Halter/Stuetzkugel, blankes Metall wirkt weiss): Bereich bis
+# SELF_MASK_X_CM vor der Radachse und +-SELF_MASK_Y_CM ausblenden.
+SELF_MASK_X_CM = 9.0
+SELF_MASK_Y_CM = 4.0
+# Linien-Tracking: hoechstens so weit (cm) darf sich eine Linie von Bild zu Bild bewegen.
+LINE_MAX_JUMP_CM = 5.0
+# So lange (s) wird die letzte Position einer verlorenen Linie gehalten.
+LINE_HOLD_TIME_S = 1.0
 # Kantenlaenge des Erosionskerns (px), entfernt Einzelpixel aus den Farbmasken.
 ERODE_KERNEL = 5
-# Ersatzspalte als Anteil der Bildbreite, wenn eine Linie nicht gefunden wird.
+# Ersatzspalte als Anteil der Bildbreite, wenn eine Linie weder gefunden noch
+# gehalten wird.
 WHITE_ALTERNATIVE = 0.65
 YELLOW_ALTERNATIVE = 0.35
 # Kreuzungserkennung: Mindestlaenge einer Kante (px), Konturen kleiner als
@@ -48,42 +72,38 @@ class detect_lane(Node):
         super().__init__('detect_lane')
 
         # --- Parameter ---
+        # Vor Ort einstellen, Werte nur in Follow_Lane_ROI_LAB.yaml.
         byte = irange(0, 255)
         # L = Helligkeit, A = gruen(<128)..rot(>128), B = blau(<128)..gelb(>128); 128 = farblos.
-        # Startwerte gemessen auf BEV-Bildern nach CLAHE (docs/bev-tests/README.md):
+        # Gemessen auf BEV-Bildern nach CLAHE (docs/bev-tests/README.md):
         #   Gelb       L 170-244  A 115-127  B 152-210   -> erkennbar am hohen B
         #   Weiss      L 210-255  A 120-128  B 118-157   -> erkennbar am hohen L, A/B nahe 128
         #   Matte      L  35-185  A 124-132  B 100-133
-        self.declare_parameter('lab_l_white_l', 200, byte)
-        self.declare_parameter('lab_l_white_h', 255, byte)
-        self.declare_parameter('lab_a_white_l', 112, byte)
-        self.declare_parameter('lab_a_white_h', 140, byte)
-        self.declare_parameter('lab_b_white_l', 110, byte)
-        self.declare_parameter('lab_b_white_h', 145, byte)
-        self.declare_parameter('lab_l_yellow_l', 140, byte)
-        self.declare_parameter('lab_l_yellow_h', 255, byte)
-        self.declare_parameter('lab_a_yellow_l', 100, byte)
-        self.declare_parameter('lab_a_yellow_h', 140, byte)
-        self.declare_parameter('lab_b_yellow_l', 150, byte)
-        self.declare_parameter('lab_b_yellow_h', 255, byte)
-        # Suchzeile als Anteil der Bildhoehe (0 = oben, fern).
-        self.declare_parameter('detection_row_factor', 0.75, frange(0.5, 0.95))
-        # Mindestabstand gelb -> weiss in BEV-Pixeln (1,25 mm/px: 80 px = 10 cm).
-        self.declare_parameter('min_lane_width', 80, irange(0, 300))
-        # CLAHE gleicht ueber-/unterbelichtete Bildbereiche vor der LAB-Farbfilterung
-        # an, damit wechselndes Licht die festen Schwellwerte nicht verfaelscht.
-        self.declare_parameter('clahe_clip_limit', 2.0, frange(0.1, 40.0))
-        self.declare_parameter('clahe_tile_grid_size', 8, irange(1, 64))
-        # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
-        self.declare_parameter('lane_mask_stride', 2, irange(1, 20))
         self._param_names = [
             'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
             'lab_b_white_l', 'lab_b_white_h',
             'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
             'lab_b_yellow_l', 'lab_b_yellow_h',
-            'detection_row_factor', 'min_lane_width',
-            'clahe_clip_limit', 'clahe_tile_grid_size', 'lane_mask_stride',
         ]
+        for name in self._param_names:
+            self.declare_parameter(name, Parameter.Type.INTEGER, byte)
+        # Suchzeile als Anteil der Bildhoehe (0 = oben, fern).
+        self.declare_parameter('detection_row_factor', Parameter.Type.DOUBLE, frange(0.5, 0.95))
+        # Mindestabstand gelb -> weiss in BEV-Pixeln (1,25 mm/px: 80 px = 10 cm).
+        self.declare_parameter('min_lane_width', Parameter.Type.INTEGER, irange(0, 300))
+        # CLAHE gleicht ueber-/unterbelichtete Bildbereiche vor der LAB-Farbfilterung
+        # an, damit wechselndes Licht die festen Schwellwerte nicht verfaelscht.
+        self.declare_parameter('clahe_clip_limit', Parameter.Type.DOUBLE, frange(0.1, 40.0))
+        self.declare_parameter('clahe_tile_grid_size', Parameter.Type.INTEGER, irange(1, 64))
+        self._param_names += ['detection_row_factor', 'min_lane_width',
+                              'clahe_clip_limit', 'clahe_tile_grid_size']
+        require_params(self, self._param_names)
+        try:
+            self._bev = bev_geometry.load_bev_spec(
+                os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
+        except Exception as e:  # noqa: BLE001 -- ohne bev.yaml kein Formfilter, Masken roh
+            self._bev = None
+            self.get_logger().warn(f'bev.yaml nicht ladbar ({e}) -- Formfilter der Masken aus.')
 
         # --- Subscriber ---
         self.sub_control_mode = self.create_subscription(
@@ -101,6 +121,7 @@ class detect_lane(Node):
         # Verlustfreie Pixelkoordinaten der Linienpunkte fuer lane_costmap_node, getrennt
         # vom komprimierten Debug-Bild oben, das nur zum Anschauen gedacht ist.
         self.pub_lane_mask = self.create_publisher(LaneMask, '/detect/lane_mask', 1)
+        self.pub_lines_lost = self.create_publisher(Bool, '/detect/lines_lost', 1)
 
         # --- Zustand ---
         self.bridge = CvBridge()
@@ -108,6 +129,10 @@ class detect_lane(Node):
         self.is_running = False
         self.img_height = None   # Groesse des Bilds, pro Frame gesetzt
         self.img_width = None
+        # Je Linie (Spalte, Zeitpunkt der letzten Detektion) oder None; eigener Logger
+        # je Linie, damit die gedrosselten Meldungen sich nicht gegenseitig verschlucken.
+        self._anchor = {'Gelb': None, 'Weiss': None}
+        self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
 
         self.get_logger().info('Started detect_lane Node (Nav2-Zweig).')
 
@@ -150,15 +175,25 @@ class detect_lane(Node):
         kernel = np.ones((ERODE_KERNEL, ERODE_KERNEL), np.uint8)
         mask_yellow = cv2.erode(mask_yellow, kernel, iterations=1)
         mask_white = cv2.erode(mask_white, kernel, iterations=1)
+        # Formfilter (shape_filter) bewusst NICHT hier: er stanzt runde Loecher in echte
+        # Linien, wo sie in der BEV breiter als LINE_MAX_WIDTH_CM wirken (Querlinien sind in
+        # Fahrtrichtung verschmiert, Abzweige). Er wirkt nur auf die Costmap im Obstacle-Modus
+        # (publish_lane_mask).
 
         width = self.img_width
         white_alternative = int(width * WHITE_ALTERNATIVE)
         yellow_alternative = int(width * YELLOW_ALTERNATIVE)
+        now = time.monotonic()
+        # Vor track_line: das versetzt die Anker schon auf dieses Bild.
+        if self.control_mode == ControlType.TunnelEntry:
+            self.pub_lines_lost.publish(Bool(data=self.lines_lost(mask_yellow, mask_white, now)))
 
         # Gelb fest am konfigurierten detection_row_factor
         center_yellow_y = int(self.img_height * self.detection_row_factor)
-        center_yellow_x = self.get_x_for_driving(
-            mask_yellow, center_yellow_y, yellow_alternative, left_line=True)
+        raw_yellow = self.get_x_for_driving(
+            mask_yellow, center_yellow_y, left_line=True,
+            last_known=self.anchor_column('Gelb', now))
+        center_yellow_x = self.track_line('Gelb', raw_yellow, yellow_alternative, now)
 
         # Weisse Maske: alles links von gelb + min_lane_width ausblenden
         mask_white_filtered = mask_white.copy()
@@ -166,15 +201,17 @@ class detect_lane(Node):
         mask_white_filtered[:, :corridor_start] = 0
 
         # Weiss sucht weiter unten, falls nicht gefunden
+        last_white = self.anchor_column('Weiss', now)
         detection_row_factor = self.detection_row_factor
         center_white_y = int(self.img_height * detection_row_factor)
-        center_white_x = self.get_x_for_driving(
-            mask_white_filtered, center_white_y, white_alternative, left_line=False)
-        while center_white_x == white_alternative and detection_row_factor <= 0.95:
+        raw_white = self.get_x_for_driving(
+            mask_white_filtered, center_white_y, left_line=False, last_known=last_white)
+        while raw_white is None and detection_row_factor <= 0.95:
             detection_row_factor += 0.05
             center_white_y = int(self.img_height * detection_row_factor)
-            center_white_x = self.get_x_for_driving(
-                mask_white_filtered, center_white_y, white_alternative, left_line=False)
+            raw_white = self.get_x_for_driving(
+                mask_white_filtered, center_white_y, left_line=False, last_known=last_white)
+        center_white_x = self.track_line('Weiss', raw_white, white_alternative, now)
 
         if center_white_x <= center_yellow_x:
             if center_white_x > int(width * 0.4):
@@ -197,6 +234,18 @@ class detect_lane(Node):
         # Ungefilterte Masken: die links der gelben Linie ausgeblendeten weissen Pixel
         # braucht nur der PID; fuer die Costmap trennt lane_costmap_node selbst.
         self.publish_lane_mask(mask_yellow, mask_white, img.header.stamp)
+
+    def lines_lost(self, mask_yellow, mask_white, now):
+        """Fehlen beide Spurlinien in der Suchzeile? Mit Formfilter: eine helle Tunnelwand ist
+        keine Linie. Eine Kante weiter als LINE_MAX_JUMP_CM vom Anker gilt nicht als Linie."""
+        row = int(self.img_height * self.detection_row_factor)
+        max_jump = self.max_jump_px()
+        for name, mask, left in (('Gelb', mask_yellow, True), ('Weiss', mask_white, False)):
+            last = self.anchor_column(name, now)
+            raw = self.get_x_for_driving(self.shape_filter(mask), row, left_line=left, last_known=last)
+            if raw is not None and (last is None or max_jump is None or abs(raw - last) <= max_jump):
+                return False
+        return True
 
     def publish_mask_debug(self, mask_yellow, mask_white,
                            center_yellow_x, center_yellow_y, center_white_x, center_white_y):
@@ -237,7 +286,13 @@ class detect_lane(Node):
 
         # Schon hier ausduennen: lane_costmap_node verwirft ohnehin die meisten Punkte
         # wieder, in voller Aufloesung waeren es zehntausende int32 pro Frame.
-        stride = max(1, int(self.lane_mask_stride))
+        # Nur im Obstacle-Modus: helle Flaechen (Waende, Papier, Spiegelungen) und den eigenen
+        # Bot aus den Spurwaenden nehmen, damit Nav2 beim Ausweichen nicht an Scheinwaenden scheitert.
+        if self.control_mode == ControlType.Obstacle:
+            mask_yellow = self.shape_filter(mask_yellow)
+            mask_white = self.shape_filter(mask_white)
+
+        stride = max(1, int(LANE_MASK_STRIDE))
         yellow_ys, yellow_xs = np.where(mask_yellow[::stride, ::stride] > 0)
         white_ys, white_xs = np.where(mask_white[::stride, ::stride] > 0)
 
@@ -392,6 +447,48 @@ class detect_lane(Node):
         corners = [c for _, cs in corners_per_poly for c in cs]
         return polies, horizontal, vertical, corners, intersection_corners
 
+    def shape_filter(self, mask):
+        """Nur Linienfoermiges behalten: eigenen Bot ausblenden, zu dicke Flaechen und
+        kleine Reste entfernen. Ohne bev.yaml (kein Massstab) unveraendert."""
+        b = self._bev
+        if b is None or mask.shape[:2] != (b['height'], b['width']):
+            return mask
+        px_per_cm = 0.01 / b['res']
+        mask = mask.copy()
+
+        # 1. Eigener Bot: Zeilen mit X < SELF_MASK_X_CM, Spalten mit |Y| < SELF_MASK_Y_CM
+        if SELF_MASK_X_CM > 0 and SELF_MASK_Y_CM > 0:
+            v0 = int((b['x_max'] - SELF_MASK_X_CM / 100.0) / b['res'])
+            u0 = int((b['y_half'] - SELF_MASK_Y_CM / 100.0) / b['res'])
+            u1 = int(np.ceil((b['y_half'] + SELF_MASK_Y_CM / 100.0) / b['res']))
+            mask[max(0, v0):, max(0, u0):min(mask.shape[1], u1)] = 0
+
+        # 2. Dicke Flaechen: Mittelpunkte, um die ein Kreis mit Durchmesser LINE_MAX_WIDTH_CM
+        #    ganz in die Maske passt (Abstand zum Rand > r), und alles bis 1,5 r darum
+        #    herum (der Kreis selbst + ausgefranster Rand) aus der Maske nehmen.
+        #    Wie ein Opening mit Kreiskern, per Distanztransformation aber ~3x schneller
+        #    (6 statt 22 ms bei 640x440 und 8 cm).
+        #    Helle Flaechen werden oft nur lueckenhaft erkannt (viele kleine Loecher) --
+        #    fuer die Dickenpruefung erst Luecken bis ~2 cm schliessen, entfernt wird aus
+        #    der Originalmaske. Echte Linien liegen > 2 cm auseinander und bleiben getrennt.
+        r = LINE_MAX_WIDTH_CM * px_per_cm / 2.0
+        g = max(3, int(round(2.0 * px_per_cm)) | 1)
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g, g)))
+        core = cv2.distanceTransform(closed, cv2.DIST_L2, 5) > r
+        if core.any():
+            to_core = cv2.distanceTransform((~core).astype(np.uint8), cv2.DIST_L2, 5)
+            mask[to_core <= 1.5 * r] = 0
+
+        # 3. Kleine Reste
+        min_px = LINE_MIN_AREA_CM2 * px_per_cm * px_per_cm
+        if min_px > 0:
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            small = np.where(stats[1:, cv2.CC_STAT_AREA] < min_px)[0] + 1
+            if small.size:
+                mask[np.isin(labels, small)] = 0
+        return mask
+
     def color_masks(self, img):
         """Gelb- und Weiss-Maske aus dem BGR-Bild: CLAHE auf L, dann Schwellen in LAB."""
         lab = self.apply_clahe(img)
@@ -411,25 +508,68 @@ class detect_lane(Node):
                                 tileGridSize=(tile_size, tile_size))
         return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
 
-    def get_x_for_driving(self, mask, distance, no_lane_value, left_line):
-        """Spalte der Linienkante um Zeile distance (+/-50 Zeilen, Median), sonst
-        no_lane_value. left_line: rechte Kante der Linie (zur Spur hin), sonst linke."""
+    # Linien-Tracking entsprechend zur Duckiebot Challenge (DuckieRace,
+    # intersection_handling) umgebaut: naechste Kante zur letzten Position, verlorene
+    # Linie halten, Sprung pro Bild begrenzen. Zusaetzlich: Haltezeit, Sprung in cm.
+    # Frage an FaFelF: Gab es einen Grund, warum du dies anders geloest hast?
+
+    def anchor_column(self, name, now):
+        """Letzte Spalte der Linie, None ohne Detektion in den letzten LINE_HOLD_TIME_S s."""
+        anchor = self._anchor[name]
+        if anchor is not None and now - anchor[1] > LINE_HOLD_TIME_S:
+            self._anchor[name] = anchor = None
+        return None if anchor is None else anchor[0]
+
+    def track_line(self, name, raw, fallback, now):
+        """Endgueltige Spalte der Linie aus der Detektion raw (None = keine Kante)."""
+        log = self._line_log[name]
+        last = self.anchor_column(name, now)
+        if raw is None:
+            if last is None:
+                log.warn(f'keine Kanten -- Ersatzspalte {fallback}', throttle_duration_sec=2.0)
+                return fallback
+            log.warn(f'keine Kanten -- halte letzte Position {last}', throttle_duration_sec=2.0)
+            return last
+        max_jump = self.max_jump_px()
+        if last is not None and max_jump is not None and abs(raw - last) > max_jump:
+            clamped = last + int(np.sign(raw - last) * max_jump)
+            log.warn(f'Sprung {abs(raw - last)} px -- begrenzt auf {clamped}',
+                     throttle_duration_sec=2.0)
+            raw = clamped
+        self._anchor[name] = (raw, now)
+        return raw
+
+    def max_jump_px(self):
+        """LINE_MAX_JUMP_CM in Pixeln, None ohne bev.yaml (dann unbegrenzt)."""
+        if self._bev is None or (self.img_height, self.img_width) != (
+                self._bev['height'], self._bev['width']):
+            return None
+        return max(1, int(round(LINE_MAX_JUMP_CM / 100.0 / self._bev['res'])))
+
+    def get_x_for_driving(self, mask, distance, left_line, last_known=None):
+        """Spalte der Linienkante um Zeile distance (+/-50 Zeilen, Median), None ohne
+        Kante. Gesucht wird nur die Kante zur Spur hin: bei left_line (gelb) die rechte,
+        sonst die linke. Je Zeile die naechste zu last_known, ohne last_known die
+        aeusserste."""
         grad = cv2.Sobel(mask, cv2.CV_16S, 1, 0, ksize=3, scale=1, delta=0,
                          borderType=cv2.BORDER_DEFAULT)
-        # Betrag, sonst enthaelt th1 nur linke Kanten (rechte sind negativ) und [-1]/[0] liefern dasselbe
-        abs_grad = cv2.convertScaleAbs(grad)
-        _, th1 = cv2.threshold(abs_grad, 127, 255, cv2.THRESH_BINARY)
+        # Rechte Kante = hell -> dunkel (negativ), linke = dunkel -> hell (positiv).
+        # Mit beiden Kantenarten rastet das Tracking auf der falschen Kante derselben Linie ein.
+        edges = (-grad if left_line else grad) > 127
 
         a = []
         for row in range(max(0, distance - 50), min(len(mask), distance + 50)):
-            hits = np.where(th1[row] == 255)[0]
+            hits = np.flatnonzero(edges[row])
             if hits.size == 0:
                 continue
-            a.append(hits[-1] if left_line else hits[0])
+            if last_known is not None:
+                a.append(hits[np.argmin(np.abs(hits - last_known))])
+            else:
+                a.append(hits[-1] if left_line else hits[0])
 
         if len(a) > 10:
             return int(np.median(a))
-        return no_lane_value
+        return None
 
     # --- Beenden ---
 

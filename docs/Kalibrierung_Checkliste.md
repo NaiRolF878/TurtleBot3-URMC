@@ -64,7 +64,7 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
     L = Helligkeit, A = grün (<128) bis rot (>128), B = blau (<128) bis gelb
     (>128), 128 = farblos. **Gelb** erkennt man am hohen B (`lab_b_yellow_l`
     150), **Weiß** am hohen L bei A/B nahe 128 (`lab_l_white_l` 200). Die
-    Messwerte vom 22.10. stehen als Kommentar in `detect_lane.py`.
+    Messwerte vom 22.10. stehen als Kommentar in `detect_lane_nav2.py`.
   - `min_lane_width` ist in BEV-Pixeln: 80 px = 10 cm.
   - `detection_row_factor`: Suchzeile im Bild (0,80 = 80 % der Höhe).
   - Sichern: `bash scripts/tb/save-params.sh detect_lane`
@@ -77,12 +77,14 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
 
 - [ ] `nav2_obstacle.sh` starten, noch **nicht** freigeben (keine Leertaste).
 - [ ] Ein Klebeband quer in gemessenem Abstand vor den Bot legen, z. B. 40 cm
-      vor der Radachse. In RViz das Display `Spurgedaechtnis (nicht im Tunnel)`
-      bzw. die Draufsicht `/nav2/view` ansehen: Das Band muss dort
-      erscheinen, wo es real liegt. Die Draufsicht hat einen 0,5-m-Maßstab
-      unten rechts.
+      vor der Radachse. In der Draufsicht `/nav2/view` muss es als weiße Linie
+      dort erscheinen, wo es real liegt. Die Draufsicht hat einen
+      0,5-m-Maßstab unten rechts. Rot (Wand) wird ein Querband bewusst nicht:
+      Wand werden nur die gelbe und die weiße Spurlinie.
 - [ ] Bot auf die Spur stellen: Beide Linien müssen nach ~3 Bildern als
       blockierte Zellreihen (in `/nav2/view` rot) erscheinen.
+- Bot angehoben oder umgesetzt? Die Karten passen dann nicht mehr zur Odometrie:
+  absetzen und im Stand **L** im Terminal drücken (leert Spurgedächtnis und Costmaps).
 - [ ] Bot von Hand ein Stück vorschieben: Die Linien neben und hinter ihm
       müssen stehen bleiben (Spurgedächtnis), obwohl die Kamera sie nicht mehr
       sieht.
@@ -92,11 +94,11 @@ Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie ni
 
 ## Phase 4 — Modusumschaltung
 
-Werte in `Switch_Control.yaml`. `obstacle_check_angle_deg` (20°) ist der
-**Halbwinkel**, der Kegel ist 40° breit. Ausgelöst wird bei
-`obstacle_trigger_distance` (0,20 m), aber nur, wenn keine Spurlinie zwischen
+Werte in `Switch_Control.yaml`. `obstacle_check_angle_deg` (45°) ist der
+**Halbwinkel**, der Kegel ist 90° breit. Ausgelöst wird bei
+`obstacle_trigger_distance` (0,30 m), aber nur, wenn keine Spurlinie zwischen
 Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher als
-`obstacle_clear_distance` (0,20 m) im 270°-Bereich liegt.
+`obstacle_clear_distance` (0,40 m) im 270°-Bereich liegt.
 
 - [ ] **Fehlauslösung:** eine Runde **ohne** Hindernis. Im Debugbild muss
       durchgehend `Lane` stehen. Springt es auf `Obstacle`, sieht der LiDAR
@@ -118,7 +120,8 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
       (z. B. „faehrt: Bahnplaner (Spurmitte)“ oder „kein Weg gefunden“), und
       den letzten Abbruchgrund von `controller_server`. Rot heißt jünger als
       10 s. Der cyan Pfad muss um das Hindernis herum zwischen den Linien
-      liegen; im Lane-Modus ist kein Pfad zu sehen.
+      liegen; im Lane-Modus ist kein Pfad zu sehen. Er bleibt stabil und wechselt nur,
+      wenn etwas ihn blockiert, er fast abgefahren ist oder der Regler abbricht.
 - [ ] Im Debugbild muss `Spur -> Costmap` eine Punktzahl in Grün zeigen. Steht
       dort `still`, kommt nichts an. Dann die Ursache suchen und nicht an MPPI
       drehen.
@@ -127,7 +130,7 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
          Ausweichen stehen? (Phase 3)
       2. Steht in der Statuszeile „Bahnplaner (Spurmitte)“? Bei „geradeaus“
          fehlt die Spurmitte, bei „kein Weg gefunden“ sperren Linien oder
-         Hindernisse den Korridor für NavFn (Kreis mit 0,105 m Radius).
+         Hindernisse den Korridor für NavFn (Kreis mit 0,09 m Radius plus Padding).
       3. Meldet die Statuszeile, dass die Regelschleife zu langsam ist?
          Die Prüfung mit dem echten Umriss (`consider_footprint`) kostet
          Rechenzeit.
@@ -139,17 +142,22 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
 
 - [ ] In `rqt_image_view` (Debugbild) einmal **„Publish click location“**
       anhaken.
-- [ ] Bot vor die Öffnung stellen, im Debugbild auf **TUNNEL STARTEN**
-      klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot fährt mit
-      Kamera auf die Öffnung zu.
-- [ ] Kurz vor der Öffnung wechselt es auf `Tunnel`: statt des Kamerabilds
-      „Kamera aus (Tunnel)“, `ros2 topic hz /lokal/bev` verstummt, die
+- [ ] Bot auf die Spur vor die Öffnung stellen, im Debugbild auf **TUNNEL STARTEN**
+      klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot folgt mit
+      Kamera und PID der Spur auf die Öffnung zu.
+- [ ] Enden beide Linien, wechselt es auf `Tunnel` und der Bot hält: statt des
+      Kamerabilds „Kamera aus (Tunnel)“, `ros2 topic hz /lokal/bev` verstummt, die
       Draufsicht zeigt die geleerte Tunnelkarte (grau = unbekannt).
-- [ ] Draufsicht: Nach ~16 cm Fahrt erscheint die orange Eingangssperre an der
-      Startstelle. `entrance_wall_width` (0,6 m, `Lane_Costmap.yaml`) muss
-      mindestens so breit sein wie die echte Öffnung.
-- [ ] Nach dem Austritt springt der Button zurück, der Bot wechselt in `Lane`.
+- [ ] Im Log steht `Tuer gefunden` mit der echten Breite der Öffnung, danach fährt der
+      Bot hindurch. Steht `Keine Tunneloeffnung im Scan gefunden`, sieht der LiDAR
+      die Türkanten nicht: Lage des Bots und `/scan` prüfen.
+- [ ] Draufsicht: Ist der Bot ~16 cm hinter der Tür, erscheint die orange
+      Eingangssperre genau zwischen den Türkanten.
+- [ ] Der Bot verlässt die Enclosure durch den Ausgang. Erst wenn er ganz außerhalb
+      der Wände ist, springt der Button zurück und er wechselt in `Lane`.
       Stoppen bei Bedarf mit der Leertaste.
+- [ ] Start im Eingang oder im Tunnel ohne Linien im Bild: Der Modus wechselt sofort
+      auf `Tunnel`, die Einfahrt entfällt, es gibt keine Eingangssperre.
 
 ---
 
