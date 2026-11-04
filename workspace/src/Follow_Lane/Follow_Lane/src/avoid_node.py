@@ -55,7 +55,7 @@ class avoid_node(Node):
         # Offset: wirkt ab offset_trigger_distance, voll ab offset_saturation_distance.
         self.declare_parameter('offset_trigger_distance',    0.80, frange(0.05, 5.0))
         self.declare_parameter('offset_saturation_distance', 0.25, frange(0.02, 5.0))
-        self.declare_parameter('offset_gain',                0.6,  frange(0.0, 5.0))
+        self.declare_parameter('offset_gain',                0.22, frange(0.0, 5.0))
         self.declare_parameter('offset_max',                 0.6,  frange(0.0, 5.0))
         # 1.0 passt zu detect_lane (positiver Spurfehler = nach links): Hindernis
         # rechts -> positiver Offset. -1.0 nur, wenn detect_lane die Konvention dreht.

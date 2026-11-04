@@ -43,9 +43,10 @@
     offset_trigger_distance:    0.80
     # ... und ab dieser wirkt er voll. Dazwischen linear -- je naeher, desto mehr.
     offset_saturation_distance: 0.25
-    # Maximaler Offset bei voller Wirkung. Der Spurfehler liegt in [-1, 1], 0.6 ist
-    # also ein kraeftiger, aber nicht uebersteuernder Ausschlag.
-    offset_gain:                0.6
+    # Maximaler Offset bei voller Wirkung, gleiche Skala wie der Spurfehler [-1, 1]. Bei
+    # kp 15 erreicht die PID-Lenkung ab ~0,13 ihre Grenze, das liegt hier bei ~0,47 m.
+    # offset_max greift nur, wenn es kleiner als offset_gain ist.
+    offset_gain:                0.22
     offset_max:                 0.6
     # 1.0 passt zur Konvention von detect_lane (positiver Fehler = nach links):
     # Hindernis rechts -> positiver Offset -> Ausweichen nach links.
