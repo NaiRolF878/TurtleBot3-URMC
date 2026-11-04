@@ -2,6 +2,7 @@
 
 Ein:  /control/mode, /lane/center_path (Obstacle), /tunnel/explore_path (Tunnel), TF
 Aus:  ComputePathToPose an planner_server (Obstacle), FollowPath an controller_server,
+      /tunnel/path_result (String, Tunnel: erreicht/abgebrochen),
       /nav2/active_path (Path, latched: der Pfad, dem Nav2 gerade folgt; leer, wenn keiner),
       /nav2/status (String, fuer nav2_view)
 """
@@ -53,7 +54,9 @@ class nav2_goal_publisher(Node):
     controller_server (MPPI) faehrt ihn ab. Alle replan_period wird neu geplant, damit
     neu gesehene Hindernisse und Linien einfliessen.
 
-    Tunnel: der Pfad von tunnel_explorer_node.
+    Tunnel: der Pfad von tunnel_explorer_node, jeder genau einmal und sofort, auch mitten in
+    einer Fahrt. Keine Neuplanung im Takt, die Wege sollen dort nicht springen: neue Pfade
+    kommen nur bei neuem Ziel, gesperrtem Pfad oder Abbruch (siehe tunnel_explorer_node).
 
     Jedes gesendete Ziel bekommt eine Generationsnummer; ein Moduswechsel erhoeht sie
     ebenfalls. Antworten und Ergebnisse aelterer Generationen werden ignoriert,
@@ -99,6 +102,7 @@ class nav2_goal_publisher(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_active_path = self.create_publisher(Path, '/nav2/active_path', latched)
         self.pub_status = self.create_publisher(String, '/nav2/status', 1)
+        self.pub_path_result = self.create_publisher(String, '/tunnel/path_result', 1)
         self.follow_client = ActionClient(self, FollowPath, 'follow_path')
         self.plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
 
@@ -150,6 +154,8 @@ class nav2_goal_publisher(Node):
 
     def cb_explore_path(self, path):
         self._latest_explore_path = path
+        if self.control_mode == ControlType.Tunnel:
+            self._advance()
 
     def cb_center_path(self, path):
         first = self._center_path_received is None
@@ -236,6 +242,12 @@ class nav2_goal_publisher(Node):
             # Abbrueche sind beim rollierenden Ziel normal, daher nur warn().
             self.get_logger().warn(f'Ziel beendet: {status_text}.', throttle_duration_sec=2.0)
 
+        if self.control_mode == ControlType.Tunnel:
+            # Was als Naechstes kommt, entscheidet tunnel_explorer_node.
+            reached = status == GoalStatus.STATUS_SUCCEEDED
+            self.pub_path_result.publish(String(data='erreicht' if reached else 'abgebrochen'))
+            return
+
         # Naechstes Teilstueck nachschieben -- so entsteht das rollierende Ziel.
         if self.control_mode in ACTIVE_MODES:
             self._last_plan_time = None
@@ -253,12 +265,11 @@ class nav2_goal_publisher(Node):
             return
 
         if self.control_mode == ControlType.Tunnel:
-            if self._goal_active:
-                return
-            if self._latest_explore_path is None:
+            if self._latest_explore_path is not None:
+                path, self._latest_explore_path = self._latest_explore_path, None
+                self._send_goal(path, 'Explorer-Pfad')
+            elif not self._goal_active:
                 self._set_status('wartet auf Explorer-Pfad')
-                return
-            self._send_goal(self._latest_explore_path, 'Explorer-Pfad')
             return
 
         now = time.monotonic()

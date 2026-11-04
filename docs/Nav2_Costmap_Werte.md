@@ -41,7 +41,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 | `rolling_window` | `true` | `true` |
 | `width` / `height` | 4 / 4 m | 7 / 7 m |
 | `resolution` | 0.025 m | 0.025 m |
-| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.105 m |
+| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.09 m |
 | `global_frame` | `odom` | `odom` |
 
 ### `rolling_window`
@@ -85,7 +85,6 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 - **Was er bewirkt:** Kantenlänge einer Zelle, 0,025 m.
 - **Woher:** gewählt: Spurlinien (~2 cm) und Hindernisränder werden feiner
   abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen.
-  Zurück auf 0.05 heißt auch `min_frontier_cluster_cells` halbieren.
 - **Was kaputtgeht:** Andere Werte hängen an ihm: die 3,2-m-Grenze oben und
   die Quantisierung des `inflation_radius` (Abschnitt 3). Außerdem wird jede
   Linie auf ganze Zellen vergröbert. Wo nur wenige Zentimeter Luft sind, kann
@@ -560,5 +559,3 @@ halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
   `lane_costmap_node` neu starten. Beide lesen die Datei nur beim Start.
 - **Andere Höchstgeschwindigkeit** (`vx_max`) oder anderer `goal_distance` →
   `time_steps` nach der Formel in Abschnitt 5 nachrechnen.
-- **Enclosure-Öffnung gemessen** → `entrance_wall_width` (Block
-  `/keepout_zone_node` in `Lane_Costmap.yaml`) an die echte Breite anpassen.

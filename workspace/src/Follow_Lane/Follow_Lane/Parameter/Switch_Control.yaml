@@ -1,7 +1,7 @@
 /switch_control:
   ros__parameters:
     # --- Eintritt Lane -> Obstacle ---
-    # Halbwinkel: 20.0 heisst 40 Grad Gesamtkegel, bei 1 m also ca. +/-0.36 m seitlich.
+    # Halbwinkel: 45.0 heisst 90 Grad Gesamtkegel.
     obstacle_check_angle_deg: 45.0
     # LiDAR-Punkt im Kegel naeher als das (m, ab LiDAR) -> Obstacle, sofern keine
     # Spurlinie zwischen Bot und Punkt liegt. Der PID beachtet Hindernisse nicht; je
@@ -21,25 +21,3 @@
     line_block_tolerance: 0.02
     line_obstacle_margin: 0.05
     lane_max_age: 0.5
-
-    # --- Tunnel-Einfahrt (TunnelEntry -> Tunnel), nur LiDAR ---
-    # Umschalten (Kamera aus), sobald links und rechts voraus eine Wand naeher als
-    # tunnel_side_distance liegt. Testtunnel 0,5 m breit: Waende 0,25 m neben der Mitte,
-    # mit 0.35 schaltet es ~20 cm vor der Oeffnung.
-    tunnel_side_angle_min_deg: 30.0
-    tunnel_side_angle_max_deg: 100.0
-    tunnel_side_distance: 0.35
-    tunnel_entry_debounce: 0.2
-    # Sicherheitsnetz: spaetestens nach so viel Strecke (m) ab dem Umschalten gilt der
-    # Bot als drin. Klein, weil der Startabstand variiert: lieber Kamera zu frueh aus
-    # als im Tunnel an.
-    tunnel_entry_max_distance: 0.3
-    odom_frame: odom
-    robot_frame: base_footprint
-
-    # --- Tunnel-Austritt (Tunnel -> vorheriger Modus), nur LiDAR ---
-    # Strahl gilt als frei ab dieser Entfernung (m). Im Tunnel (Waende 0,25 m) sind so nur
-    # die Strahlen laengs der Roehre frei, im Raum fast alle, auch nahe einer Wand.
-    tunnel_exit_open_distance: 0.6
-    tunnel_exit_open_ratio: 0.8
-    tunnel_exit_debounce: 1.0

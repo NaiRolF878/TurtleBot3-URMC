@@ -18,7 +18,7 @@ Variante mit Zonenaufteilung fuer den Obstacle-Modus liegt auf `LDS03-Doku`.
 | `Lane`        | Start, Ende von Obstacle; nach dem Tunnel der Modus davor          | PID auf den Spurfehler       |
 | `Obstacle`    | LiDAR-Punkt im Kegel voraus naeher als `obstacle_trigger_distance`, keine Spurlinie dazwischen | Nav2 (`/nav2/cmd_vel`) |
 | `TunnelEntry` | Button im Debugbild oder Tunnelschild                              | PID auf den Spurfehler       |
-| `Tunnel`      | LiDAR sieht die Tunnelwaende oder Einfahrtsstrecke erreicht        | Nav2 (`/nav2/cmd_vel`)       |
+| `Tunnel`      | Beide Spurlinien enden kurz vor dem Bot                            | Nav2 (`/nav2/cmd_vel`)       |
 
 Jeder andere Modus, veraltete Eingangsdaten oder ein fehlendes `/control/mode`
 fuehren zu einem Nullbefehl.
@@ -43,10 +43,13 @@ die weisse Spurlinie als virtuelle Waende (verfolgt, Querlinien und helle Flaech
 nicht), NavFn plant zwischen ihnen um das Hindernis herum, MPPI faehrt
 den Weg ab. Kollision ueber den Umriss des Burgers, unabhaengig von der Spurbreite.
 
-**Tunnel (TunnelEntry, Tunnel).** Einfahrt mit Kamera und PID auf der 20-cm-Spur
-(dort passt der Bot fuer Nav2 nicht zwischen die Spurwaende), ab der Oeffnung nur
-LiDAR (Kamera laut Reglement verboten). tunnel_explorer_node sucht den
-Ausgang, keepout_zone_node sperrt den Eingang.
+**Tunnel (TunnelEntry, Tunnel).** Einfahrt mit Kamera und PID auf der 20-cm-Spur (dort
+passt der Bot fuer Nav2 nicht zwischen die Spurwaende), bis die Linien an der Oeffnung
+enden. Ab dann nur LiDAR (Kamera laut Reglement verboten): tunnel_explorer_node findet die
+Tuer im Scan und faehrt hindurch, keepout_zone_node sperrt sie danach. Die Waende bilden
+eine Huelle: Strahlen durch die Huelle nach aussen zeigen auf den Ausgang, Graues innerhalb
+ist Schatten hinter Hindernissen. Draussen ist der Bot, wenn er die Huelle ganz verlassen
+hat. Das alles kommt ohne Masse der Enclosure aus.
 
 ## Detaildoku
 

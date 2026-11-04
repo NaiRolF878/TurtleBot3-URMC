@@ -1,103 +1,100 @@
-"""Sucht im Tunnel den Ausgang und liefert den Pfad dorthin.
+"""Faehrt durch die Tuer in den Tunnel, sucht den Ausgang und meldet, wenn der Bot draussen ist.
 
-Ein:  /control/mode, /global_costmap/costmap (OccupancyGrid), /tunnel/entrance_pose
-Aus:  /tunnel/explore_path (Path, odom); Pfade rechnet planner_server (ComputePathToPose)
+Ein:  /control/mode, /global_costmap/costmap, /scan, /detect/lines_lost, /tunnel/path_result, TF
+Aus:  /tunnel/explore_path (Path, odom), /tunnel/door (PolygonStamped, odom: Tuerkanten und
+      Punkt innen), /tunnel/outside (Bool); Pfade rechnet planner_server (ComputePathToPose)
 """
 import math
+import time
 
 import cv2
 import numpy as np
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Point32, PolygonStamped
 from nav2_msgs.action import ComputePathToPose
 from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from std_msgs.msg import UInt8
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
+from Follow_Lane.src import tunnel_geometry as geo
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, irange, read_params, run_node,
-    yaw_from_quaternion)
+    ControlType, control_mode_from_msg, pose2d_from_transform, run_node)
 
-# Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar. Gemeint sind
-# einzelne LiDAR-Strahlen ins Unbekannte (1-2 Zellen): Waende sind in der Costmap schon
-# um robot_radius aufgeblasen, eine Engstelle fuer die Bot-MITTE darf schmal sein (am
-# Tunneleingang gemessen ~20 cm).
-MIN_PASSAGE_M = 0.075
-# Liegt die naechste befahrbare Flaeche weiter vom Bot weg, steht er in keiner.
-MAX_START_GAP_M = 0.15
+ODOM_FRAME = 'odom'
+ROBOT_FRAME = 'base_footprint'
+TICK_S = 0.5
+# Antwortet planner_server so lange nicht, gilt die Anfrage als verloren.
+PLAN_TIMEOUT_S = 5.0
+# Karten aus der Zeit vor dem Leeren (lane_costmap_node, 0,3 s) nicht verwenden; die
+# global_costmap sendet mit 1 Hz.
+MAP_SETTLE_S = 1.5
+# So lange (s) muss der Bot durchgehend ausserhalb der Huelle sein.
+EXIT_HOLD_S = 1.0
+# Um diesen Radius (m) gilt eine Stelle als dieselbe: xy_goal_tolerance des Reglers.
+SAME_TARGET_M = 0.15
+
+ENTERING = 'Einfahrt'
+EXPLORING = 'Suche'
+OPENING = 'Oeffnung'
 
 
 class tunnel_explorer_node(Node):
-    """Frontier-Zellen der global_costmap (frei, direkt neben Unbekanntem), zu
-    Clustern zusammengefasst und bewertet nach "weit weg vom Eingang" und "schnell
-    erreichbar". Zum besten Punkt laesst planner_server einen Pfad rechnen.
+    """Einfahrt: die naechste Tuer voraus im Scan, Ziel so weit dahinter, dass der Bot drin ist.
+    Stand beim Moduswechsel gar keine Linie im Bild, ist er schon im Eingang oder im Tunnel und
+    die Einfahrt entfaellt.
 
-    Nur Frontier jenseits der Eingangslinie (in Einfahrtrichtung) kommen in Frage.
-    switch_control schaltet schon vor der Oeffnung auf Tunnel; der LiDAR sieht dann
-    auch den freien Raum hinter und neben dem Bot, und "weit weg vom Eingang" wuerde
-    genau dorthin ziehen, aus dem Tunnel weg.
+    Die Wand-Huelle waechst aus den Tuerkanten (sonst den naechsten Waenden links und rechts)
+    ueber alle damit verbundenen Wandzellen. Raumwaende und freistehende Hindernisse gehoeren
+    nicht dazu. Drinnen liegt der Bot in der Huelle, draussen liegen alle Waende auf einer Seite:
+    das kommt ohne Masse der Enclosure aus. /tunnel/outside wird erst gesendet, nachdem der Bot
+    einmal drin war, ein Start vor dem Tunnel springt also nicht zurueck.
 
-    Geplant wird nur durch bekanntes Gebiet (allow_unknown: false); ein
-    Frontier-Punkt liegt per Definition am Rand des Bekannten. Neu bewertet wird bei
-    Ankunft oder nach stall_timeout ohne Ankunft.
+    Zielwahl in fester Reihenfolge: (1) Strahlen durch die Huelle nach aussen zeigen auf eine
+    Oeffnung, nicht die am Eingang. (2) Naechste Frontier in der Huelle: Graues dort ist Schatten
+    hinter Hindernissen. (3) Frontier jenseits der Eingangslinie, weit weg vom Eingang. (4) Der
+    weiteste erreichbare Punkt. Besuchte und gescheiterte Stellen werden nicht wieder gewaehlt.
+
+    Ein Ziel wechselt nur bei Ankunft, wenn es unerreichbar wird oder wenn eine Oeffnung
+    auftaucht. Keine Neuplanung im Takt, die Wege sollen im Tunnel nicht springen: neu geplant
+    wird zum selben Ziel nur, wenn eine gesperrte Zelle auf dem Pfad liegt oder der Regler
+    einmal abbricht. Anders als im Obstacle-Modus gibt es keine Rueckwaertssperre, der Bot muss
+    aus Sackgassen wieder herauskommen.
     """
 
     def __init__(self):
         super().__init__('tunnel_explorer_node')
 
-        # --- Parameter ---
-        self.declare_parameter('recompute_rate', 1.0, frange(0.2, 10.0))
-        self.declare_parameter('arrival_radius', 0.3, frange(0.05, 2.0))
-        self.declare_parameter('stall_timeout', 10.0, frange(1.0, 60.0))
-        # OccupancyGrid-Skala 0..100 (99 inscribed, 100 lethal): 99 = alles, was NavFn
-        # befahren darf. Mit 50 galt im ~50 cm breiten Tunnel durch die Inflation keine
-        # Zelle als frei, und der Explorer fand nie ein Ziel.
-        self.declare_parameter('free_cost_threshold', 99, irange(1, 100))
-        # In Zellen der global_costmap, haengt also an deren resolution.
-        self.declare_parameter('min_frontier_cluster_cells', 6, irange(1, 1000))
-        self.declare_parameter('entrance_weight', 1.0, frange(0.0, 10.0))
-        self.declare_parameter('robot_distance_weight', 0.3, frange(0.0, 10.0))
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('costmap_topic', '/global_costmap/costmap')
-        self.declare_parameter('output_path_topic', '/tunnel/explore_path')
-        self._param_names = [
-            'arrival_radius', 'stall_timeout', 'free_cost_threshold',
-            'min_frontier_cluster_cells', 'entrance_weight', 'robot_distance_weight',
-            'odom_frame', 'robot_frame',
-        ]
-
-        # --- Subscriber ---
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cb_control_mode, 1)
-        self.sub_entrance_pose = self.create_subscription(
-            PoseStamped, '/tunnel/entrance_pose', self.cb_entrance_pose, 1)
         self.sub_costmap = self.create_subscription(
-            OccupancyGrid, self.get_parameter('costmap_topic').value, self.cb_costmap, 1)
+            OccupancyGrid, '/global_costmap/costmap', self.cb_costmap, 1)
+        self.sub_scan = self.create_subscription(
+            LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
+        self.sub_lines_lost = self.create_subscription(
+            Bool, '/detect/lines_lost', self.cb_lines_lost, 1)
+        self.sub_path_result = self.create_subscription(
+            String, '/tunnel/path_result', self.cb_path_result, 1)
 
-        # --- Publisher ---
-        self.pub_explore_path = self.create_publisher(
-            Path, self.get_parameter('output_path_topic').value, 1)
+        self.pub_explore_path = self.create_publisher(Path, '/tunnel/explore_path', 1)
+        self.pub_door = self.create_publisher(PolygonStamped, '/tunnel/door', 1)
+        self.pub_outside = self.create_publisher(Bool, '/tunnel/outside', 1)
         self.plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
 
-        # --- Timer ---
-        self.timer = self.create_timer(
-            1.0 / self.get_parameter('recompute_rate').value, self.cb_timer)
+        self.timer = self.create_timer(TICK_S, self.cb_timer)
 
-        # --- Zustand ---
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.control_mode = None
-        self.entrance_pose = None       # (x, y, yaw) im odom-Frame, yaw = Einfahrtrichtung
         self.latest_costmap = None
-        self.current_target = None      # (x, y) im odom-Frame
-        self.target_set_time = None
-        self.planning_in_progress = False
-        self._pending_target = None
+        self.latest_scan = None
+        self._saw_lines = False
+        self._reset()
 
         self.get_logger().info('Started tunnel_explorer_node Node.')
 
@@ -105,200 +102,377 @@ class tunnel_explorer_node(Node):
 
     def cb_control_mode(self, msg):
         new_mode = control_mode_from_msg(self, msg)
-        if new_mode is None:
+        if new_mode is None or new_mode == self.control_mode:
             return
-        if new_mode != ControlType.Tunnel and self.control_mode == ControlType.Tunnel:
-            # Eingang und Ziele gehoeren zu diesem Tunnel; der naechste bringt eigene.
-            self.entrance_pose = None
-            self.current_target = None
-            self.target_set_time = None
-            self._pending_target = None
+        if new_mode == ControlType.TunnelEntry:
+            self._saw_lines = False
+        if new_mode == ControlType.Tunnel:
+            self._reset()
+            self.latest_costmap = None
+            self._tunnel_since = time.monotonic()
+            self._phase = ENTERING if self._saw_lines else EXPLORING
         self.control_mode = new_mode
 
-    def cb_entrance_pose(self, pose):
-        self.entrance_pose = (pose.pose.position.x, pose.pose.position.y,
-                              yaw_from_quaternion(pose.pose.orientation))
-
     def cb_costmap(self, grid):
-        self.latest_costmap = grid
+        if self._tunnel_since is not None \
+                and time.monotonic() - self._tunnel_since >= MAP_SETTLE_S:
+            self.latest_costmap = grid
+
+    def cb_scan(self, scan):
+        self.latest_scan = scan
+
+    def cb_lines_lost(self, msg):
+        if not msg.data:
+            self._saw_lines = True
+
+    def cb_path_result(self, msg):
+        if self.control_mode != ControlType.Tunnel or self._target is None:
+            return
+        if msg.data == 'erreicht':
+            self._finish_target(failed=False)
+        elif not self._retried:
+            self._retried = True
+            self._request_path(self._target)
+        else:
+            self._finish_target(failed=True)
 
     def cb_timer(self):
-        if self.control_mode != ControlType.Tunnel:
+        if self.control_mode != ControlType.Tunnel or self.latest_costmap is None:
             return
-        if self.latest_costmap is None or self.entrance_pose is None:
+        pose = self._robot_pose()
+        if pose is None:
             return
-        if self.planning_in_progress:
+        grid, res, origin = self._grid()
+        self._update_walls(grid, res, origin, pose)
+        hull = geo.convex_hull(self._walls_xy())
+        self._update_outside(hull, pose)
+
+        if self._planning_since is not None:
+            if time.monotonic() - self._planning_since < PLAN_TIMEOUT_S:
+                return
+            self.get_logger().warn('planner_server antwortet nicht -- neue Anfrage.',
+                                   throttle_duration_sec=5.0)
+            self._planning_since = None
+
+        if self._phase == ENTERING:
+            self._enter_step(pose)
             return
-        read_params(self, self._param_names)
+        self._search_step(grid, res, origin, pose, hull)
 
-        robot_pose = self._lookup_robot_pose()
-        if robot_pose is None:
-            return
-
-        need_new_target = self.current_target is None
-        if not need_new_target:
-            dist_to_target = math.hypot(
-                robot_pose[0] - self.current_target[0], robot_pose[1] - self.current_target[1])
-            stalled = ((self.get_clock().now() - self.target_set_time).nanoseconds / 1e9
-                       >= self.stall_timeout)
-            need_new_target = dist_to_target <= self.arrival_radius or stalled
-
-        if need_new_target:
-            self._choose_new_target(robot_pose)
-
-    def cb_plan_response(self, future):
+    def cb_plan_response(self, future, target):
         goal_handle = future.result()
         if goal_handle is None or not goal_handle.accepted:
-            self.get_logger().warn(
-                'Explorations-Pfad wurde vom planner_server abgelehnt.', throttle_duration_sec=5.0)
-            self.planning_in_progress = False
+            self.get_logger().warn('Pfad-Anfrage vom planner_server abgelehnt.',
+                                   throttle_duration_sec=5.0)
+            self._planning_since = None
             return
-        goal_handle.get_result_async().add_done_callback(self.cb_plan_result)
+        goal_handle.get_result_async().add_done_callback(
+            lambda f, t=target: self.cb_plan_result(f, t))
 
-    def cb_plan_result(self, future):
-        self.planning_in_progress = False
-
-        # Der Modus kann waehrend der Planung gewechselt haben.
-        if self.control_mode != ControlType.Tunnel or self._pending_target is None:
+    def cb_plan_result(self, future, target):
+        self._planning_since = None
+        # Der Modus oder das Ziel kann waehrend der Planung gewechselt haben.
+        if self.control_mode != ControlType.Tunnel or target != self._target:
             return
-
         result = future.result()
         path = result.result.path if result is not None else None
         if path is None or not path.poses:
-            self.get_logger().warn(
-                'planner_server hat keinen Pfad zum gewaehlten Frontier-Punkt gefunden.',
-                throttle_duration_sec=5.0)
+            self.get_logger().warn(f'planner_server findet keinen Pfad zu {self._kind} '
+                                   f'x={target[0]:.2f} y={target[1]:.2f}.',
+                                   throttle_duration_sec=2.0)
+            self._finish_target(failed=True)
             return
-
+        self._path = path
         self.pub_explore_path.publish(path)
-        self.current_target = self._pending_target
-        self.target_set_time = self.get_clock().now()
-        self.get_logger().info(
-            f'Neues Explorations-Ziel: x={self.current_target[0]:.2f} '
-            f'y={self.current_target[1]:.2f} (odom).')
 
-    # --- Hilfsmethoden ---
+    # --- Einfahrt ---
 
-    def _lookup_robot_pose(self):
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                self.odom_frame, self.robot_frame, rclpy.time.Time())
-        except (LookupException, ConnectivityException, ExtrapolationException) as e:
-            self.get_logger().warn(
-                f'TF-Lookup fuer Roboterpose fehlgeschlagen: {e}', throttle_duration_sec=2.0)
-            return None
-        return (tf.transform.translation.x, tf.transform.translation.y)
-
-    def _choose_new_target(self, robot_pose):
-        candidate = self._pick_frontier(self.latest_costmap, robot_pose, self.entrance_pose)
-        if candidate is None:
-            self.get_logger().warn(
-                'Kein erreichbares Ziel im Tunnel -- am weitesten Punkt angekommen, Karte '
-                'noch zu leer oder der Bot steht in keiner befahrbaren Flaeche.',
-                throttle_duration_sec=5.0)
+    def _enter_step(self, pose):
+        if self._target is not None:
+            if self._path_blocked():
+                self._request_path(self._target)
             return
-        x, y, kind = candidate
-        self.get_logger().info(f'Ziel ({kind}): x={x:.2f} y={y:.2f}', throttle_duration_sec=2.0)
-        self._request_path((x, y))
+        door = self._find_door(pose)
+        if door is None:
+            self.get_logger().warn('Keine Tunneloeffnung im Scan gefunden -- Bot wartet.',
+                                   throttle_duration_sec=2.0)
+            return
+        a, b, center, width, normal = door
+        self._door = (a, b, center, normal, width)
+        self._seeds = np.vstack([self._seeds, a, b])
+        target = center + normal * geo.DOOR_DEPTH_M
+        self._publish_door(a, b, target)
+        self.get_logger().info(f'Tuer gefunden, {width:.2f} m breit: x={center[0]:.2f} '
+                               f'y={center[1]:.2f}.')
+        self._set_target((float(target[0]), float(target[1])), 'Tuer')
 
-    def _pick_frontier(self, grid_msg, robot_pose, entrance_pose):
-        """Ziel (x, y, art) im odom-Frame oder None. art: 'Frontier' oder, wenn es im
-        Tunnel keine erreichbare gibt, 'weitester Punkt' (moeglichst weit vom Eingang)."""
-        info = grid_msg.info
-        h, w = info.height, info.width
-        grid = np.asarray(grid_msg.data, dtype=np.int16).reshape(h, w)
-
-        free = (grid >= 0) & (grid < self.free_cost_threshold)
-        unknown = grid == -1
-
-        # Nur Flaechen, durch die der Bot passt: Opening entfernt alles schmaler als
-        # MIN_PASSAGE_M, z.B. einzelne LiDAR-Strahlen ins Unbekannte, an deren Ende
-        # sonst ein unerreichbares Ziel lag. Davon nur, was mit dem Bot verbunden ist.
-        k = max(1, int(round(MIN_PASSAGE_M / info.resolution)))
-        free = cv2.morphologyEx(free.astype(np.uint8), cv2.MORPH_OPEN,
-                                np.ones((k, k), np.uint8)).astype(bool)
-        if not np.any(free):
+    def _find_door(self, pose):
+        """Naechste Oeffnung vor dem Bot im odom-Frame."""
+        scan = self.latest_scan
+        scanner = self._scanner_pose(scan)
+        if scan is None or scanner is None:
             return None
-        _, regions = cv2.connectedComponents(free.astype(np.uint8), connectivity=8)
-        rows_f, cols_f = np.nonzero(free)
-        rc = (robot_pose[0] - info.origin.position.x) / info.resolution - 0.5
-        rr = (robot_pose[1] - info.origin.position.y) / info.resolution - 0.5
-        nearest = np.argmin((cols_f - rc) ** 2 + (rows_f - rr) ** 2)
-        if math.hypot(cols_f[nearest] - rc, rows_f[nearest] - rr) * info.resolution \
-                > MAX_START_GAP_M:
+        ranges = np.asarray(scan.ranges, dtype=np.float64)
+        angles = scan.angle_min + np.arange(ranges.size) * scan.angle_increment
+        angles = np.arctan2(np.sin(angles), np.cos(angles))
+        ranges = np.where(ranges > scan.range_min, ranges, np.nan)
+        in_robot = [o for o in geo.find_openings(angles, ranges)
+                    if (geo.transform(scanner, o[2][None])[0][0]) > 0.0]
+        if not in_robot:
             return None
-        free = regions == regions[rows_f[nearest], cols_f[nearest]]
+        a, b, center, width, normal = in_robot[0]
+        world = (lambda p: geo.transform(pose, geo.transform(scanner, p[None]))[0])
+        out = world(center + normal) - world(center)
+        return world(a), world(b), world(center), width, out / np.hypot(*out)
 
-        padded_unknown = np.pad(unknown, 1, mode='constant', constant_values=False)
-        neighbor_unknown = np.zeros_like(unknown)
-        for dr in (-1, 0, 1):
-            for dc in (-1, 0, 1):
-                if dr == 0 and dc == 0:
-                    continue
-                neighbor_unknown |= padded_unknown[1 + dr:1 + dr + h, 1 + dc:1 + dc + w]
+    def _publish_door(self, a, b, inside):
+        msg = PolygonStamped()
+        msg.header.frame_id = ODOM_FRAME
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.polygon.points = [Point32(x=float(p[0]), y=float(p[1]), z=0.0) for p in (a, b, inside)]
+        self.pub_door.publish(msg)
 
-        # Nur Zellen jenseits der Eingangslinie, also im Tunnel.
-        ex, ey, eyaw = entrance_pose
-        xs = info.origin.position.x + (np.arange(w) + 0.5) * info.resolution
-        ys = info.origin.position.y + (np.arange(h) + 0.5) * info.resolution
-        ahead = ((xs[None, :] - ex) * math.cos(eyaw) + (ys[:, None] - ey) * math.sin(eyaw)) > 0.0
+    # --- Suche ---
 
-        frontier = (free & neighbor_unknown & ahead).astype(np.uint8)
-        num_labels, labels = cv2.connectedComponents(frontier, connectivity=8)
+    def _search_step(self, grid, res, origin, pose, hull):
+        free = geo.reachable_free(grid, res, origin, pose[:2])
+        inside = hull is not None and geo.bot_inside(hull, pose)
+        opening = None
+        if free is not None and inside:
+            opening = self._opening_target(hull, free, res, origin, pose)
 
-        best_score = None
-        best_point = None
-        for label in range(1, num_labels):
-            rows, cols = np.where(labels == label)
-            if rows.size < self.min_frontier_cluster_cells:
+        if self._target is not None:
+            if opening is not None and self._kind != OPENING:
+                self._set_target(opening, OPENING)
+            elif self._path_blocked():
+                self._request_path(self._target)
+            return
+
+        if free is None:
+            self.get_logger().warn('Bot steht in keiner befahrbaren Flaeche -- kein Ziel.',
+                                   throttle_duration_sec=2.0)
+            return
+        if opening is not None:
+            self._set_target(opening, OPENING)
+            return
+        known_hull = hull if inside or self._door is not None else None
+        target, kind = self._frontier_target(grid, free, res, origin, pose, known_hull)
+        if target is None and self._done:
+            self.get_logger().warn('Besuchte Stellen vergessen und neu gesucht.',
+                                   throttle_duration_sec=5.0)
+            self._done = []
+            target, kind = self._frontier_target(grid, free, res, origin, pose, known_hull)
+        if target is None:
+            self.get_logger().warn('Kein erreichbares Ziel im Tunnel.', throttle_duration_sec=2.0)
+            return
+        self._set_target(target, kind)
+
+    def _opening_target(self, hull, free, res, origin, pose):
+        """Zielzelle hinter der breitesten Oeffnung der Huelle, nicht am Eingang."""
+        scan = self.latest_scan
+        scanner = self._scanner_pose(scan)
+        if scan is None or scanner is None:
+            return None
+        angles, ranges = self._world_rays(scan, scanner, pose)
+        sensor = geo.transform(pose, np.array([scanner[:2]]))[0]
+        for center, width, direction in geo.hull_openings(hull, sensor, angles, ranges):
+            if self._door is not None and np.hypot(*(center - self._door[2])) < self._door[4]:
                 continue
+            entrance, inward = self._entrance(pose)
+            if (center - entrance) @ inward <= 0.0:
+                continue
+            target = geo.nearest_free(free, res, origin, center + direction * geo.BOT_LENGTH, width)
+            if target is not None and not self._is_done(target):
+                return target
+        return None
 
-            # Die Zelle des Clusters, die seinem Schwerpunkt am naechsten liegt: der
-            # Schwerpunkt selbst kann im Unbekannten liegen, dahin plant NavFn nicht.
-            i = np.argmin((cols - cols.mean()) ** 2 + (rows - rows.mean()) ** 2)
-            world_x = info.origin.position.x + (cols[i] + 0.5) * info.resolution
-            world_y = info.origin.position.y + (rows[i] + 0.5) * info.resolution
-            dist_from_entrance = math.hypot(world_x - entrance_pose[0], world_y - entrance_pose[1])
-            dist_from_robot = math.hypot(world_x - robot_pose[0], world_y - robot_pose[1])
-            score = (self.entrance_weight * dist_from_entrance
-                     - self.robot_distance_weight * dist_from_robot)
+    def _world_rays(self, scan, scanner, pose):
+        ranges = np.asarray(scan.ranges, dtype=np.float64)
+        angles = scan.angle_min + np.arange(ranges.size) * scan.angle_increment + scanner[2] + pose[2]
+        angles = np.arctan2(np.sin(angles), np.cos(angles))
+        return angles, np.where(ranges > scan.range_min, ranges, np.nan)
 
-            if best_score is None or score > best_score:
-                best_score = score
-                best_point = (world_x, world_y, 'Frontier')
-        if best_point is not None:
-            return best_point
+    def _frontier_target(self, grid, free, res, origin, pose, hull):
+        targets = geo.frontier_targets(geo.frontier_mask(free, grid), res, origin)
+        targets = [t for t in targets if not self._is_done(t)
+                   and math.hypot(t[0] - pose[0], t[1] - pose[1]) > SAME_TARGET_M]
+        robot = np.array(pose[:2])
 
-        # Keine Frontier, z.B. weil der LiDAR den ganzen Tunnel schon sieht: dann so weit
-        # wie moeglich vom Eingang weg, zum weitesten erreichbaren Punkt im Tunnel.
-        rows, cols = np.nonzero(free & ahead)
+        if hull is not None:
+            inside = [t for t in targets if cv2.pointPolygonTest(hull, t, False) >= 0]
+            if inside:
+                return min(inside, key=lambda t: np.hypot(*(t - robot))), 'Frontier in der Huelle'
+
+        entrance, inward = self._entrance(pose)
+        ahead = [t for t in targets if (np.array(t) - entrance) @ inward > 0.0]
+        if ahead:
+            # Weit weg vom Eingang zaehlt mehr als der kurze Weg.
+            best = max(ahead, key=lambda t: np.hypot(*(t - entrance)) - 0.3 * np.hypot(*(t - robot)))
+            return best, 'Frontier'
+
+        rows, cols = np.nonzero(free)
+        xs = origin[0] + (cols + 0.5) * res
+        ys = origin[1] + (rows + 0.5) * res
+        keep = ((np.column_stack([xs, ys]) - entrance) @ inward) > 0.0
+        if not keep.any():
+            return None, None
+        xs, ys = xs[keep], ys[keep]
+        i = np.argmax(np.hypot(xs - entrance[0], ys - entrance[1]))
+        far = (float(xs[i]), float(ys[i]))
+        if math.hypot(far[0] - pose[0], far[1] - pose[1]) <= SAME_TARGET_M or self._is_done(far):
+            return None, None
+        return far, 'weitester Punkt'
+
+    def _entrance(self, pose):
+        """Eingangslinie als (Punkt, Normale nach innen)."""
+        if self._door is not None:
+            return self._door[2], self._door[3]
+        if self._start_pose is None:
+            self._start_pose = pose
+        yaw = self._start_pose[2]
+        return np.array(self._start_pose[:2]), np.array([math.cos(yaw), math.sin(yaw)])
+
+    # --- Huelle ---
+
+    def _update_walls(self, grid, res, origin, pose):
+        seeds = self._seeds
+        if len(seeds) == 0 and self._phase == EXPLORING and self._door is None:
+            rc = geo.side_wall_seeds(grid, res, origin, pose)
+            seeds = origin + (rc[:, ::-1] + 0.5) * res if len(rc) else seeds
+        if len(seeds) == 0:
+            return
+        rc = np.floor((np.asarray(seeds) - origin) / res).astype(np.int64)[:, ::-1]
+        walls = geo.connected_walls(grid, rc)
+        rows, cols = np.nonzero(walls)
         if rows.size == 0:
-            return None
-        xs_f = info.origin.position.x + (cols + 0.5) * info.resolution
-        ys_f = info.origin.position.y + (rows + 0.5) * info.resolution
-        i = np.argmax(np.hypot(xs_f - ex, ys_f - ey))
-        if math.hypot(xs_f[i] - robot_pose[0], ys_f[i] - robot_pose[1]) <= self.arrival_radius:
-            return None
-        return (xs_f[i], ys_f[i], 'weitester Punkt')
+            return
+        # In odom gemerkt: die mitfahrende Karte verliert, was hinten herausrollt.
+        points = origin + (np.column_stack([cols, rows]) + 0.5) * res
+        self._walls.update(map(tuple, np.round(points, 3).tolist()))
+        self._seeds = np.array(list(self._walls))
 
-    def _request_path(self, target_xy):
+    def _walls_xy(self):
+        return np.array(list(self._walls), dtype=np.float32) if self._walls else np.empty((0, 2))
+
+    def _update_outside(self, hull, pose):
+        if hull is None:
+            return
+        if geo.bot_inside(hull, pose):
+            self._was_inside = True
+            self._outside_since = None
+            return
+        if not self._was_inside or not geo.bot_outside(hull, pose):
+            self._outside_since = None
+            return
+        now = time.monotonic()
+        if self._outside_since is None:
+            self._outside_since = now
+        elif now - self._outside_since >= EXIT_HOLD_S:
+            self.pub_outside.publish(Bool(data=True))
+
+    # --- Ziele ---
+
+    def _set_target(self, target, kind):
+        self._target = target
+        self._kind = kind
+        self._retried = False
+        self.get_logger().info(f'Ziel ({kind}): x={target[0]:.2f} y={target[1]:.2f}.')
+        self._request_path(target)
+
+    def _finish_target(self, failed):
+        if self._kind == 'Tuer':
+            if failed:
+                self._door = None
+            else:
+                self._phase = EXPLORING
+        else:
+            self._done.append(self._target)
+        if failed:
+            self.get_logger().warn(f'{self._kind} gilt als unerreichbar.', throttle_duration_sec=2.0)
+        self._target = None
+        self._kind = None
+        self._path = None
+
+    def _is_done(self, point):
+        return any(math.hypot(point[0] - d[0], point[1] - d[1]) < SAME_TARGET_M for d in self._done)
+
+    def _path_blocked(self):
+        """Liegt eine gesperrte Zelle auf dem restlichen Pfad? Nur dann wird neu geplant."""
+        if self._path is None or self._planning_since is not None:
+            return False
+        pose = self._robot_pose()
+        if pose is None:
+            return False
+        grid, res, origin = self._grid()
+        points = np.array([[p.pose.position.x, p.pose.position.y] for p in self._path.poses])
+        ahead = int(np.argmin(np.hypot(points[:, 0] - pose[0], points[:, 1] - pose[1])))
+        cells = np.floor((points[ahead:] - origin) / res).astype(np.int64)
+        h, w = grid.shape
+        valid = (cells[:, 0] >= 0) & (cells[:, 0] < w) & (cells[:, 1] >= 0) & (cells[:, 1] < h)
+        return bool((grid[cells[valid, 1], cells[valid, 0]] >= geo.BLOCKED_COST).any())
+
+    def _request_path(self, target):
         if not self.plan_client.server_is_ready():
             self.get_logger().warn(
                 'compute_path_to_pose Action-Server nicht erreichbar -- laeuft planner_server?',
                 throttle_duration_sec=5.0)
             return
-
         goal_msg = ComputePathToPose.Goal()
-        goal_msg.goal.header.frame_id = self.odom_frame
+        goal_msg.goal.header.frame_id = ODOM_FRAME
         goal_msg.goal.header.stamp = self.get_clock().now().to_msg()
-        goal_msg.goal.pose.position.x = target_xy[0]
-        goal_msg.goal.pose.position.y = target_xy[1]
+        goal_msg.goal.pose.position.x = target[0]
+        goal_msg.goal.pose.position.y = target[1]
         goal_msg.goal.pose.orientation.w = 1.0
         goal_msg.use_start = False
+        self._planning_since = time.monotonic()
+        self.plan_client.send_goal_async(goal_msg).add_done_callback(
+            lambda f, t=target: self.cb_plan_response(f, t))
 
-        self.planning_in_progress = True
-        self._pending_target = target_xy
-        self.plan_client.send_goal_async(goal_msg).add_done_callback(self.cb_plan_response)
+    # --- Hilfsmethoden ---
+
+    def _reset(self):
+        self._tunnel_since = None
+        self._phase = EXPLORING
+        self._door = None               # (a, b, mitte, normale nach innen, breite) in odom
+        self._seeds = np.empty((0, 2))
+        self._walls = set()             # (x, y) der Wandzellen in odom
+        self._was_inside = False
+        self._outside_since = None
+        self._start_pose = None
+        self._target = None
+        self._kind = None
+        self._retried = False
+        self._path = None
+        self._done = []
+        self._planning_since = None
+        self._scanner = None
+
+    def _grid(self):
+        msg = self.latest_costmap
+        info = msg.info
+        grid = np.asarray(msg.data, dtype=np.int16).reshape(info.height, info.width)
+        return grid, info.resolution, np.array([info.origin.position.x, info.origin.position.y])
+
+    def _robot_pose(self):
+        try:
+            tf = self.tf_buffer.lookup_transform(ODOM_FRAME, ROBOT_FRAME, rclpy.time.Time())
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().warn(
+                f'TF-Lookup fuer Roboterpose fehlgeschlagen: {e}', throttle_duration_sec=2.0)
+            return None
+        return pose2d_from_transform(tf)
+
+    def _scanner_pose(self, scan):
+        """Scanner im Bot-Frame (fest montiert, daher einmal nachschlagen)."""
+        if self._scanner is None and scan is not None:
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    ROBOT_FRAME, scan.header.frame_id, rclpy.time.Time())
+            except (LookupException, ConnectivityException, ExtrapolationException) as e:
+                self.get_logger().warn(f'Keine TF zum Scanner: {e}', throttle_duration_sec=2.0)
+                return None
+            self._scanner = pose2d_from_transform(tf)
+        return self._scanner
 
     # --- Beenden ---
 

@@ -10,10 +10,9 @@
 #    Kollisionen mit dem echten Footprint des Burger (local_costmap.footprint). Die
 #    Breite des Hindernisbereichs muss nirgends eingestellt werden.
 #
-# 2) Tunnel-Exploration: tunnel_explorer_node sucht auf der global_costmap
-#    Frontier-Punkte (Rand zwischen bekannt-frei und unbekannt) und laesst
-#    planner_server (allow_unknown:false, plant also nie ins Unbekannte) einen Pfad
-#    dorthin rechnen. Die Kamera ist im Tunnel laut Reglement verboten: beim Wechsel
+# 2) Tunnel: tunnel_explorer_node faehrt durch die im Scan gefundene Tuer und sucht danach
+#    den Ausgang; planner_server (allow_unknown:false, plant also nie ins Unbekannte)
+#    rechnet die Pfade. Die Kamera ist im Tunnel laut Reglement verboten: beim Wechsel
 #    von TunnelEntry nach Tunnel sendet lane_costmap_node eine leere Wolke und leert
 #    danach beide Costmaps; sie sehen dann nur LiDAR und Eingangssperre, die
 #    Tunnelkarte bleibt bis zum Austritt. Die Einfahrt (TunnelEntry) faehrt der PID.
@@ -192,11 +191,10 @@ planner_server:
 
 # Karte des Bahnplaners: mitfahrend wie local_costmap, aber groesser. Sie merkt sich
 # das Gesehene, solange es im Fenster um den Roboter liegt -- was hinten
-# herausrollt, ist vergessen. Im Tunnel ist sie die Tunnelkarte: keepout_zone_node
-# leert sie bei jedem Tunnel-Eintritt, danach kommen nur LiDAR und Eingangssperre
-# hinein. Die Zellen liegen im odom-Frame; tunnel_explorer_node liest den
-# Kartenursprung bei jeder Nachricht neu aus info.origin und kommt mit dem
-# wandernden Fenster zurecht.
+# herausrollt, ist vergessen. Im Tunnel ist sie die Tunnelkarte: lane_costmap_node leert
+# sie bei jedem Tunnel-Eintritt, danach kommen nur LiDAR und Eingangssperre hinein. Die
+# Zellen liegen im odom-Frame; tunnel_explorer_node liest den Kartenursprung bei jeder
+# Nachricht neu aus info.origin und kommt mit dem wandernden Fenster zurecht.
 global_costmap:
   global_costmap:
     ros__parameters:
@@ -221,8 +219,6 @@ global_costmap:
       # 7x7 m -> 280x280 Zellen. Bewusst groeber als local_costmap (1 cm): ab ~0,6 m
       # liegen die LiDAR-Strahlen weiter als 1 cm auseinander, dazwischen bliebe es
       # "unbekannt", und unbekannt ist fuer NavFn gesperrt. Bei 0.05 auch
-      # tunnel_explorer_node.min_frontier_cluster_cells (Lane_Costmap.yaml) halbieren,
-      # er zaehlt Zellen.
       resolution: 0.025
       # Kreis statt Footprint: NavFn plant fuer einen Punkt und prueft keine
       # Roboterform. 0.09 = halbe Breite des Burger (178 mm). Mit 0.105 waren die

@@ -50,34 +50,3 @@
     robot_frame: base_footprint
     odom_frame: odom
     watchdog_rate: 2.0
-
-/keepout_zone_node:
-  ros__parameters:
-    odom_frame: odom
-    robot_frame: base_footprint
-    output_topic: /detect/tunnel_entrance_obstacle
-    entrance_wall_width: 0.6
-    entrance_wall_points: 9
-    publish_rate: 5.0
-    # Wand erst senden, wenn der Bot so weit von der Eintrittslinie weg ist:
-    # Heck 0.101 + footprint_padding 0.01 + 0.05 Reserve. Vorher stuende er in ihr.
-    entrance_wall_delay: 0.16
-    # Wand so weit vor die Pose beim Umschalten setzen, also an die Oeffnung
-    # (siehe switch_control.tunnel_side_distance).
-    entrance_wall_offset: 0.2
-
-/tunnel_explorer_node:
-  ros__parameters:
-    recompute_rate: 1.0
-    arrival_radius: 0.3
-    stall_timeout: 10.0
-    free_cost_threshold: 50
-    # In Zellen: 12 x 2,5 cm (global_costmap.resolution) = 30 cm Mindestbreite eines
-    # Frontier-Clusters. Bei anderer resolution mitaendern.
-    min_frontier_cluster_cells: 12
-    entrance_weight: 1.0
-    robot_distance_weight: 0.3
-    odom_frame: odom
-    robot_frame: base_footprint
-    costmap_topic: /global_costmap/costmap
-    output_path_topic: /tunnel/explore_path

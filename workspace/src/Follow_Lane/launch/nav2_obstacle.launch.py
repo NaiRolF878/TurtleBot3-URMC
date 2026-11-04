@@ -47,11 +47,9 @@ def generate_launch_description():
         ),
         Node(
             package='Follow_Lane', executable='keepout_zone_node', name='keepout_zone_node',
-            parameters=[LaunchConfiguration('lane_costmap_params')],
         ),
         Node(
             package='Follow_Lane', executable='tunnel_explorer_node', name='tunnel_explorer_node',
-            parameters=[LaunchConfiguration('lane_costmap_params')],
         ),
         # Draufsicht: Karte, Bot, Pfad, Statuszeile mit Abbruchgrund (/nav2/view)
         Node(package='Follow_Lane', executable='nav2_view', name='nav2_view'),

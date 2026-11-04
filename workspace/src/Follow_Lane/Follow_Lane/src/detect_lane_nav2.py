@@ -2,7 +2,8 @@
 
 Ein:  /lokal/bev, /control/mode
 Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
-      /detect/lane_mask (LaneMask fuer lane_costmap_node)
+      /detect/lane_mask (LaneMask fuer lane_costmap_node),
+      /detect/lines_lost (Bool, nur TunnelEntry)
 Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 """
 import array
@@ -17,7 +18,7 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Point32, Polygon
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Float64, UInt8
+from std_msgs.msg import Bool, Float64, UInt8
 
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
 from Follow_Lane.src import bev_geometry
@@ -130,6 +131,7 @@ class detect_lane(Node):
         # Verlustfreie Pixelkoordinaten der Linienpunkte fuer lane_costmap_node, getrennt
         # vom komprimierten Debug-Bild oben, das nur zum Anschauen gedacht ist.
         self.pub_lane_mask = self.create_publisher(LaneMask, '/detect/lane_mask', 1)
+        self.pub_lines_lost = self.create_publisher(Bool, '/detect/lines_lost', 1)
 
         # --- Zustand ---
         self.bridge = CvBridge()
@@ -192,6 +194,9 @@ class detect_lane(Node):
         white_alternative = int(width * WHITE_ALTERNATIVE)
         yellow_alternative = int(width * YELLOW_ALTERNATIVE)
         now = time.monotonic()
+        # Vor track_line: das versetzt die Anker schon auf dieses Bild.
+        if self.control_mode == ControlType.TunnelEntry:
+            self.pub_lines_lost.publish(Bool(data=self.lines_lost(mask_yellow, mask_white, now)))
 
         # Gelb fest am konfigurierten detection_row_factor
         center_yellow_y = int(self.img_height * self.detection_row_factor)
@@ -239,6 +244,18 @@ class detect_lane(Node):
         # Ungefilterte Masken: die links der gelben Linie ausgeblendeten weissen Pixel
         # braucht nur der PID; fuer die Costmap trennt lane_costmap_node selbst.
         self.publish_lane_mask(mask_yellow, mask_white, img.header.stamp)
+
+    def lines_lost(self, mask_yellow, mask_white, now):
+        """Fehlen beide Spurlinien in der Suchzeile? Mit Formfilter: eine helle Tunnelwand ist
+        keine Linie. Eine Kante weiter als line_max_jump_cm vom Anker gilt nicht als Linie."""
+        row = int(self.img_height * self.detection_row_factor)
+        max_jump = self.max_jump_px()
+        for name, mask, left in (('Gelb', mask_yellow, True), ('Weiss', mask_white, False)):
+            last = self.anchor_column(name, now)
+            raw = self.get_x_for_driving(self.shape_filter(mask), row, left_line=left, last_known=last)
+            if raw is not None and (last is None or max_jump is None or abs(raw - last) <= max_jump):
+                return False
+        return True
 
     def publish_mask_debug(self, mask_yellow, mask_white,
                            center_yellow_x, center_yellow_y, center_white_x, center_white_y):
