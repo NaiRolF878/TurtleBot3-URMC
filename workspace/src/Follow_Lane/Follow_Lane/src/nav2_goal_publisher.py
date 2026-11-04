@@ -1,31 +1,45 @@
-"""Gibt Nav2 im TunnelEntry- und Tunnel-Modus die Fahrt vor; in Lane und Obstacle ruht er.
+"""Gibt Nav2 im Tunnel-Modus die Fahrt vor; in allen anderen Modi ruht er.
 
-Ein:  /control/mode, /lane/center_path (TunnelEntry), /tunnel/explore_path (Tunnel), TF
-Aus:  ComputePathToPose an planner_server (TunnelEntry), FollowPath an controller_server,
+Ein:  /control/mode, /tunnel/explore_path (Tunnel), TF,
+      /lane/center_path und /global_costmap/costmap (nur fuer PLAN_MODES)
+Aus:  FollowPath an controller_server, ComputePathToPose an planner_server (nur PLAN_MODES),
+      /tunnel/path_result (String, Tunnel: erreicht/abgebrochen),
       /nav2/active_path (Path, latched: der Pfad, dem Nav2 gerade folgt; leer, wenn keiner),
       /nav2/status (String, fuer nav2_view)
 """
 import math
 import time
 
+import numpy as np
+
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import ComputePathToPose, FollowPath
-from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, pose2d_from_transform, run_node,
-    yaw_from_quaternion)
+    ControlType, control_mode_from_msg, frange, path_blocked, pose2d_from_transform,
+    require_params, run_node, yaw_from_quaternion)
+
+ROBOT_FRAME = 'base_footprint'
+ODOM_FRAME = 'odom'
+CENTER_PATH_TOPIC = '/lane/center_path'
+# Gemessen an der Empfangszeit, nicht am Bildstempel: die Uhren von Bot und Rechner muessen
+# dafuer nicht synchron laufen.
+CENTER_PATH_MAX_AGE_S = 1.0
+WATCHDOG_PERIOD_S = 0.5
 
 # Modi, in denen nav2_goal_publisher selbst ein Ziel setzt und planen laesst.
-PLAN_MODES = (ControlType.TunnelEntry,)
+# Hier keiner: TunnelEntry faehrt PID, Obstacle das Zonen-Ausweichen.
+PLAN_MODES = ()
 ACTIVE_MODES = PLAN_MODES + (ControlType.Tunnel,)
 
 # Antwortet planner_server so lange nicht, gilt die Anfrage als verloren.
@@ -46,17 +60,18 @@ GOAL_STATUS_TEXT = {
 
 
 class nav2_goal_publisher(Node):
-    """TunnelEntry: Ziel ist ein Punkt goal_distance voraus auf der Spurmitte von
+    """PLAN_MODES (hier leer): Ziel ist ein Punkt goal_distance voraus auf der Spurmitte von
     lane_costmap_node (ueber ihr Ende hinaus in ihrer Richtung verlaengert). Ist sie
-    aelter als center_path_max_age, liegt das Ziel geradeaus. planner_server (NavFn)
+    aelter als CENTER_PATH_MAX_AGE_S, liegt das Ziel geradeaus. planner_server (NavFn)
     rechnet auf der global_costmap (LiDAR + Spurgedaechtnis) einen Weg darum herum,
-    controller_server (MPPI) faehrt ihn ab. Alle replan_period wird neu geplant, damit
-    neu gesehene Hindernisse und Linien einfliessen.
+    controller_server (MPPI) faehrt ihn ab. Keine Neuplanung im Takt, sonst springen die
+    Wege: neu geplant wird nur, wenn eine gesperrte Zelle auf dem Pfad liegt (neu gesehenes
+    Hindernis, neue Linie, Kurve), wenn er bis auf goal_distance/2 abgefahren ist oder wenn
+    die Fahrt endet (Abbruch, Ankunft).
 
-    In TunnelEntry fuehrt die Spurmitte zur Tunneloeffnung; NavFn plant durch sie
-    hindurch, soweit der LiDAR schon hineinsieht.
-
-    Tunnel: der Pfad von tunnel_explorer_node.
+    Tunnel: der Pfad von tunnel_explorer_node, jeder genau einmal und sofort, auch mitten in
+    einer Fahrt. Keine Neuplanung im Takt, die Wege sollen dort nicht springen: neue Pfade
+    kommen nur bei neuem Ziel, gesperrtem Pfad oder Abbruch (siehe tunnel_explorer_node).
 
     Jedes gesendete Ziel bekommt eine Generationsnummer; ein Moduswechsel erhoeht sie
     ebenfalls. Antworten und Ergebnisse aelterer Generationen werden ignoriert,
@@ -73,17 +88,16 @@ class nav2_goal_publisher(Node):
         super().__init__('nav2_goal_publisher')
 
         # --- Parameter ---
-        # Abstand des Planziels vom Bot (m). Muss hinter dem Hindernis liegen, sonst
-        # endet der Weg davor; MPPI schaut ~1 m voraus (nav2_params.yaml).
-        self.declare_parameter('goal_distance', 1.0, frange(0.2, 5.0))
-        self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('center_path_topic', '/lane/center_path')
-        # Gemessen an der Empfangszeit, nicht am Bildstempel: die Uhren von Bot
-        # und Rechner muessen dafuer nicht synchron laufen.
-        self.declare_parameter('center_path_max_age', 1.0, frange(0.1, 10.0))
-        self.declare_parameter('replan_period', 1.0, frange(0.2, 10.0))
-        self.declare_parameter('watchdog_rate', 2.0, frange(0.2, 10.0))
+        # Vor Ort einstellen, Werte nur in Lane_Costmap.yaml. Abstand des Planziels vom Bot (m):
+        # muss hinter dem Hindernis liegen, sonst endet der Weg davor; MPPI schaut ~1 m voraus
+        # (nav2_params.yaml).
+        self.declare_parameter('goal_distance', Parameter.Type.DOUBLE, frange(0.2, 5.0))
+        # Ein Planweg mit einem Punkt mehr als so weit (m) hinter der Radachse wird verworfen:
+        # NavFn kennt keine Fahrtrichtung und fuehrt sonst hinter dem Bot aussen um die
+        # Spurlinien herum, wo die Kamera nie hingesehen hat. Etwas mehr als das Heck (0.101),
+        # damit Pfade aus der eigenen Zelle heraus durchgehen.
+        self.declare_parameter('max_path_backward', Parameter.Type.DOUBLE, frange(0.0, 2.0))
+        require_params(self, ['goal_distance', 'max_path_backward'])
 
         # --- Subscriber ---
         self.sub_control_mode = self.create_subscription(
@@ -91,18 +105,21 @@ class nav2_goal_publisher(Node):
         self.sub_explore_path = self.create_subscription(
             Path, '/tunnel/explore_path', self.cb_explore_path, 1)
         self.sub_center_path = self.create_subscription(
-            Path, self.get_parameter('center_path_topic').value, self.cb_center_path, 1)
+            Path, CENTER_PATH_TOPIC, self.cb_center_path, 1)
+        self.sub_costmap = self.create_subscription(
+            OccupancyGrid, '/global_costmap/costmap', self.cb_costmap, 1)
 
         # --- Publisher ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_active_path = self.create_publisher(Path, '/nav2/active_path', latched)
         self.pub_status = self.create_publisher(String, '/nav2/status', 1)
+        self.pub_path_result = self.create_publisher(String, '/tunnel/path_result', 1)
         self.follow_client = ActionClient(self, FollowPath, 'follow_path')
         self.plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
 
         # --- Timer ---
         self.timer = self.create_timer(
-            1.0 / self.get_parameter('watchdog_rate').value, self.cb_watchdog)
+            WATCHDOG_PERIOD_S, self.cb_watchdog)
 
         # --- Zustand ---
         self.tf_buffer = Buffer()
@@ -114,7 +131,8 @@ class nav2_goal_publisher(Node):
         self._goal_handle = None
         self._goal_active = False
         self._plan_requested = None     # time.monotonic() der laufenden Planung, sonst None
-        self._last_plan_time = None
+        self._active_points = None      # (N, 2) des aktiven Planer-Pfads, odom
+        self._costmap = None
         self._latest_explore_path = None
         self._latest_center_path = None
         self._center_path_received = None
@@ -134,13 +152,13 @@ class nav2_goal_publisher(Node):
         self.control_mode = new_mode
         self._mode_generation += 1
         self._mode_since = time.monotonic()
-        self._last_plan_time = None
-        # Pfade gehoeren zu genau einem Abschnitt (Tunneleinfahrt bzw. Tunnel).
+        self._active_points = None
+        # Pfade gehoeren zu genau einem Abschnitt.
         self._latest_explore_path = None
         self._latest_center_path = None
         self._center_path_received = None
 
-        # Auch TunnelEntry -> Tunnel abbrechen, sonst laeuft die alte Fahrt weiter.
+        # Beim Verlassen des Tunnels abbrechen, sonst laeuft die alte Fahrt weiter.
         if was_active:
             self._cancel_goal()
         if new_mode in ACTIVE_MODES:
@@ -148,6 +166,11 @@ class nav2_goal_publisher(Node):
 
     def cb_explore_path(self, path):
         self._latest_explore_path = path
+        if self.control_mode == ControlType.Tunnel:
+            self._advance()
+
+    def cb_costmap(self, grid):
+        self._costmap = grid
 
     def cb_center_path(self, path):
         first = self._center_path_received is None
@@ -188,6 +211,17 @@ class nav2_goal_publisher(Node):
                 'planner_server findet keinen Weg um das Hindernis (Linien oder Hindernisse '
                 'sperren den Korridor?).', throttle_duration_sec=2.0)
             return
+        backward = self._backward_extent(path)
+        if backward is None:
+            return
+        if backward > self.get_parameter('max_path_backward').value:
+            # Ein laufendes Ziel nach vorn bleibt aktiv; ohne eins steht der Bot.
+            self._set_status('Weg fuehrt nach hinten -- verworfen')
+            self.get_logger().warn(
+                f'Planweg fuehrt {backward:.2f} m hinter den Bot -- verworfen (nur Wege '
+                'nach vorn).', throttle_duration_sec=2.0)
+            return
+        self._active_points = np.array([[p.pose.position.x, p.pose.position.y] for p in path.poses])
         self._send_goal(path, f'Bahnplaner ({self._path_source})')
 
     def cb_goal_response(self, future, generation):
@@ -224,9 +258,15 @@ class nav2_goal_publisher(Node):
             # Abbrueche sind beim rollierenden Ziel normal, daher nur warn().
             self.get_logger().warn(f'Ziel beendet: {status_text}.', throttle_duration_sec=2.0)
 
+        if self.control_mode == ControlType.Tunnel:
+            # Was als Naechstes kommt, entscheidet tunnel_explorer_node.
+            reached = status == GoalStatus.STATUS_SUCCEEDED
+            self.pub_path_result.publish(String(data='erreicht' if reached else 'abgebrochen'))
+            return
+
         # Naechstes Teilstueck nachschieben -- so entsteht das rollierende Ziel.
         if self.control_mode in ACTIVE_MODES:
-            self._last_plan_time = None
+            self._active_points = None
             self._advance()
 
     # --- Hilfsmethoden ---
@@ -241,12 +281,11 @@ class nav2_goal_publisher(Node):
             return
 
         if self.control_mode == ControlType.Tunnel:
-            if self._goal_active:
-                return
-            if self._latest_explore_path is None:
+            if self._latest_explore_path is not None:
+                path, self._latest_explore_path = self._latest_explore_path, None
+                self._send_goal(path, 'Explorer-Pfad')
+            elif not self._goal_active:
                 self._set_status('wartet auf Explorer-Pfad')
-                return
-            self._send_goal(self._latest_explore_path, 'Explorer-Pfad')
             return
 
         now = time.monotonic()
@@ -254,10 +293,29 @@ class nav2_goal_publisher(Node):
             if now - self._plan_requested < PLAN_TIMEOUT_S:
                 return
             self.get_logger().warn('planner_server antwortet nicht -- neue Anfrage.')
-        due = self._last_plan_time is None \
-            or now - self._last_plan_time >= self.get_parameter('replan_period').value
-        if not self._goal_active or due:
+        if not self._goal_active or self._path_needs_replan():
             self._request_plan()
+
+    def _path_needs_replan(self):
+        """Pfad blockiert oder fast abgefahren? Ohne Pose oder Karte bleibt er bestehen."""
+        points, grid = self._active_points, self._costmap
+        if points is None or grid is None:
+            return False
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                ODOM_FRAME, ROBOT_FRAME,
+                rclpy.time.Time())
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            return False
+        rx, ry, _ = pose2d_from_transform(tf)
+        ahead = points[int(np.argmin(np.hypot(points[:, 0] - rx, points[:, 1] - ry))):]
+        left = float(np.hypot(*np.diff(ahead, axis=0).T).sum()) if len(ahead) > 1 else 0.0
+        if left < self.get_parameter('goal_distance').value / 2.0:
+            return True
+        info = grid.info
+        cells = np.asarray(grid.data, dtype=np.int16).reshape(info.height, info.width)
+        return path_blocked(points, (rx, ry), cells, info.resolution,
+                            (info.origin.position.x, info.origin.position.y))
 
     def _request_plan(self):
         if not self.plan_client.server_is_ready():
@@ -273,7 +331,7 @@ class nav2_goal_publisher(Node):
         request = ComputePathToPose.Goal()
         request.goal = goal
         request.use_start = False
-        self._plan_requested = self._last_plan_time = time.monotonic()
+        self._plan_requested = time.monotonic()
         if not self._goal_active:
             self._set_status(f'plant Weg ({self._path_source})')
         generation = self._mode_generation
@@ -282,10 +340,10 @@ class nav2_goal_publisher(Node):
 
     def _obstacle_goal(self):
         """Planziel im odom-Frame, oder None ohne Roboterpose."""
-        odom_frame = self.get_parameter('odom_frame').value
+        odom_frame = ODOM_FRAME
         try:
             tf = self.tf_buffer.lookup_transform(
-                odom_frame, self.get_parameter('robot_frame').value, rclpy.time.Time())
+                odom_frame, ROBOT_FRAME, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._set_status('keine Roboterpose (TF)')
             self.get_logger().warn(f'Keine Roboterpose fuer das Planziel: {e}',
@@ -323,11 +381,28 @@ class nav2_goal_publisher(Node):
         goal.pose.orientation.w = math.cos(yaw / 2.0)
         return goal
 
+    def _backward_extent(self, path):
+        """Wie weit (m) der Pfad hinter die Radachse reicht (0 = nie dahinter), None
+        ohne Roboterpose. Der Pfad liegt im odom-Frame (global_frame des Planers)."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                path.header.frame_id, ROBOT_FRAME,
+                rclpy.time.Time())
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().warn(f'Keine Roboterpose fuer die Pfadpruefung: {e}',
+                                   throttle_duration_sec=2.0)
+            return None
+        rx, ry, ryaw = pose2d_from_transform(tf)
+        c, s = math.cos(ryaw), math.sin(ryaw)
+        ahead = min(c * (p.pose.position.x - rx) + s * (p.pose.position.y - ry)
+                    for p in path.poses)
+        return max(0.0, -ahead)
+
     def _fresh_center_path(self):
         if self._center_path_received is None or len(self._latest_center_path.poses) < 2:
             return None
         age = (self.get_clock().now() - self._center_path_received).nanoseconds / 1e9
-        if age > self.get_parameter('center_path_max_age').value:
+        if age > CENTER_PATH_MAX_AGE_S:
             return None
         return self._latest_center_path
 
@@ -350,8 +425,9 @@ class nav2_goal_publisher(Node):
             self._goal_handle.cancel_goal_async()
         self._goal_handle = None
         self._goal_active = False
+        self._active_points = None
         empty = Path()
-        empty.header.frame_id = self.get_parameter('odom_frame').value
+        empty.header.frame_id = ODOM_FRAME
         empty.header.stamp = self.get_clock().now().to_msg()
         self.pub_active_path.publish(empty)
 

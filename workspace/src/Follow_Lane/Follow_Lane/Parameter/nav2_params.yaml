@@ -3,26 +3,25 @@
 # gespeicherte Karte, kein AMCL, kein SLAM: beide Costmaps fahren im odom-Frame mit,
 # fuer die kurzen Abschnitte reicht reine Odometrie.
 #
-# 1) Obstacle-Modus und Tunnel-Einfahrt (TunnelEntry, bis kurz vor die Oeffnung):
-#    nav2_goal_publisher laesst planner_server etwa jede Sekunde einen
-#    Weg zu einem Punkt ~1 m voraus auf der Spurmitte rechnen, um die
+# 1) Obstacle-Modus: nav2_goal_publisher laesst planner_server bei Bedarf (Pfad blockiert,
+#    fast abgefahren, Abbruch) einen Weg zu einem Punkt ~1 m voraus auf der Spurmitte
+#    rechnen, um die
 #    LiDAR-Hindernisse herum und zwischen den Spurlinien (lane_layer, gespeist aus dem
 #    Spurgedaechtnis von lane_costmap_node). MPPI faehrt ihn ab und prueft dabei
 #    Kollisionen mit dem echten Footprint des Burger (local_costmap.footprint). Die
 #    Breite des Hindernisbereichs muss nirgends eingestellt werden.
 #
-# 2) Tunnel-Exploration: tunnel_explorer_node sucht auf der global_costmap
-#    Frontier-Punkte (Rand zwischen bekannt-frei und unbekannt) und laesst
-#    planner_server (allow_unknown:false, plant also nie ins Unbekannte) einen Pfad
-#    dorthin rechnen. Die Kamera ist im Tunnel laut Reglement verboten: beide
-#    lane_layer bleiben leer (lane_costmap_node sendet nichts), die Costmaps werden
-#    beim Wechsel von TunnelEntry nach Tunnel geleert und sehen danach nur LiDAR und
-#    Eingangssperre; die Tunnelkarte bleibt bis zum Austritt.
+# 2) Tunnel: tunnel_explorer_node faehrt durch die im Scan gefundene Tuer und sucht danach
+#    den Ausgang; planner_server (allow_unknown:false, plant also nie ins Unbekannte)
+#    rechnet die Pfade. Die Kamera ist im Tunnel laut Reglement verboten: beim Wechsel
+#    von TunnelEntry nach Tunnel sendet lane_costmap_node eine leere Wolke und leert
+#    danach beide Costmaps; sie sehen dann nur LiDAR und Eingangssperre, die
+#    Tunnelkarte bleibt bis zum Austritt. Die Einfahrt (TunnelEntry) faehrt der PID.
 #
 # Fahrbefehle: controller_server sendet auf /nav2/cmd_vel (Remap in
-# nav2_obstacle.launch.py). control_driving reicht sie nur in Obstacle, TunnelEntry
-# und Tunnel unveraendert weiter; die Grenzen hier (vx_max, wz_max) gelten also
-# direkt fuer den Bot.
+# nav2_obstacle.launch.py). control_driving reicht sie nur in Obstacle und Tunnel
+# weiter und skaliert v und omega gemeinsam, wenn das aeussere Rad
+# schneller als 0,22 m/s wuerde (MAX_WHEEL_VEL).
 #
 # Warum MPPI und nicht DWB: NavFn plant fuer einen Punkt mit robot_radius und kennt
 # die Form des Bots nicht, der Pfad ist also nur eine grobe Vorgabe. MPPIs
@@ -70,7 +69,11 @@ controller_server:
       batch_size: 1000
       vx_std: 0.2
       vy_std: 0.0
-      wz_std: 0.4
+      # Streuung der ausprobierten Drehraten (kein Kostengewicht). Mit 0.4 kamen enge
+      # Kurven und Drehen auf der Stelle kaum vor, MPPI wich lieber rueckwaerts aus.
+      wz_std: 0.8
+      # Max. Geschwindigkeit der Motoren (TurtleBot3-Handbuch), gleicher Wert wie
+      # MAX_WHEEL_VEL in control_driving.py.
       vx_max: 0.22
       vx_min: -0.1
       vy_max: 0.0
@@ -108,7 +111,7 @@ controller_server:
         cost_power: 1
         cost_weight: 5.0
         threshold_to_consider: 1.4
-      # Aus: das Planziel wird jede Sekunde neu gesetzt, seine Endausrichtung ist
+      # Aus: das Planziel rollt mit, seine Endausrichtung ist
       # irrelevant. goal_checker laesst es mit yaw_goal_tolerance 3.15 ohnehin
       # durchgehen. An wuerde die Kritik den Bot ab 0,5 m vor dem Ziel auf dessen
       # Ausrichtung drehen, auch wenn er gerade an einem Hindernis vorbei muss.
@@ -125,7 +128,7 @@ controller_server:
       # Gewichte weichen von Nav2s Beispiel ab: Ausweichen dominiert, "auf dem Pfad
       # bleiben" ist nur ein Hinweis. Der Pfad kommt von NavFn, das fuer einen Kreis
       # (robot_radius) plant; wo er fuer den echten Footprint zu eng ist oder ein
-      # Hindernis seit der letzten Planung dazukam, soll MPPI abweichen. Mit Nav2s
+      # Hindernis seit der letzten Planung dazukam, soll MPPI abweichen, bis neu geplant ist. Mit Nav2s
       # PathAlign 14.0 schob MPPI ein Hindernis vor sich her, das auf dem Pfad lag.
       CostCritic:
         enabled: true
@@ -189,11 +192,10 @@ planner_server:
 
 # Karte des Bahnplaners: mitfahrend wie local_costmap, aber groesser. Sie merkt sich
 # das Gesehene, solange es im Fenster um den Roboter liegt -- was hinten
-# herausrollt, ist vergessen. Im Tunnel ist sie die Tunnelkarte: keepout_zone_node
-# leert sie bei jedem Tunnel-Eintritt, danach kommen nur LiDAR und Eingangssperre
-# hinein. Die Zellen liegen im odom-Frame; tunnel_explorer_node liest den
-# Kartenursprung bei jeder Nachricht neu aus info.origin und kommt mit dem
-# wandernden Fenster zurecht.
+# herausrollt, ist vergessen. Im Tunnel ist sie die Tunnelkarte: lane_costmap_node leert
+# sie bei jedem Tunnel-Eintritt, danach kommen nur LiDAR und Eingangssperre hinein. Die
+# Zellen liegen im odom-Frame; tunnel_explorer_node liest den Kartenursprung bei jeder
+# Nachricht neu aus info.origin und kommt mit dem wandernden Fenster zurecht.
 global_costmap:
   global_costmap:
     ros__parameters:
@@ -215,14 +217,15 @@ global_costmap:
       # schmale Hindernisse fallen zwischen zwei Strahlen durch.
       width: 7
       height: 7
-      # Wie local_costmap. 7x7 m -> 280x280 Zellen. Bei 0.05 auch
-      # tunnel_explorer_node.min_frontier_cluster_cells (Lane_Costmap.yaml) halbieren,
-      # er zaehlt Zellen.
+      # 7x7 m -> 280x280 Zellen. Bewusst groeber als local_costmap (1 cm): ab ~0,6 m
+      # liegen die LiDAR-Strahlen weiter als 1 cm auseinander, dazwischen bliebe es
+      # "unbekannt", und unbekannt ist fuer NavFn gesperrt. Bei 0.05 auch
       resolution: 0.025
       # Kreis statt Footprint: NavFn plant fuer einen Punkt und prueft keine
-      # Roboterform. 0.105 liegt 1,6 cm ueber der halben Breite des Burger
-      # (178 mm) -- in der Enclosure kostet jede Wandberuehrung einen Punkt.
-      robot_radius: 0.105
+      # Roboterform. 0.09 = halbe Breite des Burger (178 mm). Mit 0.105 waren die
+      # Spurlinien um je 10,5 cm gesperrt und der Planer fand zwischen nahen Linien
+      # keine Luecke mehr (2026-11-03). Den echten Umriss prueft MPPI.
+      robot_radius: 0.09
       # Nie gesehene Zellen bleiben "unbekannt" (-1), statt als frei zu gelten. Der
       # Tunnel-Explorer sucht genau die Grenze frei/unbekannt; ohne das findet er nie
       # ein Ziel. Zusammen mit allow_unknown:false plant NavFn nur durch Gesehenes.
@@ -240,6 +243,9 @@ global_costmap:
           data_type: "LaserScan"
           clearing: true
           marking: true
+          # Pflicht: Humble-Default je Quelle ist 0.0, der LiDAR liegt auf z=0.182 --
+          # ohne diese Zeile verwirft die Ebene jeden Scanpunkt (markiert und raeumt nie).
+          max_obstacle_height: 2.0
           obstacle_max_range: 3.0
           obstacle_min_range: 0.0
           raytrace_max_range: 3.5
@@ -308,10 +314,11 @@ local_costmap:
       # 10 Hz nur Rechenzeit.
       width: 4
       height: 4
-      # Spurlinien (~2 cm) und Hindernisraender werden feiner als bei 5 cm, aber ~4x
-      # so viele Zellen. Auf 0.05, falls controller_server seine 20 Hz nicht schafft
-      # ("Control loop missed its desired rate").
-      resolution: 0.025
+      # 1 cm: in der 20-cm-Spur rundet jede Linienzelle sonst bis 1,25 cm je Seite auf,
+      # MPPI prueft hier den echten Umriss. 400x400 Zellen (~6x so viele wie bei 2,5 cm).
+      # Groeber (0.025), falls controller_server seine 20 Hz nicht schafft
+      # ("Control loop missed its desired rate"). Die global_costmap bleibt bei 2,5 cm.
+      resolution: 0.01
       # Umriss des Burger relativ zu base_footprint (Radachse), aus 138 x 178 mm
       # und der URDF: Rumpf 3,7 cm vor bis 10,1 cm hinter der Achse, +/-6,9 cm
       # breit; Raeder +/-8,9 cm aussen, 3,3 cm Radius. Konvexe Huelle aus beidem.
@@ -331,6 +338,9 @@ local_costmap:
           data_type: "LaserScan"
           clearing: true
           marking: true
+          # Pflicht: Humble-Default je Quelle ist 0.0, der LiDAR liegt auf z=0.182 --
+          # ohne diese Zeile verwirft die Ebene jeden Scanpunkt (markiert und raeumt nie).
+          max_obstacle_height: 2.0
           obstacle_max_range: 3.0
           obstacle_min_range: 0.0
           raytrace_max_range: 3.5
@@ -342,8 +352,8 @@ local_costmap:
       # hier). clearing:true raeumt per Strahl vom Bot aus frei und traegt danach
       # alle Punkte wieder ein: gemerkte Linien bleiben, vergessene verschwinden.
       # Muss vor inflation_layer stehen (siehe CostCritic). Im Tunnel-Modus leer:
-      # lane_costmap_node sendet dort nichts und leert beim Eintritt die Karte
-      # (Kamera laut Reglement verboten).
+      # lane_costmap_node sendet beim Eintritt eine leere Wolke, leert danach die
+      # Karte und sendet dann nichts mehr (Kamera laut Reglement verboten).
       lane_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -403,7 +413,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.20
+        inflation_radius: 0.2
 
 lifecycle_manager_navigation:
   ros__parameters:

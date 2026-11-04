@@ -27,7 +27,7 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 from follow_lane_msg.msg import LaneMask
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    ControlType, bev_pixels_to_ground, control_mode_from_msg, frange, irange, run_node,
+    ControlType, bev_pixels_to_ground, control_mode_from_msg, run_node,
     yaw_from_quaternion)
 
 # Farben (BGR): befahrbar gruen, nicht befahrbar rot, unbekannt grau.
@@ -42,6 +42,23 @@ HEADING = (200, 0, 200)
 PATH = (255, 255, 0)
 WALL = (0, 140, 255)
 SCAN = (255, 190, 120)
+
+ODOM_FRAME = 'odom'
+ROBOT_FRAME = 'base_footprint'
+VIEW_PERIOD_S = 0.2
+# Groesse der laengeren Kartenkante im Bild (px).
+CANVAS_SIZE_PX = 600
+# Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot, 1.2 m je Richtung. Deckt die
+# MPPI-Vorausschau (~1 m) mit Rand. Zentriert, nicht in Fahrtrichtung verschoben, sonst springt
+# das Bild bei jedem Lenkausschlag.
+LOCAL_VIEW_SIZE_M = 2.4
+# Im Tunnel: nur die schon gesehene Flaeche plus dieser Rand, damit das Bild anfangs gross ist
+# und mit der Karte herauszoomt.
+TUNNEL_VIEW_MARGIN_M = 0.3
+# Nur Warnungen dieser Knoten zaehlen als Abbruchgrund. nav2_goal_publisher fehlt: was er tut,
+# kommt ueber /nav2/status.
+REASON_NODES = ('controller_server', 'planner_server', 'local_costmap', 'global_costmap',
+                'tunnel_explorer_node', 'lane_costmap_node', 'keepout_zone_node')
 
 # Spurlinien aelter als das werden nicht mehr gezeichnet.
 LANE_FRESH_S = 1.0
@@ -94,26 +111,6 @@ class nav2_view(Node):
     def __init__(self):
         super().__init__('nav2_view')
 
-        # --- Parameter ---
-        self.declare_parameter('view_rate', 5.0, frange(0.5, 30.0))
-        # Groesse der laengeren Kartenkante im Bild (px).
-        self.declare_parameter('canvas_size', 600, irange(200, 2000))
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('robot_frame', 'base_footprint')
-        # Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot, 1.2 m je Richtung.
-        # Deckt die MPPI-Vorausschau (~1 m) mit Rand. Zentriert, nicht in
-        # Fahrtrichtung verschoben, sonst springt das Bild bei jedem Lenkausschlag.
-        self.declare_parameter('local_view_size_m', 2.4, frange(0.5, 20.0))
-        # Im Tunnel: nur die schon gesehene Flaeche plus dieser Rand, damit das Bild
-        # anfangs gross ist und mit der Karte herauszoomt.
-        self.declare_parameter('tunnel_view_margin_m', 0.3, frange(0.0, 5.0))
-        # Nur Warnungen dieser Knoten zaehlen als Abbruchgrund. nav2_goal_publisher
-        # fehlt: sein "Rolling-Goal beendet" wuerde den eigentlichen Grund von
-        # controller_server ueberschreiben; was er tut, kommt ueber /nav2/status.
-        self.declare_parameter('reason_nodes', [
-            'controller_server', 'planner_server', 'local_costmap', 'global_costmap',
-            'tunnel_explorer_node', 'lane_costmap_node', 'keepout_zone_node'])
-
         # --- Subscriber ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
@@ -142,7 +139,7 @@ class nav2_view(Node):
         self.pub_view = self.create_publisher(Image, '/nav2/view', 1)
 
         # --- Timer ---
-        self.timer = self.create_timer(1.0 / self.get_parameter('view_rate').value, self.cb_timer)
+        self.timer = self.create_timer(VIEW_PERIOD_S, self.cb_timer)
 
         # --- Zustand ---
         self.bridge = CvBridge()
@@ -215,7 +212,7 @@ class nav2_view(Node):
             return
         # Costmap-Knoten loggen z.B. als "local_costmap.local_costmap"
         node = log.name.split('.')[0]
-        if node in self.get_parameter('reason_nodes').value:
+        if node in REASON_NODES:
             self.reason = (self.get_clock().now(), node, log.msg)
 
     def cb_timer(self):
@@ -226,7 +223,7 @@ class nav2_view(Node):
         grid_name = 'global_costmap' if in_tunnel else 'local_costmap'
         grid = self._grids.get(grid_name)
 
-        canvas_size = int(self.get_parameter('canvas_size').value)
+        canvas_size = int(CANVAS_SIZE_PX)
         if grid is None or grid.info.width == 0:
             body = np.full((canvas_size, canvas_size, 3), UNKNOWN, np.uint8)
             cv2.putText(body, f'keine Karte von /{grid_name}/costmap', (10, 30),
@@ -235,10 +232,10 @@ class nav2_view(Node):
             return
 
         info = grid.info
-        if grid.header.frame_id != self.get_parameter('odom_frame').value:
+        if grid.header.frame_id != ODOM_FRAME:
             self.get_logger().warn(
                 f'/{grid_name}/costmap liegt in {grid.header.frame_id}, erwartet '
-                f'{self.get_parameter("odom_frame").value} -- Zeichnung kann verschoben sein.',
+                f'{ODOM_FRAME} -- Zeichnung kann verschoben sein.',
                 throttle_duration_sec=10.0)
 
         cells = np.asarray(grid.data, dtype=np.int16).reshape(info.height, info.width)
@@ -280,13 +277,13 @@ class nav2_view(Node):
             known = np.argwhere(cells >= 0)
             if known.size == 0:
                 return full
-            m = int(round(self.get_parameter('tunnel_view_margin_m').value / res))
+            m = int(round(TUNNEL_VIEW_MARGIN_M / res))
             (r0, c0), (r1, c1) = known.min(axis=0) - m, known.max(axis=0) + 1 + m
         else:
-            pose = self.lookup(self.get_parameter('robot_frame').value)
+            pose = self.lookup(ROBOT_FRAME)
             if pose is None:
                 return full
-            half = int(round(self.get_parameter('local_view_size_m').value / 2.0 / res))
+            half = int(round(LOCAL_VIEW_SIZE_M / 2.0 / res))
             rc = int((pose[1] - info.origin.position.y) / res)
             cc = int((pose[0] - info.origin.position.x) / res)
             r0, r1, c0, c1 = rc - half, rc + half, cc - half, cc + half
@@ -301,7 +298,7 @@ class nav2_view(Node):
         """2D-Pose (x, y, yaw) von frame im odom-Frame, neueste TF, oder None."""
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.get_parameter('odom_frame').value, frame, rclpy.time.Time())
+                ODOM_FRAME, frame, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException):
             return None
         t = tf.transform.translation
@@ -329,7 +326,7 @@ class nav2_view(Node):
         stamp, yellow, white = self.lane
         if (self.get_clock().now() - stamp).nanoseconds / 1e9 > LANE_FRESH_S:
             return
-        pose = self.lookup(self.get_parameter('robot_frame').value)
+        pose = self.lookup(ROBOT_FRAME)
         if pose is None:
             return
         rx, ry, ryaw = pose
@@ -345,7 +342,7 @@ class nav2_view(Node):
         if self.control_mode != ControlType.Tunnel or not self.entrance:
             return
         frame, pts = self.entrance
-        if len(pts) < 2 or frame != self.get_parameter('odom_frame').value:
+        if len(pts) < 2 or frame != ODOM_FRAME:
             return
         line = np.array([px(x, y) for x, y in pts], np.int32)
         cv2.polylines(body, [line], False, WALL, 3, cv2.LINE_AA)
@@ -353,7 +350,7 @@ class nav2_view(Node):
     def draw_path(self, body, px, path):
         if path is None or len(path.poses) < 2:
             return
-        if path.header.frame_id != self.get_parameter('odom_frame').value:
+        if path.header.frame_id != ODOM_FRAME:
             return
         line = np.array([px(p.pose.position.x, p.pose.position.y) for p in path.poses], np.int32)
         cv2.polylines(body, [line], False, PATH, 2, cv2.LINE_AA)
@@ -361,9 +358,9 @@ class nav2_view(Node):
         cv2.drawMarker(body, (int(gx), int(gy)), PATH, cv2.MARKER_TILTED_CROSS, 18, 2)
 
     def draw_robot(self, body, px):
-        pose = self.lookup(self.get_parameter('robot_frame').value)
+        pose = self.lookup(ROBOT_FRAME)
         fp = self.footprint
-        if fp is not None and fp.header.frame_id != self.get_parameter('odom_frame').value:
+        if fp is not None and fp.header.frame_id != ODOM_FRAME:
             fp = None
         if fp is not None and len(fp.polygon.points) >= 3:
             poly = np.array([px(p.x, p.y) for p in fp.polygon.points], np.int32)
@@ -431,7 +428,7 @@ class nav2_view(Node):
     def publish(self, img):
         msg = self.bridge.cv2_to_imgmsg(np.ascontiguousarray(img), encoding='bgr8')
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.get_parameter('odom_frame').value
+        msg.header.frame_id = ODOM_FRAME
         self.pub_view.publish(msg)
 
     # --- Beenden ---

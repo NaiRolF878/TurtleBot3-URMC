@@ -2,7 +2,7 @@
 #
 # Verschachteltes Format: nav2_obstacle.launch.py uebergibt die Datei direkt an
 # den Node. Wann auf Obstacle umgeschaltet wird, steht in Switch_Control.yaml, die
-# Geschwindigkeiten des Ausweichmanoevers in control_driving.
+# Geschwindigkeiten des Ausweichmanoevers in Control_driving_PID_Wide.yaml.
 #
 # Winkel in Grad, gegen den Uhrzeigersinn ab Fahrtrichtung:
 #   0 = geradeaus, 90 = links, 270 = rechts.

@@ -4,18 +4,18 @@
 # Hintergrund und den NOT-AUS (notaus) im Vordergrund dieses Terminals. Nur
 # Spurverfolgung ohne Ausweichen und Nav2: follow_lane.sh
 #
-# Fahrbefehle erzeugt nur control_driving: je nach /control/mode PID + Offset (Lane),
-# das Ausweichmanoever aus /avoid/zones (Obstacle) oder die Befehle von Nav2
-# (/nav2/cmd_vel, TunnelEntry/Tunnel), sonst Null. Er sendet auf /control/cmd_vel;
-# erst der Not-Aus reicht an /cmd_vel durch.
+# Fahrbefehle erzeugt nur control_driving: je nach /control/mode PID + Offset (Lane), PID
+# (TunnelEntry), das Ausweichmanoever aus /avoid/zones (Obstacle) oder die Befehle von Nav2
+# (/nav2/cmd_vel, Tunnel), sonst Null. Er sendet auf /control/cmd_vel; erst der Not-Aus
+# reicht an /cmd_vel durch.
 #
 # Der Bot faehrt NICHT von selbst: erst LEERTASTE in diesem Terminal gibt die Fahrt frei,
 # nochmal Leertaste = STOPP. q oder Strg+C beendet den Not-Aus (sendet Stopp) und danach
-# alles andere.
+# alles andere. L leert Spurgedaechtnis und Costmaps (Bot angehoben: erst absetzen).
 
 # Laeuft schon eine Pipeline? Zwei gleichzeitig senden auf dieselben Topics, und ein
 # zweiter Not-Aus im STOPP schickt dauernd Null an den Bot.
-PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|avoid_node|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|avoid_node|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Pipeline:"
     ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/[^/]*/##; s# --ros-args.*##'
@@ -74,5 +74,6 @@ echo "anhaken, dann im Debugbild auf TUNNEL STARTEN klicken."
 echo "Das zweite Bildfenster zeigt die Nav2-Draufsicht mit Statuszeile (/nav2/view)."
 echo ""
 echo "Not-Aus: LEERTASTE = Fahren/Stopp, q = beenden."
+echo "L = Spurgedaechtnis und Costmaps leeren (Bot angehoben: erst absetzen, im Stand druecken)."
 echo ""
 ros2 run Follow_Lane notaus

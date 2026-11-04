@@ -12,10 +12,15 @@ from enum import Enum
 import numpy as np
 import rclpy
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.signals import SignalHandlerOptions
 
 # Wartezeit von spin_once; so schnell reagiert ein Node auf Strg+C.
 SPIN_TIMEOUT_S = 0.1
+# Kostenwert der OccupancyGrid-Skala: ab hier plant NavFn nicht mehr (253 -> 99).
+COSTMAP_BLOCKED = 99
+# robot_radius 0.09 + footprint_padding 0.01 + eine Zelle (2,5 cm) der global_costmap.
+PATH_CHECK_SKIP_M = 0.125
 
 
 class ControlType(Enum):
@@ -66,6 +71,22 @@ def read_params(node, names):
         setattr(node, name, node.get_parameter(name).value)
 
 
+def require_params(node, names):
+    """Beendet den Node mit klarer Meldung, wenn ein Parameter ohne Code-Default keinen Wert
+    aus der YAML bekommen hat. So gibt es jeden Wert nur an einer Stelle."""
+    missing = []
+    for name in names:
+        try:
+            node.get_parameter(name)
+        except ParameterUninitializedException:
+            missing.append(name)
+    if missing:
+        node.get_logger().fatal(
+            f'Ohne Wert: {", ".join(missing)} -- YAML nicht geladen oder unvollstaendig. '
+            f'{node.get_name()} startet nicht.')
+        raise SystemExit(1)
+
+
 def control_mode_from_msg(node, msg):
     """UInt8 von /control/mode -> ControlType, None bei unbekanntem Wert."""
     try:
@@ -112,6 +133,22 @@ def scan_points(scan):
     valid = np.isfinite(ranges) & (ranges > scan.range_min)
     angles, ranges = angles[valid], ranges[valid]
     return angles, ranges, np.column_stack([ranges * np.cos(angles), ranges * np.sin(angles)])
+
+
+def path_blocked(points, robot_xy, grid, resolution, origin_xy):
+    """Liegt eine gesperrte Zelle auf dem Pfad (N, 2) vor dem Bot?
+
+    grid: OccupancyGrid-Werte (H, W), origin_xy im selben Frame wie points. Der Abschnitt bis
+    PATH_CHECK_SKIP_M um den Bot zaehlt nicht: steht er nah an einer Wand, beginnt der Pfad
+    im Saum, und die Pruefung sagte sonst dauernd "blockiert".
+    """
+    d = np.hypot(points[:, 0] - robot_xy[0], points[:, 1] - robot_xy[1])
+    ahead = points[int(np.argmin(d)):]
+    ahead = ahead[np.hypot(ahead[:, 0] - robot_xy[0], ahead[:, 1] - robot_xy[1]) > PATH_CHECK_SKIP_M]
+    cells = np.floor((ahead - np.asarray(origin_xy)) / resolution).astype(np.int64)
+    h, w = grid.shape
+    valid = (cells[:, 0] >= 0) & (cells[:, 0] < w) & (cells[:, 1] >= 0) & (cells[:, 1] < h)
+    return bool((grid[cells[valid, 1], cells[valid, 0]] >= COSTMAP_BLOCKED).any())
 
 
 def cloud_xy(cloud):

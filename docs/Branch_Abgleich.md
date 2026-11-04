@@ -18,18 +18,29 @@ Gemeinsame Dateien mit Aenderungen (hier entstehen beim Merge Konflikte):
 
 | Datei | Abweichung |
 |-------|------------|
-| `src/switch_control.py` | Lane <-> Obstacle ueber `/avoid/zones` mit Hysterese statt LiDAR-Kegel + Linienfilter |
-| `src/control_driving.py` | Lane: PID + Offset; Obstacle: Ausweichmanoever; Nav2 nur in TunnelEntry/Tunnel |
-| `src/nav2_goal_publisher.py` | plant nicht im Obstacle-Modus (`PLAN_MODES`) |
-| `src/lane_costmap_node.py` | Spurmitte nur in TunnelEntry (`CENTER_PATH_MODES`), Docstring |
+| `src/switch_control.py` | Lane <-> Obstacle ueber `/avoid/zones` mit Hysterese statt LiDAR-Kegel + Linienfilter; `takeover_*` ohne Code-Default |
+| `src/control_driving.py` | Lane: PID + Offset; Obstacle: Ausweichmanoever; TunnelEntry: PID ohne Offset; Nav2 nur im Tunnel (`NAV2_MODES`); `avoid_*` ohne Code-Default, `AVOID_TIMEOUT` |
+| `src/nav2_goal_publisher.py` | plant nie (`PLAN_MODES` leer), Nav2 nur im Tunnel; Docstring, Kommentare |
+| `src/lane_costmap_node.py` | keine Spurmitte (`CENTER_PATH_MODES` leer), Docstring |
 | `src/debug_view.py` | Anzeige der Fahrquelle je Modus (`MODE_SOURCE`) |
-| `Parameter/Switch_Control.yaml` | `takeover_*` statt `obstacle_*`, `line_*`, `lane_max_age` |
-| `launch/nav2_obstacle.launch.py` | startet avoid_node, Docstring |
+| `Parameter/Switch_Control.yaml` | `takeover_*` statt `obstacle_*` |
+| `Parameter/Control_driving_PID_Wide.yaml` | zusaetzlich `avoid_linear_speed`, `avoid_angular_speed` |
+| `launch/nav2_obstacle.launch.py` | startet avoid_node, Docstring, Kommentar zu `/nav2/cmd_vel` |
 | `scripts/tb/launchers/nav2_obstacle.sh` | avoid_node im Prozessmuster, Kopfkommentar |
 | `setup.py` | Eintrag `avoid_node` |
 | `workspace/src/follow_lane_msg/CMakeLists.txt` | `msg/AvoidZones.msg` |
 
-Auf diesem Branch geloescht: `docs/URMC–Technisches_Konzept.md` (liegt nur auf `main`).
+Auf diesem Branch geloescht: `docs/URMC–Technisches_Konzept.md` (liegt nur auf `main`)
+und `docs/Konzept_Nav2.md`.
+
+Aus den nicht uebernommenen Commits `b989a0f` und `838ca32` (per `-s ours` als abgeglichen
+markiert) weichen ausserdem ab, ohne Bezug zum Ausweichen:
+
+| Datei | Abweichung |
+|-------|------------|
+| `README.md` | Stand vor `b989a0f` |
+| `docs/Kalibrierung_Checkliste.md`, `docs/Nav2LocalCoastmap_Doku.md`, `docs/Nav2_Costmap_Werte.md` | je eine Formulierung vor `b989a0f` |
+| `docs/ToDo.md`, `entrypoint.sh`, `novnc_startup.sh` | hier noch vorhanden, in `838ca32` entfernt |
 
 Alles andere ist identisch zu `Nav2-Costmap-Fix`.
 
@@ -55,6 +66,7 @@ git merge --no-commit origin/Nav2-Costmap-Fix
    grep -rn "'/control/mode'" workspace/src/Follow_Lane/Follow_Lane/src | grep create_publisher   # nur switch_control
    ```
 4. Neue Nodes oder Modi auf `Nav2-Costmap-Fix`, die `ControlType.Obstacle` verwenden:
-   pruefen, ob sie hier etwas tun duerfen, und die Liste oben ergaenzen.
+   pruefen, ob sie hier etwas tun duerfen, und die Liste oben ergaenzen. Neue
+   Pflicht-Parameter (`require_params`) muessen in der YAML stehen, die der Launch laedt.
 5. Commit, danach am Bot: Lane mit Offset, Obstacle-Uebernahme und Rueckgabe,
-   Tunnel per Button.
+   TunnelEntry ohne Offset, Tunnel per Button.

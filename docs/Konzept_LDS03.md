@@ -17,8 +17,8 @@ Costmap und Nav2. Wie die gemeinsamen Teile aktuell gehalten werden, steht in
 |---------------|--------------------------------------------------------------|---------------------------------------|
 | `Lane`        | Start, Ende von Obstacle; nach dem Tunnel der Modus davor    | PID auf den Spurfehler + Ausweich-Offset |
 | `Obstacle`    | Frontzone naeher als `takeover_distance`                     | Ausweichmanoever aus `/avoid/zones`   |
-| `TunnelEntry` | Button im Debugbild oder Tunnelschild                        | Nav2 (`/nav2/cmd_vel`)                |
-| `Tunnel`      | LiDAR sieht die Tunnelwaende oder Einfahrtsstrecke erreicht  | Nav2 (`/nav2/cmd_vel`)                |
+| `TunnelEntry` | Button im Debugbild oder Tunnelschild                        | PID auf den Spurfehler, ohne Offset   |
+| `Tunnel`      | Beide Spurlinien enden an der Oeffnung                       | Nav2 (`/nav2/cmd_vel`)                |
 
 Jeder andere Modus, veraltete Eingangsdaten oder ein fehlendes `/control/mode`
 fuehren zu einem Nullbefehl.
@@ -29,8 +29,8 @@ avoid_node -------/avoid/zones-------------------. |
 controller_server --/nav2/cmd_vel--------------. | |
                                                v v v
 switch_control --/control/mode--------> control_driving --/control/cmd_vel--> notaus --/cmd_vel--> Bot
-      ^   ^
-/scan-'   '--/avoid/zones
+      ^
+      '-- /avoid/zones, /detect/lines_lost, /tunnel/outside, Button, Schild
 ```
 
 ## Challenges
@@ -44,10 +44,15 @@ Ausweichmanoever mit Hysterese, Details in `Zonen_Ausweichen.md`. Nur LiDAR. Kei
 Linienfilter und keine Spurwaende: Ob ein Hindernis auf der eigenen Spur steht, sieht
 das Zonen-Ausweichen nicht. Die Spurerkennung haelt im Lane-Modus gegen die Linien.
 
-**Tunnel (TunnelEntry, Tunnel).** Wie auf `Nav2-Costmap-Fix`: Einfahrt mit Kamera ueber
-die Spurmitte und NavFn/MPPI, ab der Oeffnung nur LiDAR (Kamera laut Reglement verboten),
-Ausgangssuche mit tunnel_explorer_node, Eingangssperre mit keepout_zone_node. Details:
+**Tunnel (TunnelEntry, Tunnel).** Wie auf `Nav2-Costmap-Fix`: Einfahrt mit Kamera und PID
+(ohne Offset), ab dem Linienende nur LiDAR (Kamera laut Reglement verboten), Ausgangssuche
+mit tunnel_explorer_node und NavFn/MPPI, Eingangssperre mit keepout_zone_node. Details:
 `Nav2LocalCoastmap_Doku.md`, `Nav2_Costmap_Werte.md`.
+
+**Nav2 plant hier nur den Tunnel.** `PLAN_MODES` (nav2_goal_publisher) und
+`CENTER_PATH_MODES` (lane_costmap_node) sind leer, der Code dahinter bleibt. Das
+Spurgedaechtnis laeuft weiter (Debugbild, lane_layer), ausser im Tunnel; niemand plant
+damit, und switch_control nutzt keinen Linienfilter.
 
 ## Start
 
@@ -63,10 +68,12 @@ Weitere Befehle: `Befehle.md`.
 Diese Dateien kommen unveraendert von `Nav2-Costmap-Fix`. Ihre Aussagen zum
 Obstacle-Modus beschreiben die Nav2-Variante und gelten auf diesem Branch nicht:
 
-- `Befehle.md`: Nav2 faehrt hier nur TunnelEntry und Tunnel.
-- `Nav2LocalCoastmap_Doku.md`, `Nav2_Costmap_Werte.md`, `Obstacle_Tunnel_Offene_Punkte.md`:
-  Abschnitte zu Obstacle, Linienfilter und Bahnplanung um Hindernisse.
+- `Befehle.md`: Nav2 faehrt hier nur den Tunnel.
+- `Nav2LocalCoastmap_Doku.md`, `Nav2_Costmap_Werte.md`, `Obstacle_Tunnel_Offene_Punkte.md`,
+  `Kalibrierung_Checkliste.md`: Abschnitte zu Obstacle, `obstacle_*`-Werten, Linienfilter
+  und Bahnplanung um Hindernisse.
 - Kommentare in `Parameter/nav2_params.yaml` und `Parameter/Lane_Costmap.yaml`:
-  dort genannte Obstacle-Bezuege.
+  dort genannte Obstacle-Bezuege. `goal_distance` und `max_path_backward` muessen in
+  `Lane_Costmap.yaml` bleiben (nav2_goal_publisher verlangt sie), wirken hier aber nicht.
 
 Die Tunnel-Teile dieser Dateien gelten unveraendert.

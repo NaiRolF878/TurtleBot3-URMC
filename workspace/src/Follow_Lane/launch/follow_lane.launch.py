@@ -26,7 +26,8 @@ def load_flat_params(path):
     Node-Block (z.B. Switch_Control.yaml) werden ebenfalls gelesen.
     """
     if not os.path.isfile(path):
-        print(f'[follow_lane.launch] Parameterdatei nicht gefunden, nutze Code-Defaults: {path}')
+        print(f'[follow_lane.launch] Parameterdatei nicht gefunden, nur Code-Defaults '
+              f'(control_driving hat keine und startet nicht): {path}')
         return {}
 
     with open(path) as f:
@@ -45,9 +46,12 @@ def launch_setup(context, *args, **kwargs):
     control_params = load_flat_params(LaunchConfiguration('control_params').perform(context))
     switch_params = load_flat_params(LaunchConfiguration('switch_control_params').perform(context))
 
-    # *_nav2: Kopien von ingress_node/detect_lane, die im Tunnel pausieren. Die
-    # Node-Namen bleiben, damit rqt, save-params.sh und ros2 param gleich funktionieren.
+    # Die *_nav2-Nodes pausieren im Tunnel. Sie laufen als ingress_node/detect_lane,
+    # damit rqt, save-params.sh und ros2 param gleich funktionieren.
     return [
+        # odom -> base_footprint ohne Radwert-Ausreisser; der Bot sendet die TF dafuer
+        # nicht selbst (bot-up.sh, BOT_ODOM_TF=false).
+        Node(package='Follow_Lane', executable='odom_filter', name='odom_filter'),
         Node(package='Follow_Lane', executable='ingress_node_nav2', name='ingress_node'),
         Node(
             package='Follow_Lane', executable='detect_lane_nav2', name='detect_lane',
@@ -70,9 +74,9 @@ def generate_launch_description():
         # Ueberschreibbar, z.B. fuer eine zweite Streckenkonfiguration:
         #   ros2 launch Follow_Lane follow_lane.launch.py detect_params:=/pfad/zur/datei.yaml
         DeclareLaunchArgument('detect_params',
-            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_PI_CAM2_V3.yaml')),
+            default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_LAB.yaml')),
         DeclareLaunchArgument('control_params',
-            default_value=os.path.join(PARAM_DIR, 'Control_driving_PID.yaml')),
+            default_value=os.path.join(PARAM_DIR, 'Control_driving_PID_Wide.yaml')),
         DeclareLaunchArgument('switch_control_params',
             default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.

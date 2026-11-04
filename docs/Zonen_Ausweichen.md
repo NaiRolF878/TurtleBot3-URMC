@@ -1,8 +1,8 @@
 # Zonen-Ausweichen (Obstacle-Modus auf `LDS03-Doku`)
 
 Hindernisse auf der Strecke werden ueber eine feste Zoneneinteilung des LiDAR
-umfahren. Nav2 wird dafuer nicht benutzt; es faehrt auf diesem Branch nur
-TunnelEntry und Tunnel. Ueberblick ueber den ganzen Branch: `Konzept_LDS03.md`.
+umfahren. Nav2 wird dafuer nicht benutzt; es faehrt auf diesem Branch nur den
+Tunnel. Ueberblick ueber den ganzen Branch: `Konzept_LDS03.md`.
 
 ## Aufgabenteilung
 
@@ -60,8 +60,9 @@ control_driving addiert den Offset aus `/avoid/zones` auf den Spurfehler:
   faehrt mittig durch
 
 Die Spurerkennung laeuft dabei weiter und haelt dagegen, sodass die Linien
-nicht ueberfahren werden. Ist `/avoid/zones` aelter als `avoid_timeout`, rechnet
-control_driving ohne Offset.
+nicht ueberfahren werden. Ist `/avoid/zones` aelter als `AVOID_TIMEOUT` (0,5 s),
+rechnet control_driving ohne Offset. In `TunnelEntry` faehrt derselbe PID, aber nie
+mit Offset.
 
 > **Vorzeichen:** Ein **positiver** Spurfehler laesst control_driving nach
 > **links** lenken. Der Offset folgt derselben Konvention. Wird das in
@@ -76,12 +77,13 @@ dann aus den Daten von avoid_node:
 - Drehrichtung `direction` (+1 links, -1 rechts, 0 geradeaus) mal `avoid_angular_speed`
 - vorwaerts mit `avoid_linear_speed`, ausser `forward_allowed` ist false: Front
   naeher als `avoid_turn_only_distance` oder kein Sektor frei und keine Drehrichtung
+- beides auf die Radgrenze skaliert (`MAX_WHEEL_VEL`), wie die Befehle von Nav2
 
 Zurueck zu `Lane` erst, wenn die Front `takeover_release_debounce` Sekunden lang
 weiter als `takeover_release_distance` (0.45 m) frei ist. Ohne diese Hysterese
 springt der Modus an der Schwelle zwischen PID und Ausweichmanoever.
 
-Bleibt `/avoid/zones` im Obstacle-Modus laenger als `avoid_timeout` aus, sendet
+Bleibt `/avoid/zones` im Obstacle-Modus laenger als `AVOID_TIMEOUT` aus, sendet
 control_driving Null.
 
 ## Diagnose
@@ -92,15 +94,20 @@ ros2 topic echo /control/mode         # Fahrmodus (1 Lane, 2 Obstacle, 7 TunnelE
 bash scripts/tb/launchers/rqt_params.sh    # Parameter live nachziehen
 ```
 
-Im Debugbild steht je Modus, wer faehrt (`PID + Offset`, `Zonen`, `Nav2/MPPI`).
+Im Debugbild steht je Modus, wer faehrt (Lane `PID + Offset`, Obstacle `Zonen`,
+TunnelEntry `PID`, Tunnel `Nav2/MPPI`).
 
 ## Parameter
 
 | Datei / Ort                     | Inhalt                                                    |
 |---------------------------------|-----------------------------------------------------------|
 | `Parameter/Avoid_Node.yaml`     | Zonen, Kosten, `clear_distance`, `avoid_turn_only_distance`, Offset |
-| `Parameter/Switch_Control.yaml` | `takeover_distance`, `takeover_release_distance`, `takeover_release_debounce` |
-| control_driving (Code-Default)  | `avoid_linear_speed` 0.06, `avoid_angular_speed` 0.7, `avoid_timeout` 0.5 |
+| `Parameter/Switch_Control.yaml` | `takeover_distance`, `takeover_release_distance`, `takeover_release_debounce` (Pflicht) |
+| `Parameter/Control_driving_PID_Wide.yaml` | `avoid_linear_speed`, `avoid_angular_speed` (Pflicht) |
+| control_driving (Konstante)     | `AVOID_TIMEOUT` 0.5 |
+
+Fehlt ein Pflichtwert, startet der Node nicht. Eine andere Datei ueber `control_params:=`
+muss darum auch die `avoid_*`-Werte enthalten; `Control_driving_PID.yaml` hat sie nicht.
 
 `Avoid_Node.yaml` ist beim Start ueberschreibbar:
 

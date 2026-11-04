@@ -6,6 +6,9 @@ Container-Rebuild, geht immer die lange Form `bash scripts/tb/<skript>.sh`.
 
 Vor ROS-Befehlen in einem neuen Terminal: `source scripts/tb/tb-env.sh` (setzt u. a. `ROS_DOMAIN_ID=33`).
 
+`tb` baut beim Start automatisch (`colcon build --symlink-install`, ~2 s) – nach `git pull` oder
+Branch-Wechsel ist also nichts extra nötig. Wer ohne `tb` startet: vorher selbst bauen.
+
 ---
 
 ## Bot starten
@@ -60,6 +63,8 @@ Der Bot fährt **nie von selbst** los. Freigabe und Stopp, jeweils umschalten:
 - **rqt**: `rqt_params.sh` → Node `notaus` → Häkchen `drive`
 - **Befehl**: `ros2 service call /notaus/set std_srvs/srv/SetBool "{data: true}"` (`false` = Stopp)
 
+**Taste L** im Terminal von `nav2_obstacle.sh`: Spurgedächtnis und beide Costmaps leeren, wenn sie nicht mehr zur Odometrie passen (Bot angehoben). Erst absetzen, dann im Stand drücken.
+
 Zustand: `ros2 topic echo /notaus/drive`. Kommt von `control_driving` 0,5 s nichts, sendet der Not-Aus selbst Stopp.
 Läuft der Not-Aus nicht, kommt **kein** Fahrbefehl zum Bot. Kette: `control_driving` → `/control/cmd_vel` → `notaus` → `/cmd_vel`;
 Nav2 sendet auf `/nav2/cmd_vel`, `control_driving` reicht das nur im Obstacle-/Tunnel-Modus durch.
@@ -96,6 +101,7 @@ Zeiten in Dateinamen sind UTC (2 h hinter deutscher Sommerzeit).
 | `/control/mode` | Fahrmodus von `switch_control` (1 Lane, 2 Obstacle, 7 TunnelEntry, 6 Tunnel) |
 | `/nav2/cmd_vel` | Fahrbefehle von Nav2 (`controller_server`) an `control_driving` |
 | `/control/cmd_vel` | Fahrbefehle von `control_driving` an den Not-Aus |
+| `/control/clear_maps` | Taste L: `lane_costmap_node` leert Spurgedächtnis und Costmaps |
 | `/odom`, `/cmd_vel`, `/battery_state` | vom Bringup (`turtlebot3_node`) |
 
 Anschauen: `ros2 run rqt_image_view rqt_image_view /lokal/bev`

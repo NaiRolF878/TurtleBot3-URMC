@@ -19,6 +19,11 @@ source "$SCRIPT_DIR/camera.conf" || exit 1
 SOUND_OK=1
 SOUND_FAIL=3
 
+# false: der Bot sendet die TF odom -> base_footprint nicht selbst, das macht odom_filter
+# in der Pipeline (filtert kaputte Radwerte, die die Odometrie um ~1700 m springen liessen).
+# Ohne laufende Pipeline gibt es dann keine odom-TF. Einmalig anders: BOT_ODOM_TF=true botup
+BOT_ODOM_TF="${BOT_ODOM_TF:-false}"
+
 BOT_IP=$(bash "$SCRIPT_DIR/find-bot-ip.sh") || exit 1
 
 if [ "$1" != "--no-time" ]; then
@@ -69,7 +74,25 @@ if [ ! -e /dev/tb3_lidar ]; then
 fi
 
 echo "--- Bringup starten ---"
-setsid nohup ros2 launch turtlebot3_bringup robot.launch.py usb_port:="$PORT" \
+# Kopie der Modell-Parameter mit odometry.publish_tf: false (siehe BOT_ODOM_TF im Laptop-Skript).
+PARAM_ARG=""
+if [ "__ODOM_TF__" = "false" ]; then
+    # Dieselbe Datei wie robot.launch.py ohne tb3_param_dir: unter Humble param/humble/.
+    # param/<modell>.yaml gehoert zu neueren Distros (enable_stamped_cmd_vel: true) --
+    # damit ignoriert der Bot unsere ungestempelten Twist-Befehle.
+    SRC="$(ros2 pkg prefix turtlebot3_bringup)/share/turtlebot3_bringup/param/$ROS_DISTRO/$TURTLEBOT3_MODEL.yaml"
+    [ -f "$SRC" ] || SRC="$(ros2 pkg prefix turtlebot3_bringup)/share/turtlebot3_bringup/param/$TURTLEBOT3_MODEL.yaml"
+    if sed 's/publish_tf: true/publish_tf: false/' "$SRC" > "$HOME/tb3_param_no_odom_tf.yaml" \
+            && grep -q 'publish_tf: false' "$HOME/tb3_param_no_odom_tf.yaml"; then
+        PARAM_ARG="tb3_param_dir:=$HOME/tb3_param_no_odom_tf.yaml"
+        echo "  odom-TF: sendet odom_filter (Pipeline), nicht der Bot"
+    else
+        echo "  WARNUNG: publish_tf nicht abschaltbar ($SRC) -- der Bot sendet die odom-TF selbst"
+    fi
+else
+    echo "  odom-TF: sendet der Bot selbst (ungefiltert)"
+fi
+setsid nohup ros2 launch turtlebot3_bringup robot.launch.py usb_port:="$PORT" $PARAM_ARG \
     > "$HOME/logs/bringup.log" 2>&1 < /dev/null &
 sleep 6
 
@@ -100,6 +123,7 @@ CAM_SENSOR_MODE='$CAM_SENSOR_MODE' CAM_COLOUR_GAINS='$CAM_COLOUR_GAINS' CAM_ORIE
 $(cat "$SCRIPT_DIR/_camera-start.sh")"
 REMOTE="${REMOTE/__CAMERA_START__/"$CAMERA_START"}"
 REMOTE=${REMOTE//__DOMAIN_ID__/$BOT_DOMAIN_ID}
+REMOTE=${REMOTE//__ODOM_TF__/$BOT_ODOM_TF}
 # Tuning-Datei mitschicken (Details in camera.conf)
 if [ -n "$CAM_TUNING" ]; then
     ssh "$BOT_USER@$BOT_IP" "mkdir -p ~/tuning" && \

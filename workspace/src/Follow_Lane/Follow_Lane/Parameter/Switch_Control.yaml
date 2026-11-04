@@ -7,22 +7,3 @@
     # als takeover_release_distance frei ist.
     takeover_release_distance: 0.45
     takeover_release_debounce: 1.0
-
-    # --- Tunnel-Einfahrt (TunnelEntry -> Tunnel), nur LiDAR ---
-    # Umschalten (Kamera aus), sobald links und rechts voraus eine Wand naeher als
-    # tunnel_side_distance liegt. Testtunnel 0,5 m breit: Waende 0,25 m neben der Mitte,
-    # mit 0.35 schaltet es ~20 cm vor der Oeffnung.
-    tunnel_side_angle_min_deg: 30.0
-    tunnel_side_angle_max_deg: 100.0
-    tunnel_side_distance: 0.35
-    tunnel_entry_debounce: 0.2
-    # Sicherheitsnetz: spaetestens nach so viel Strecke (m) ab dem Umschalten gilt der
-    # Bot als drin. Etwas mehr als der Abstand, mit dem er vor dem Tunnel steht.
-    tunnel_entry_max_distance: 0.8
-    odom_frame: odom
-    robot_frame: base_footprint
-
-    # --- Tunnel-Austritt (Tunnel -> vorheriger Modus), nur LiDAR ---
-    tunnel_exit_open_distance: 1.5
-    tunnel_exit_open_ratio: 0.8
-    tunnel_exit_debounce: 1.0
