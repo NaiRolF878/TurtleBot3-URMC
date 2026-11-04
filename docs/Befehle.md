@@ -83,12 +83,16 @@ bash scripts/tb/load-params.sh detect_lane     # Datei in den laufenden Node lad
 
 ## Logs (Ordner `logs/` im Repo)
 
-| Datei | Inhalt |
+| Ordner / Datei | Inhalt |
 |---|---|
-| `logs/follow_lane-<Zeit>.log` / `follow_lane-latest.log` | Ausgaben aller Knoten der Pipeline (Fehler, Tracebacks) |
-| `logs/tb-status-<Zeit>.log` | alle 10 s Knoten/Topic-Raten/Netz, wenn bei `tb` „mitloggen“ = j |
+| `logs/pipeline/follow_lane-<Zeit>.log`, `nav2_obstacle-<Zeit>.log`, `*-latest.log` | Ausgaben aller Knoten der Pipeline (Fehler, Tracebacks); `-latest` zeigt auf den letzten Lauf |
+| `logs/status/tb-status-<Zeit>.log` | alle 10 s Knoten/Topic-Raten/Netz, wenn bei `tb` „mitloggen“ = j |
+| `logs/bags/` | Aufzeichnungen (`ros2 bag record -o logs/bags/bag-<Zeit> ...`), lesbar mit `scripts/tb/bag-to-text.py` |
+| `logs/kalibrierung/` | Bilder und Aufnahmen der Kamerakalibrierung (Intrinsik-Archive, Vogelperspektive, Rasterbilder) |
+| `logs/bilder/` | Screenshots und Skizzen |
+| `logs/notizen/` | lose Notizen |
 
-Zeiten in Dateinamen sind UTC (2 h hinter deutscher Sommerzeit).
+Zeiten in Dateinamen sind UTC (Winterzeit 1 h, Sommerzeit 2 h hinter deutscher Zeit).
 
 ## Wichtige Topics
 

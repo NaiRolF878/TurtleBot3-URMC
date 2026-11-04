@@ -1,5 +1,5 @@
 # scripts/tb/camera-intrinsics.py -- Modell: Fisheye (equidistant)
-# 42 Ansichten. Rohbilder: logs/intrinsik_aufnahmen.tar.gz
+# 42 Ansichten. Rohbilder: logs/kalibrierung/intrinsik_aufnahmen.tar.gz
 image_width: 800
 image_height: 600
 camera_name: camera

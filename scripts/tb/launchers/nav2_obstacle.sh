@@ -39,11 +39,11 @@ if pgrep -f "$PATTERN" >/dev/null; then
     echo ""
 fi
 
-# Ausgaben aller Knoten: pro Start eine eigene Datei in logs/ (logs/ ist in .gitignore).
+# Ausgaben aller Knoten: pro Start eine eigene Datei in logs/pipeline/ (logs/ ist in .gitignore).
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-mkdir -p "$REPO_ROOT/logs"
-NODE_LOG="$REPO_ROOT/logs/nav2_obstacle-$(date +%Y%m%d-%H%M%S).log"
-ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/nav2_obstacle-latest.log"
+mkdir -p "$REPO_ROOT/logs/pipeline"
+NODE_LOG="$REPO_ROOT/logs/pipeline/nav2_obstacle-$(date +%Y%m%d-%H%M%S).log"
+ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/nav2_obstacle-latest.log"
 
 # set -m: eigene Prozessgruppe fuer den Hintergrundjob, sonst ignoriert er SIGINT und laesst
 # sich nicht mehr sauber beenden (Begruendung ausfuehrlich in follow_lane.sh).
@@ -66,7 +66,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Pipeline startet im Hintergrund (Log der Knoten: logs/$(basename "$NODE_LOG"))."
+echo "Pipeline startet im Hintergrund (Log der Knoten: logs/pipeline/$(basename "$NODE_LOG"))."
 echo ""
 echo "Tunnel von Hand: im Fenster rqt_image_view einmal \"Publish click location\""
 echo "anhaken, dann im Debugbild auf TUNNEL STARTEN klicken."

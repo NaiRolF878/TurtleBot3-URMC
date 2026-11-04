@@ -43,7 +43,7 @@ Abstand beim Umfahren selbst: `inflation_radius` der Costmaps (lokal 0,20 m, glo
 
 ### 3. Fahrgeschwindigkeit über dem Limit des Burger – **beobachtet** (Lane-Modus)
 
-Aufzeichnung `logs/bag-20261022-132414`: `control_driving` verlangte bis 0,40 m/s am äußeren Rad,
+Aufzeichnung `logs/bags/bag-20261022-132414`: `control_driving` verlangte bis 0,40 m/s am äußeren Rad,
 der Burger schafft 0,22 m/s. Das schnellere Rad blieb stehen, der Bot drehte entgegen dem Lenkbefehl.
 `MAX_VEL` wurde auf 0,15 gesetzt.
 Nav2 selbst ist auf `vx_max: 0.22` begrenzt (betrifft nur Obstacle/Tunnel).
@@ -53,7 +53,7 @@ Nav2 selbst ist auf `vx_max: 0.22` begrenzt (betrifft nur Obstacle/Tunnel).
 ### 4. Feinere Costmap – **ungetestet**
 
 `local_costmap.resolution` 0,05 → 0,025 m (~4× Zellen). Prüfen, ob `controller_server` die 20 Hz hält
-(Warnung „Control loop missed its desired rate“ in `nav2_view` bzw. `logs/nav2_obstacle-latest.log`).
+(Warnung „Control loop missed its desired rate“ in `nav2_view` bzw. `logs/pipeline/nav2_obstacle-latest.log`).
 Zurück: Wert in `nav2_params.yaml` auf 0,05.
 
 ---

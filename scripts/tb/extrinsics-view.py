@@ -6,8 +6,8 @@ Live am Bot (ingress_node muss laufen):
     ros2 run rqt_image_view rqt_image_view /lokal/extrinsics_view
 
 Offline auf einem gespeicherten Bild (kein ROS noetig):
-    python3 scripts/tb/extrinsics-view.py --image logs/frame.png --save logs/check.png
-    python3 scripts/tb/extrinsics-view.py --image logs/frame.png --cx 400   # cx durchspielen
+    python3 scripts/tb/extrinsics-view.py --image logs/kalibrierung/frame.png --save logs/kalibrierung/check.png
+    python3 scripts/tb/extrinsics-view.py --image logs/kalibrierung/frame.png --cx 400   # cx durchspielen
 
 Was das Bild zeigt:
   * Bodengitter alle 10 cm aus der gespeicherten Kameralage. Beschriftung in cm,
@@ -570,7 +570,8 @@ def main():
             H = overlay_homography(K, stored, args.origin_lens, H_fit)
             out = np.hstack([out, render_bev(img, H, grid, out.shape[0],
                                              found.get('board_corners'))])
-        dest = args.save or os.path.join(REPO, 'logs', 'extrinsik_check.png')
+        dest = args.save or os.path.join(REPO, 'logs', 'kalibrierung', 'extrinsik_check.png')
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         cv2.imwrite(dest, out)
         print(f'Geschrieben: {dest}')
         return 0

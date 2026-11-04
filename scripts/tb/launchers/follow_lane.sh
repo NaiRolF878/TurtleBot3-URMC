@@ -35,12 +35,12 @@ if pgrep -f "$PATTERN" >/dev/null; then
     echo ""
 fi
 
-# Ausgaben aller Knoten: pro Start eine eigene Datei in logs/ (im Repo, im VS-Code-Explorer sichtbar;
-# logs/ ist in .gitignore). logs/follow_lane-latest.log zeigt immer auf den letzten Lauf.
+# Ausgaben aller Knoten: pro Start eine eigene Datei in logs/pipeline/ (im Repo, im VS-Code-Explorer sichtbar;
+# logs/ ist in .gitignore). logs/pipeline/follow_lane-latest.log zeigt immer auf den letzten Lauf.
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-mkdir -p "$REPO_ROOT/logs"
-NODE_LOG="$REPO_ROOT/logs/follow_lane-$(date +%Y%m%d-%H%M%S).log"
-ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/follow_lane-latest.log"
+mkdir -p "$REPO_ROOT/logs/pipeline"
+NODE_LOG="$REPO_ROOT/logs/pipeline/follow_lane-$(date +%Y%m%d-%H%M%S).log"
+ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/follow_lane-latest.log"
 
 # set -m: Hintergrundjobs bekommen eine eigene Prozessgruppe. Ohne das IGNORIEREN sie in einem
 # Skript SIGINT (Bash-Regel fuer '&' ohne Job-Control) -- dann laesst sich die Pipeline nicht mehr
@@ -69,7 +69,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Pipeline startet im Hintergrund (Log der Knoten: logs/$(basename "$NODE_LOG"))."
+echo "Pipeline startet im Hintergrund (Log der Knoten: logs/pipeline/$(basename "$NODE_LOG"))."
 echo "Not-Aus: LEERTASTE = Fahren/Stopp, q = beenden."
 echo ""
 ros2 run Follow_Lane notaus

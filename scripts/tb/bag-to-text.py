@@ -2,9 +2,9 @@
 """Macht eine ros2-bag-Aufzeichnung lesbar: eine Zeile pro Nachricht (Zeit, Topic, Inhalt).
 
 Aufruf:
-    python3 scripts/tb/bag-to-text.py logs/bag-20261022-132414
-    python3 scripts/tb/bag-to-text.py logs/bag-...  --topics /detect/lane /cmd_vel
--> schreibt logs/bag-.../kommunikation.txt (und gibt den Pfad aus)
+    python3 scripts/tb/bag-to-text.py logs/bags/bag-20261022-132414
+    python3 scripts/tb/bag-to-text.py logs/bags/bag-...  --topics /detect/lane /cmd_vel
+-> schreibt logs/bags/bag-.../kommunikation.txt (und gibt den Pfad aus)
 
 Bilddaten (raw_image, data-Felder) werden weggelassen, Zahlen gekuerzt.
 Uhrzeit in UTC wie die Lognamen (Container laeuft auf UTC).

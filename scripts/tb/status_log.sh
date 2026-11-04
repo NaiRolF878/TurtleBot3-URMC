@@ -3,7 +3,7 @@
 # wenn beim Start eines Launchers "mitloggen" bejaht wird.
 # Direkt aufrufbar ist es trotzdem: bash scripts/tb/status_log.sh
 #
-# Loggt alle 10s den Status der wichtigsten Follow_Lane-Topics/Nodes nach logs/.
+# Loggt alle 10s den Status der wichtigsten Follow_Lane-Topics/Nodes nach logs/status/.
 # Zweck: Wenn Claude gerade im Bot-WLAN nicht erreichbar ist, laeuft das Logging
 # trotzdem weiter -- die Datei kann man spaeter einfach reinposten.
 #
@@ -14,7 +14,7 @@
 # genau das: 0 = nichts, 1 = kommt an, aber sehr langsam.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LOG_DIR="$REPO_ROOT/logs"
+LOG_DIR="$REPO_ROOT/logs/status"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/tb-status-$(date +%Y%m%d-%H%M%S).log"
 
