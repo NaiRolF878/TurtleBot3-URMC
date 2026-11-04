@@ -120,7 +120,8 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
       (z. B. „faehrt: Bahnplaner (Spurmitte)“ oder „kein Weg gefunden“), und
       den letzten Abbruchgrund von `controller_server`. Rot heißt jünger als
       10 s. Der cyan Pfad muss um das Hindernis herum zwischen den Linien
-      liegen; im Lane-Modus ist kein Pfad zu sehen.
+      liegen; im Lane-Modus ist kein Pfad zu sehen. Er bleibt stabil und wechselt nur,
+      wenn etwas ihn blockiert, er fast abgefahren ist oder der Regler abbricht.
 - [ ] Im Debugbild muss `Spur -> Costmap` eine Punktzahl in Grün zeigen. Steht
       dort `still`, kommt nichts an. Dann die Ursache suchen und nicht an MPPI
       drehen.

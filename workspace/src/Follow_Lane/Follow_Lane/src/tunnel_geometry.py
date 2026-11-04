@@ -7,6 +7,8 @@ import math
 import cv2
 import numpy as np
 
+from Follow_Lane.src.common import COSTMAP_BLOCKED
+
 # Umriss wie local_costmap.footprint in nav2_params.yaml (base_footprint).
 FOOTPRINT = np.array([[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089],
                       [-0.101, 0.069], [-0.101, -0.069], [-0.033, -0.089], [0.033, -0.089]])
@@ -14,8 +16,6 @@ BOT_LENGTH = 0.138
 BOT_WIDTH = 0.178
 # Schmalste Luecke fuer NavFn: 2 * (robot_radius 0.09 + footprint_padding 0.01) + eine Zelle.
 MIN_OPENING_M = 0.225
-# Kostenwert der OccupancyGrid-Skala: ab hier plant NavFn nicht mehr (253 -> 99).
-BLOCKED_COST = 99
 LETHAL_COST = 100
 # Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar: einzelne Strahlen ins
 # Unbekannte. Waende sind schon um robot_radius aufgeblasen, die Bot-MITTE darf schmal fahren.
@@ -194,9 +194,9 @@ def hull_openings(hull, origin, angles, ranges):
 def reachable_free(grid, info_res, origin_xy, robot_xy):
     """Maske der mit dem Bot verbundenen befahrbaren Flaeche, None wenn er in keiner steht.
 
-    Befahrbar heisst: was NavFn befahren darf (unter BLOCKED_COST, nicht unbekannt).
+    Befahrbar heisst: was NavFn befahren darf (unter COSTMAP_BLOCKED, nicht unbekannt).
     """
-    free = (grid >= 0) & (grid < BLOCKED_COST)
+    free = (grid >= 0) & (grid < COSTMAP_BLOCKED)
     k = max(1, int(round(MIN_PASSAGE_M / info_res)))
     free = cv2.morphologyEx(free.astype(np.uint8), cv2.MORPH_OPEN, np.ones((k, k), np.uint8)).astype(bool)
     if not free.any():

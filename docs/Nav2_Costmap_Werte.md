@@ -400,7 +400,6 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
 | `prune_distance` | nav2_params | 1.7 m |
 | `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m (Abstand des Planziels) |
 | `center_path_max_age` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 s |
-| `replan_period` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 s |
 
 ### Die Zusammenhänge
 
@@ -436,8 +435,9 @@ Bedingungen:
   verlängert, solange sie jünger ist als `center_path_max_age` (Empfangszeit,
   damit die Uhren von Bot und Rechner nicht synchron sein müssen). Sonst liegt
   das Ziel geradeaus. `planner_server` (NavFn) rechnet auf der global_costmap
-  einen Weg dorthin, MPPI fährt ihn ab. Neu geplant wird alle `replan_period`
-  und sobald ein Weg erreicht oder abgebrochen ist. Nach dem Umschalten wartet
+  einen Weg dorthin, MPPI fährt ihn ab. Neu geplant wird nur bei Bedarf: gesperrte
+  Zelle auf dem Pfad, bis auf `goal_distance`/2 abgefahren, Weg erreicht oder
+  abgebrochen. Kein Takt, sonst springen die Wege. Nach dem Umschalten wartet
   die erste Planung bis zu 0,5 s auf die erste Spurmitte. *Woher:* gewählt.
 
 ---
@@ -473,8 +473,8 @@ ergibt das:
 - **`PathFollowCritic` Schwelle 0.5:** muss deutlich unter der Pfadlänge (~1 m)
   liegen. Bei 1.4 m würde die Kritik nie greifen, ausgerechnet die, die den
   Vorwärtsdrang halten soll.
-- **`GoalAngleCritic` abgeschaltet:** Das Planziel wird jede Sekunde neu
-  gesetzt, seine Endausrichtung spielt keine Rolle. Eingeschaltet würde die
+- **`GoalAngleCritic` abgeschaltet:** Das Planziel rollt mit, seine
+  Endausrichtung spielt keine Rolle. Eingeschaltet würde die
   Kritik den Bot ab 0,5 m vor dem Ziel auf dessen Ausrichtung drehen, auch
   wenn er gerade an einem Hindernis vorbei muss. Der `goal_checker` lässt das
   Ziel mit `yaw_goal_tolerance` 3.15 ohnehin durchgehen.

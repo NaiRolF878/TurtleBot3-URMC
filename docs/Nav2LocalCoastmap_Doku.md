@@ -26,7 +26,7 @@ flowchart LR
     Tunnel["Tunnel\nNav2/MPPI, geschlossener Raum, kein Kamera-Einsatz"]
 
     Lane -- "LiDAR: Hindernis vorn, keine Spurlinie dazwischen" --> Obstacle
-    Obstacle -- "1 s nichts in 0,2 m (270 Grad)" --> Lane
+    Obstacle -- "1 s nichts in 0,4 m (270 Grad)" --> Lane
     TunnelEntry["TunnelEntry\nPID-Regler, Einfahrt mit Kamera"]
     Lane -- "Tunnel-Schild (auto)\noder Button (manuell)" --> TunnelEntry
     Obstacle -- "Tunnel-Schild (auto)\noder Button (manuell)" --> TunnelEntry
@@ -35,7 +35,7 @@ flowchart LR
 ```
 
 - **Lane**: der normale Betrieb, PID-Regler folgt der Spur.
-- **Obstacle**: sobald der LiDAR etwas direkt vor dem Roboter erkennt und zwischen Roboter und Objekt keine Spurlinie liegt, übernimmt Nav2, plant einen Weg darum herum und fährt ihn ab — automatisch, ohne Schild. Objekte auf der anderen Seite einer Spurlinie (z. B. Hindernisse neben dem Rückweg) lösen nichts aus. Zurück zu Lane geht es, wenn 1 s lang im Umkreis von 0,2 m nichts liegt, gemessen nach vorn, zur Seite und schräg nach hinten (270°). Der Keil direkt hinter dem Bot zählt nicht, von dort kam er gerade.
+- **Obstacle**: sobald der LiDAR etwas direkt vor dem Roboter erkennt und zwischen Roboter und Objekt keine Spurlinie liegt, übernimmt Nav2, plant einen Weg darum herum und fährt ihn ab — automatisch, ohne Schild. Objekte auf der anderen Seite einer Spurlinie (z. B. Hindernisse neben dem Rückweg) lösen nichts aus. Zurück zu Lane geht es, wenn 1 s lang im Umkreis von 0,4 m nichts liegt, gemessen nach vorn, zur Seite und schräg nach hinten (270°). Der Keil direkt hinter dem Bot zählt nicht, von dort kam er gerade.
 - **TunnelEntry**: Einfahrt. Der Bot folgt wie im Lane-Modus mit dem PID der Spur; auf der 20-cm-Spur passt er für Nav2 nicht zwischen die Spurwände. Die Kamera ist hier noch erlaubt. Die Linien reichen nur bis zur Öffnung: Fehlen beide 0,2 s in der Suchzeile (~10 cm vor der Achse, also Bot-Nase noch davor), schaltet `switch_control` auf `Tunnel`. Es gibt keinen Abstands- oder Breitenwert.
 - **Tunnel**: eigener Modus für den geschlossenen Raum, ohne Kamera. Beim Umschalten wird das Spurgedächtnis verworfen, eine leere Spurwolke gesendet und 0,3 s später werden beide Karten geleert; die Tunnelkarte bleibt bis zum Austritt. `tunnel_explorer_node` findet die Tür im Scan, fährt hindurch und sucht den Ausgang (Abschnitt 7). Zurück geht es, wenn der ganze Bot außerhalb der Wand-Hülle ist und vorher einmal drin war. Stand beim Umschalten keine Linie im Bild, ist er schon im Eingang oder im Tunnel: Die Einfahrt entfällt, und es gibt keine Eingangssperre. Ausgelöst wird der Tunnel auf zwei Wegen:
   - **Schild:** ein Erkennungsmodell sendet `6` (`std_msgs/UInt8`) auf `/detect/sign`. Das Modell ist noch nicht gebaut. Die Schildnummern stehen in `SignType` (`common.py`), getrennt von den Modusnummern; welcher Modus aus einem Schild folgt, entscheidet `switch_control`.
@@ -56,7 +56,7 @@ Fahrbefehle erzeugt nur `control_driving`. Er wählt je nach Modus die Quelle un
 | Quelle in `control_driving` | PID auf `/detect/lane` | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert |
 | Wer nutzt die Kamera? | `control_driving` über `/detect/lane`; `lane_costmap_node` für die Spurwände | `lane_costmap_node` für die Spurwände | niemand: `ingress_node` und `detect_lane` pausieren (Reglement) |
 | Was steht in local_ und global_costmap? | LiDAR + Spurgedächtnis | LiDAR + Spurgedächtnis | LiDAR + Eingangssperre |
-| Wird geplant? | nein, nichts geplant und nichts angezeigt | ja: NavFn plant ~1×/s einen Weg um die Hindernisse, MPPI fährt ihn ab | ja: Explorer + NavFn |
+| Wird geplant? | nein, nichts geplant und nichts angezeigt | ja: NavFn plant bei Bedarf einen Weg um die Hindernisse, MPPI fährt ihn ab | ja: Explorer + NavFn |
 
 **Wie die Spurwände ohne bekannte Breite funktionieren:** Die Breite des Hindernisbereichs kennen wir erst am Wettbewerbstag. Deshalb hängt kein Wert davon ab. MPPI prüft Kollisionen mit dem echten Umriss des Burger (138 × 178 mm, `footprint` in `nav2_params.yaml`). Eine Fahrbewegung ist verboten, sobald der Umriss eine Linie oder ein Hindernis berührt, und erlaubt, wenn er dazwischen passt. Die Inflation um die Linien ist nur ein Kostengefälle, das zur Mitte zieht. Details: `docs/Nav2_Costmap_Werte.md`, Abschnitt 3.
 
@@ -148,7 +148,7 @@ Bekommt von `tunnel_explorer_node` die gemessenen Türkanten und setzt genau daz
 Fährt zuerst durch die Tür und sucht danach den Ausgang, siehe Abschnitt 7. Meldet auf `/tunnel/outside`, wenn der Bot draußen ist. Der Node hat keine Parameter: Alle Grenzen hängen am Bot oder an der Karte (`tunnel_geometry.py`).
 
 ### `nav2_goal_publisher` — der Übergeber
-Schickt das eigentliche Fahrkommando an Nav2. Im Obstacle-Modus setzt er ein Ziel `goal_distance` (1 m) voraus auf der Spurmitte von `lane_costmap_node` (über ihr Ende hinaus in ihrer Richtung verlängert; ohne aktuelle Spurmitte geradeaus), lässt `planner_server` einen Weg dorthin um die Hindernisse rechnen und gibt ihn `controller_server`. Alle `replan_period` (1 s) wird neu geplant. Im Tunnel-Modus nimmt er den Pfad, den `tunnel_explorer_node` geliefert hat. Den Pfad, dem Nav2 gerade folgt, veröffentlicht er auf `/nav2/active_path`; beim Verlassen des Modus leert er ihn. Im Lane-Modus ruht er.
+Schickt das eigentliche Fahrkommando an Nav2. Im Obstacle-Modus setzt er ein Ziel `goal_distance` (1 m) voraus auf der Spurmitte von `lane_costmap_node` (über ihr Ende hinaus in ihrer Richtung verlängert; ohne aktuelle Spurmitte geradeaus), lässt `planner_server` einen Weg dorthin um die Hindernisse rechnen und gibt ihn `controller_server`. Neu geplant wird nur bei Bedarf: wenn eine gesperrte Zelle auf dem Pfad liegt, wenn er bis auf `goal_distance`/2 abgefahren ist oder wenn die Fahrt endet. Kein Takt, sonst springen die Wege. Im Tunnel-Modus nimmt er den Pfad, den `tunnel_explorer_node` geliefert hat. Den Pfad, dem Nav2 gerade folgt, veröffentlicht er auf `/nav2/active_path`; beim Verlassen des Modus leert er ihn. Im Lane-Modus ruht er.
 
 ### `controller_server` (Nav2, MPPI) — die eigentliche Fahrsteuerung
 Nav2-Standardkomponente, nicht selbst geschrieben. Nimmt den Pfad entgegen und berechnet daraus in Echtzeit die tatsächlichen Fahrbefehle (auf `/nav2/cmd_vel`), wobei er mit dem echten Umriss des Bots gegen die `local_costmap` prüft und lokal abweicht, wo der Pfad zu eng ist.
@@ -204,7 +204,6 @@ Keine Parameter. Einfahrt, Zielwahl und Ausfahrt kommen ohne Maße der Enclosure
 |---|---|---|---|
 | `goal_distance` | 1.0 m | Obstacle-Modus: wie weit voraus das Planziel auf der (verlängerten) Spurmitte liegt | Muss hinter dem Hindernis liegen; größer = plant weiter voraus, aber jenseits von ~0,6 m kennt das Spurgedächtnis nur, was die Kamera auf dem Weg dorthin gesehen hat |
 | `center_path_max_age` | 1.0 s | bis zu welchem Alter die Spurmitte die Richtung des Ziels vorgibt; sonst geradeaus | Größer = folgt länger einer alten Spurmitte, wenn die Linien verdeckt sind |
-| `replan_period` | 1.0 s | wie oft der Weg neu geplant wird | Kleiner = reagiert schneller auf neue Hindernisse/Linien, kostet Rechenzeit |
 
 Die übrigen Parameter (`robot_frame`, `odom_frame`, `watchdog_rate`) sind technische Details, an denen normalerweise nichts verändert werden muss.
 
@@ -241,8 +240,8 @@ flowchart LR
     B --> D["nav2_goal_publisher:\nZiel 1 m voraus auf der Spurmitte"]
     D --> P["planner_server (NavFn):\nWeg um die Hindernisse,\nzwischen den gemerkten Linien"]
     P --> E["controller_server (MPPI):\nfaehrt den Weg ab,\nFootprint bleibt zwischen den Linien"]
-    E -->|"jede Sekunde"| D
-    E -->|"1 s nichts in 0,2 m (270 Grad)"| F["switch_control:\nModus -> zurueck zu Lane"]
+    E -->|"Pfad blockiert, fast abgefahren\noder Abbruch"| D
+    E -->|"1 s nichts in 0,4 m (270 Grad)"| F["switch_control:\nModus -> zurueck zu Lane"]
 ```
 
 Beim Umschalten hält der Bot sofort an, bis Nav2 den ersten Befehl schickt. `nav2_goal_publisher` setzt ein Ziel 1 m voraus auf der Spurmitte, also hinter das Hindernis. `planner_server` rechnet auf der `global_costmap` einen Weg dorthin, der um die LiDAR-Hindernisse herum und zwischen den Spurlinien aus dem Spurgedächtnis verläuft. MPPI fährt diesen Weg ab, prüft dabei den echten Umriss gegen die `local_costmap` und weicht lokal ab, wo der Weg zu eng ist (Details zu den „Critics“ siehe Kommentare im `FollowPath`-Block von `nav2_params.yaml`). Jede Sekunde wird mit dem neuesten Stand neu geplant.

@@ -32,7 +32,7 @@ In `switch_control`, Werte aus `Parameter/Switch_Control.yaml` (live in rqt änd
 | `obstacle_clear_distance` / `obstacle_clear_angle_deg` | 0,40 m / 135° | Austritt: nichts näher als das im Bereich ±135° (270°, ohne den Keil hinten) |
 | `obstacle_clear_debounce` | 1,0 s | so lange frei, bevor zurück zu Lane |
 
-Im Obstacle-Modus plant `planner_server` (NavFn) jede Sekunde einen Weg um die Hindernisse zu einem Punkt
+Im Obstacle-Modus plant `planner_server` (NavFn) bei Bedarf einen Weg um die Hindernisse zu einem Punkt
 1 m voraus auf der Spurmitte; MPPI fährt ihn ab.
 
 Beim Wechsel Lane → Obstacle sendet `control_driving` sofort Null; der Bot steht, bis Nav2 den ersten

@@ -3,8 +3,9 @@
 # gespeicherte Karte, kein AMCL, kein SLAM: beide Costmaps fahren im odom-Frame mit,
 # fuer die kurzen Abschnitte reicht reine Odometrie.
 #
-# 1) Obstacle-Modus: nav2_goal_publisher laesst planner_server etwa jede Sekunde einen
-#    Weg zu einem Punkt ~1 m voraus auf der Spurmitte rechnen, um die
+# 1) Obstacle-Modus: nav2_goal_publisher laesst planner_server bei Bedarf (Pfad blockiert,
+#    fast abgefahren, Abbruch) einen Weg zu einem Punkt ~1 m voraus auf der Spurmitte
+#    rechnen, um die
 #    LiDAR-Hindernisse herum und zwischen den Spurlinien (lane_layer, gespeist aus dem
 #    Spurgedaechtnis von lane_costmap_node). MPPI faehrt ihn ab und prueft dabei
 #    Kollisionen mit dem echten Footprint des Burger (local_costmap.footprint). Die
@@ -110,7 +111,7 @@ controller_server:
         cost_power: 1
         cost_weight: 5.0
         threshold_to_consider: 1.4
-      # Aus: das Planziel wird jede Sekunde neu gesetzt, seine Endausrichtung ist
+      # Aus: das Planziel rollt mit, seine Endausrichtung ist
       # irrelevant. goal_checker laesst es mit yaw_goal_tolerance 3.15 ohnehin
       # durchgehen. An wuerde die Kritik den Bot ab 0,5 m vor dem Ziel auf dessen
       # Ausrichtung drehen, auch wenn er gerade an einem Hindernis vorbei muss.
@@ -127,7 +128,7 @@ controller_server:
       # Gewichte weichen von Nav2s Beispiel ab: Ausweichen dominiert, "auf dem Pfad
       # bleiben" ist nur ein Hinweis. Der Pfad kommt von NavFn, das fuer einen Kreis
       # (robot_radius) plant; wo er fuer den echten Footprint zu eng ist oder ein
-      # Hindernis seit der letzten Planung dazukam, soll MPPI abweichen. Mit Nav2s
+      # Hindernis seit der letzten Planung dazukam, soll MPPI abweichen, bis neu geplant ist. Mit Nav2s
       # PathAlign 14.0 schob MPPI ein Hindernis vor sich her, das auf dem Pfad lag.
       CostCritic:
         enabled: true

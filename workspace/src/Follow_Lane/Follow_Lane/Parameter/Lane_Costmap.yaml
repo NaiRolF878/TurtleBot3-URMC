@@ -40,11 +40,9 @@
   ros__parameters:
     # Obstacle-Modus: Planziel goal_distance voraus auf der Spurmitte (solange sie
     # juenger ist als center_path_max_age, Empfangszeit), sonst geradeaus.
-    # planner_server rechnet alle replan_period einen Weg dorthin.
     center_path_topic: /lane/center_path
     center_path_max_age: 1.0
     goal_distance: 1.0
-    replan_period: 1.0
     # Planwege, die weiter als das (m) hinter die Radachse fuehren, werden verworfen.
     max_path_backward: 0.12
     robot_frame: base_footprint

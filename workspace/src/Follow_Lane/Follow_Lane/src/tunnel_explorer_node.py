@@ -24,7 +24,7 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 
 from Follow_Lane.src import tunnel_geometry as geo
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, pose2d_from_transform, run_node)
+    ControlType, control_mode_from_msg, path_blocked, pose2d_from_transform, run_node)
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
@@ -405,11 +405,7 @@ class tunnel_explorer_node(Node):
             return False
         grid, res, origin = self._grid()
         points = np.array([[p.pose.position.x, p.pose.position.y] for p in self._path.poses])
-        ahead = int(np.argmin(np.hypot(points[:, 0] - pose[0], points[:, 1] - pose[1])))
-        cells = np.floor((points[ahead:] - origin) / res).astype(np.int64)
-        h, w = grid.shape
-        valid = (cells[:, 0] >= 0) & (cells[:, 0] < w) & (cells[:, 1] >= 0) & (cells[:, 1] < h)
-        return bool((grid[cells[valid, 1], cells[valid, 0]] >= geo.BLOCKED_COST).any())
+        return path_blocked(points, pose[:2], grid, res, origin)
 
     def _request_path(self, target):
         if not self.plan_client.server_is_ready():
