@@ -9,6 +9,7 @@ Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 import array
 import os
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -49,14 +50,26 @@ ERODE_KERNEL = 5
 # gehalten wird.
 WHITE_ALTERNATIVE = 0.65
 YELLOW_ALTERNATIVE = 0.35
-# Kreuzungserkennung: Mindestlaenge einer Kante (px), Konturen kleiner als
-# MIN_CONTOUR_AREA (px^2) sind Rauschen, Toleranzen in Grad.
+# Kreuzungserkennung: Mindestlaenge einer Kante (px, 1,25 mm/px), Konturen kleiner als
+# MIN_CONTOUR_AREA (px^2) sind Rauschen, POLY_EPSILON (px) = Toleranz der Polygone.
 MIN_EDGE_LEN = 30
 MIN_CONTOUR_AREA = 50
 POLY_EPSILON = 3
-PARALLEL_TOL_DEG = 4.0
-CORNER_TOL_DEG = 10.0
-MIN_BISECTOR_DOT = 0.7
+# Laengskante: hoechstens so weit (Grad) von der Senkrechten, Querkante: so weit von 90 Grad
+# zur Laengskante. Dazwischen liegen Boegen abgerundeter Ecken.
+LONG_TOL_DEG = 20.0
+CROSS_TOL_DEG = 20.0
+# Laenger (m) darf der Bogen zwischen Laengs- und Querkante nicht sein (Radius ~12 cm ->
+# Viertelbogen ~19 cm); laengere Uebergaenge sind normale Kurven.
+MAX_BEND_ARC_M = 0.25
+# Querkante mindestens so lang (m): das Ende einer Linie (Stirnseite, ~5 cm) zaehlt nicht.
+MIN_CROSS_LEN_M = 0.08
+# Schliessen der kombinierten Maske (px, ~1,4 cm), siehe detect_intersection.
+CLOSE_KERNEL = 11
+# Beide Ecken einer Kreuzung liegen etwa gleich weit voraus (m).
+MAX_CORNER_DX_M = 0.06
+# So viele der letzten Bilder muessen die Kreuzung zeigen, bevor sie als erkannt gilt.
+INTERSECTION_CONFIRM = (3, 5)
 
 
 class detect_lane(Node):
@@ -84,6 +97,9 @@ class detect_lane(Node):
             'lab_b_white_l', 'lab_b_white_h',
             'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
             'lab_b_yellow_l', 'lab_b_yellow_h',
+            # Blau fuer die Schranke (aus detect_lane.py, Kalibrierung-Tests 188048a)
+            'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l', 'lab_a_blue_h',
+            'lab_b_blue_l', 'lab_b_blue_h',
         ]
         for name in self._param_names:
             self.declare_parameter(name, Parameter.Type.INTEGER, byte)
@@ -133,6 +149,8 @@ class detect_lane(Node):
         # je Linie, damit die gedrosselten Meldungen sich nicht gegenseitig verschlucken.
         self._anchor = {'Gelb': None, 'Weiss': None}
         self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
+        self._intersection_hits = deque(maxlen=INTERSECTION_CONFIRM[1])
+        self._intersection_seen = False
 
         self.get_logger().info('Started detect_lane Node (Nav2-Zweig).')
 
@@ -222,8 +240,9 @@ class detect_lane(Node):
         lane_center = (center_white_x + center_yellow_x) / 2
         lane_error = 1 - (lane_center / width * 2)
 
-        polies, horizontal, vertical, corners, intersection_corners = \
-            self.detect_intersection(mask_white, mask_yellow)
+        polies, horizontal, vertical = self.detect_intersection(
+            mask_white, mask_yellow, (center_yellow_x, center_yellow_y),
+            (center_white_x, center_white_y))
 
         self.pub_lane_error.publish(Float64(data=lane_error))
         self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y,
@@ -347,11 +366,6 @@ class detect_lane(Node):
             polies.append(cv2.approxPolyDP(contour, epsilon=POLY_EPSILON, closed=True))
         return polies
 
-    def get_angle_of_line(self, p1, p2):
-        d = p2 - p1
-        ang = abs(np.degrees(np.arctan2(d[1], d[0])))
-        return min(ang, 180 - ang)
-
     def line_dir(self, p1, p2):
         d = np.asarray(p2, float) - np.asarray(p1, float)
         return np.degrees(np.arctan2(d[1], d[0])) % 180.0
@@ -360,92 +374,146 @@ class detect_lane(Node):
         d = abs(a - b) % 180.0
         return min(d, 180.0 - d)
 
-    def corner_bisector(self, p_prev, p, p_next):
-        u1 = (p_prev - p) / np.linalg.norm(p_prev - p)
-        u2 = (p_next - p) / np.linalg.norm(p_next - p)
-        b = u1 + u2
-        n = np.linalg.norm(b)
-        return None if n < 1e-6 else b / n
+    def detect_intersection(self, img_white, img_yellow, yellow_point, white_point):
+        """Kreuzung vor dem Bot: Polygone, Quer- und Laengsgeraden fuers Debugbild.
 
-    def _on_border(self, p1, p2, y0):
-        return (p1[0] == 0 and p2[0] == 0) \
-            or (p1[0] == self.img_width - 1 and p2[0] == self.img_width - 1) \
-            or (p1[1] == y0 and p2[1] == y0) \
-            or (p1[1] == self.img_height - 1 and p2[1] == self.img_height - 1)
+        Je Seite wird die eigene Linie an der vom PID verfolgten Stelle gesucht und ihre
+        Kontur von der zur Spur zeigenden Laengskante aus nach vorn abgelaufen. Knickt
+        sie nach aussen ab (Querkante, ~90 Grad), ist der Schnittpunkt der beiden
+        verlaengerten Kanten die Ecke der Kreuzung. Ob die Ecke rechtwinklig oder
+        abgerundet ist, aendert den Schnittpunkt nicht: Boegen werden uebersprungen,
+        es zaehlen nur die geraden Kanten davor und danach.
 
-    def detect_intersection(self, img_white, img_yellow):
-        """Kanten und Kreuzungsecken der Fahrbahnlinien, fuer das Debugbild."""
-        full_img = cv2.bitwise_or(img_white, img_yellow)
-        y0 = int(self.img_height * 0.30)
-        polies = self.lines_to_poly(full_img[y0:, :], y0)
+        Ecke links und rechts etwa gleich weit voraus = Kreuzung, die Verbindung beider
+        Ecken ist die Haltelinie. Nur eine Seite = Abzweig auf dieser Seite. Gemeldet
+        wird erst nach INTERSECTION_CONFIRM Bildern (Log), angezeigt wird jedes Bild.
+        """
+        # Schliessen: am Farbwechsel (weiss -> gelb) liegen nach der Erosion beide Linien
+        # getrennt; die Kontur soll ueber die Ecke hinweg durchlaufen.
+        full = cv2.morphologyEx(cv2.bitwise_or(img_white, img_yellow), cv2.MORPH_CLOSE,
+                                np.ones((CLOSE_KERNEL, CLOSE_KERNEL), np.uint8))
+        polies = self.lines_to_poly(self.shape_filter(full), 0)
 
-        vertical = []
-        horizontal = []
-        corners_per_poly = []      # pro Fahrbahnlinie: [(eckpunkt, halbierende), ...]
+        horizontal, vertical, corners = [], [], {}
+        for side, point, outward in (('links', yellow_point, -1), ('rechts', white_point, 1)):
+            found = self._corner_of_line(polies, point, outward)
+            if found is None:
+                continue
+            corner, long_end, cross_end = found
+            corners[side] = corner
+            vertical.append((long_end, corner))
+            horizontal.append((corner, cross_end))
+
+        stop_line = None
+        if len(corners) == 2:
+            dx = abs(corners['links'][1] - corners['rechts'][1]) * self._res()
+            if dx <= MAX_CORNER_DX_M:
+                stop_line = (corners['links'], corners['rechts'])
+        self._report_intersection(stop_line, corners)
+
+        # Debug: Haltelinie und kleine Rauten an den Ecken als Polygone (rot).
+        marks = []
+        if stop_line is not None:
+            marks.append(np.array(stop_line, np.int32).reshape(-1, 1, 2))
+        for c in corners.values():
+            x, y = int(c[0]), int(c[1])
+            marks.append(np.array([[x, y - 8], [x + 8, y], [x, y + 8], [x - 8, y]],
+                                  np.int32).reshape(-1, 1, 2))
+        return marks, horizontal, vertical
+
+    def _corner_of_line(self, polies, point, outward):
+        """Ecke (x, y), Ende der Laengs- und der Querkante (fuers Debugbild) oder None.
+        outward: -1 links (Querkante muss nach links weggehen), +1 rechts."""
+        px, py = float(point[0]), float(point[1])
+        best = None
         for poly in polies:
             pts = poly.reshape(-1, 2).astype(float)
-            len_pts = len(pts)
-            if len_pts < 4:
-                continue
-
-            # Kanten sammeln (ohne Rand-Kanten und ohne kurze Fransen)
-            edge_dirs = []
-            for i in range(len_pts):
-                p1, p2 = pts[i], pts[(i + 1) % len_pts]
-                if self._on_border(p1, p2, y0):
+            n = len(pts)
+            for i in range(n):
+                p1, p2 = pts[i], pts[(i + 1) % n]
+                if np.linalg.norm(p2 - p1) < MIN_EDGE_LEN:
                     continue
-                if np.linalg.norm(p2 - p1) > MIN_EDGE_LEN:
-                    edge_dirs.append(self.line_dir(p1, p2))
-                    angle = self.get_angle_of_line(p1, p2)
-                    if angle < 10:
-                        horizontal.append((p1, p2))
-                    elif angle >= 80:
-                        vertical.append((p1, p2))
-
-            has_parallel = any(self.angle_diff(edge_dirs[a], edge_dirs[b]) <= PARALLEL_TOL_DEG
-                               for a in range(len(edge_dirs)) for b in range(a + 1, len(edge_dirs)))
-            if not has_parallel:
-                continue
-
-            corners = []
-            for i in range(len_pts):
-                p_prev, p, p_next = pts[i - 1], pts[i], pts[(i + 1) % len_pts]
-                if min(np.linalg.norm(p_prev - p), np.linalg.norm(p_next - p)) < MIN_EDGE_LEN:
+                if self.angle_diff(self.line_dir(p1, p2), 90.0) > LONG_TOL_DEG:
                     continue
-                if self._on_border(p_prev, p, y0) or self._on_border(p, p_next, y0):
+                if not min(p1[1], p2[1]) - 5 <= py <= max(p1[1], p2[1]) + 5:
                     continue
-                if abs(self.angle_diff(self.line_dir(p_prev, p),
-                                       self.line_dir(p, p_next)) - 90) > CORNER_TOL_DEG:
-                    continue
-                b = self.corner_bisector(p_prev, p, p_next)
-                if b is not None:
-                    corners.append((p, b))
-            if corners:
-                corners_per_poly.append((poly, corners))
+                dist = abs(self._x_at(p1, p2, py) - px)
+                if best is None or dist < best[0]:
+                    best = (dist, pts, i)
+        # Die verfolgte Stelle liegt auf der zur Spur zeigenden Kante (wenige Pixel).
+        if best is None or best[0] > 15:
+            return None
+        _, pts, i = best
+        n = len(pts)
+        a, b = pts[i], pts[(i + 1) % n]
+        # Nach vorn (kleineres y) laufen: in Richtung des vorderen Endpunkts.
+        step = 1 if b[1] < a[1] else -1
+        idx = (i + 1) % n if step == 1 else i
+        long_start, long_end = (a, b) if step == 1 else (b, a)
+        long_dir = self.line_dir(long_start, long_end)
 
-        # Kreuzungsecke = Innen- und Aussenkante desselben Streifens knicken parallel ab,
-        # d.h. zwei Ecken im selben Polygon mit gleich gerichteter Halbierender.
-        # Pro Paar bleibt die konvexe Ecke (Halbierende zeigt ins Polygon), das ist die
-        # Ecke an der Fahrbahnseite.
-        intersection_corners = []
-        for poly, corners in corners_per_poly:
-            used = set()
-            for i in range(len(corners)):
-                for j in range(i + 1, len(corners)):
-                    if i in used or j in used:
-                        continue
-                    (c1, b1), (c2, b2) = corners[i], corners[j]
-                    if np.dot(b1, b2) <= MIN_BISECTOR_DOT:
-                        continue
-                    used.update((i, j))
-                    for c, b in ((c1, b1), (c2, b2)):
-                        probe = c + 5.0 * b
-                        if cv2.pointPolygonTest(poly, (float(probe[0]), float(probe[1])), False) > 0:
-                            intersection_corners.append((c, b))
-                            break
+        arc = 0.0
+        for _ in range(n):
+            q1 = pts[idx]
+            q2 = pts[(idx + step) % n]
+            seg = np.linalg.norm(q2 - q1)
+            ang = self.line_dir(q1, q2)
+            if seg >= MIN_EDGE_LEN and self.angle_diff(ang, long_dir) <= LONG_TOL_DEG / 2:
+                # Laengskante geht weiter (Polygon hat sie geteilt).
+                long_end, arc = q2, 0.0
+            elif seg * self._res() >= MIN_CROSS_LEN_M \
+                    and abs(self.angle_diff(ang, long_dir) - 90.0) <= CROSS_TOL_DEG:
+                if np.sign(q2[0] - q1[0]) != outward:
+                    return None             # knickt nach innen: Kurve, keine Kreuzung
+                corner = self._intersect(long_start, long_end, q1, q2)
+                if corner is None or corner[1] > long_start[1]:
+                    return None
+                return corner, long_start, q2
+            else:
+                arc += seg
+                if arc * self._res() > MAX_BEND_ARC_M:
+                    return None
+            idx = (idx + step) % n
+        return None
 
-        corners = [c for _, cs in corners_per_poly for c in cs]
-        return polies, horizontal, vertical, corners, intersection_corners
+    @staticmethod
+    def _x_at(p1, p2, y):
+        if abs(p2[1] - p1[1]) < 1e-6:
+            return (p1[0] + p2[0]) / 2.0
+        return p1[0] + (y - p1[1]) * (p2[0] - p1[0]) / (p2[1] - p1[1])
+
+    @staticmethod
+    def _intersect(a1, a2, b1, b2):
+        """Schnittpunkt der Geraden a1-a2 und b1-b2, None wenn (fast) parallel."""
+        d1, d2 = a2 - a1, b2 - b1
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < 1e-6:
+            return None
+        t = ((b1[0] - a1[0]) * d2[1] - (b1[1] - a1[1]) * d2[0]) / den
+        return a1 + t * d1
+
+    def _res(self):
+        return self._bev['res'] if self._bev is not None else 0.00125
+
+    def _report_intersection(self, stop_line, corners):
+        """Entprellt melden: erst nach INTERSECTION_CONFIRM Bildern, einmal je Kreuzung."""
+        self._intersection_hits.append(stop_line is not None)
+        need = INTERSECTION_CONFIRM[0]
+        if sum(self._intersection_hits) >= need and stop_line is not None:
+            if not self._intersection_seen:
+                # Abstand der Haltelinie ab Radachse: X = x_max - (v + 0.5) * res
+                v = (stop_line[0][1] + stop_line[1][1]) / 2.0
+                x_max = self._bev['x_max'] if self._bev is not None else 0.60
+                dist = x_max - (v + 0.5) * self._res()
+                self.get_logger().info(f'Kreuzung erkannt, Haltelinie {dist * 100:.0f} cm voraus.')
+            self._intersection_seen = True
+        elif not any(self._intersection_hits):
+            if self._intersection_seen:
+                self.get_logger().info('Kreuzung nicht mehr im Bild.')
+            self._intersection_seen = False
+        elif len(corners) == 1 and stop_line is None:
+            side = next(iter(corners))
+            self.get_logger().info(f'Abzweig nur {side} gesehen.', throttle_duration_sec=2.0)
 
     def shape_filter(self, mask):
         """Nur Linienfoermiges behalten: eigenen Bot ausblenden, zu dicke Flaechen und
@@ -499,6 +567,13 @@ class detect_lane(Node):
             (self.lab_l_white_l, self.lab_a_white_l, self.lab_b_white_l),
             (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
         return mask_yellow, mask_white
+
+    def blue_mask(self, img):
+        """Blau-Maske aus dem BGR-Bild (Schranke): CLAHE auf L, dann Schwellen in LAB."""
+        lab = self.apply_clahe(img)
+        return cv2.inRange(lab,
+            (self.lab_l_blue_l, self.lab_a_blue_l, self.lab_b_blue_l),
+            (self.lab_l_blue_h, self.lab_a_blue_h, self.lab_b_blue_h))
 
     def apply_clahe(self, img):
         """BGR -> LAB mit CLAHE auf dem L-Kanal."""
