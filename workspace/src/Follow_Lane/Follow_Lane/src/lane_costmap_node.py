@@ -23,6 +23,7 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Path
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import Image, LaserScan, PointCloud2
@@ -35,9 +36,38 @@ from follow_lane_msg.msg import LaneMask
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
     ControlType, bev_pixels_to_ground, control_mode_from_msg, frange, inverse_transform_points,
-    irange, pose2d_from_transform, read_params, run_node, scan_points, transform_points)
+    irange, pose2d_from_transform, read_params, require_params, run_node, scan_points, transform_points)
 
 EXTRINSICS = os.path.join('camera_info', 'extrinsics_800x600.yaml')
+ROBOT_FRAME = 'base_footprint'
+ODOM_FRAME = 'odom'
+LANE_OBSTACLES_TOPIC = '/detect/lane_obstacles'
+CENTER_PATH_TOPIC = '/lane/center_path'
+PIXEL_STRIDE = 2
+# Zellgroesse (m), gleich der resolution der local_costmap (global 2,5 cm).
+MEMORY_RESOLUTION = 0.01
+# Weiter entfernte Zellen bleiben gemerkt, werden aber nicht gesendet; = obstacle_max_range
+# der lane_layer in nav2_params.yaml.
+MEMORY_RADIUS = 2.0
+# Jeder LiDAR-Punkt verdeckt fuer die Kamera einen Keil dieser halben Breite (m); Zellen bis
+# SHADOW_MARGIN vor dem Punkt zaehlen schon zum Hindernis.
+SHADOW_RADIUS = 0.03
+SHADOW_MARGIN = 0.05
+# Linienverfolgung: Schrittweite (m), groesste Drehung je Schritt (Grad, 35 Grad auf 3 cm folgt
+# Kurven bis r ~5 cm), groesste ueberbrueckte Luecke (m). Knickt eine Linie gegen die andere um
+# mehr als TRACE_PARALLEL_DEG ab, endet sie dort (Querlinie in L-Form).
+TRACE_STEP = 0.03
+TRACE_MAX_TURN_DEG = 35.0
+TRACE_MAX_GAP = 0.09
+TRACE_PARALLEL_DEG = 60.0
+# Tiefe eines Streifens der Spurmitte (m), zugleich Abstand der Posen im Pfad.
+CENTER_BIN_SIZE = 0.05
+# Mindestzahl Mittelpunkte, sonst wird kein Pfad gesendet.
+CENTER_MIN_POINTS = 3
+# Ueber so viele Bilder wird die gemessene Spurbreite (Linienmitte zu Linienmitte) gemittelt
+# (Median); sie gilt, wenn ein Bild nur eine Linie sieht. Kurz genug, dass der Wechsel von der
+# 20-cm-Spur in den breiteren Hindernisbereich nach wenigen Bildern nachgezogen ist.
+CENTER_WIDTH_HISTORY = 20
 CENTER_PATH_MODES = (ControlType.Obstacle,)
 # LiDAR-Scan aelter als das (s) taugt nicht mehr fuer den Sichtschatten.
 SCAN_MAX_AGE_S = 0.5
@@ -291,7 +321,7 @@ def near_polyline(pts, line, margin):
 
 
 class lane_costmap_node(Node):
-    """Spurgedaechtnis: ein Raster im odom-Frame (memory_resolution), das sich die
+    """Spurgedaechtnis: ein Raster im odom-Frame (MEMORY_RESOLUTION), das sich die
     Spurlinien merkt. Eine Zelle wechselt zwischen "Linie" und "frei" erst, wenn
     line_confirm_frames bzw. free_confirm_frames Kamerabilder hintereinander das
     Gegenteil zeigen. So bleiben Linien neben und hinter dem Bot erhalten, die die
@@ -307,7 +337,7 @@ class lane_costmap_node(Node):
     ingress_node). Zellen im Sichtschatten eines LiDAR-Hindernisses bekommen keine
     "frei"-Stimme: dort verdeckt das Hindernis die Linie, sie ist nicht weg.
 
-    Gesendet wird jedes Mal das ganze Gedaechtnis im Umkreis memory_radius, im
+    Gesendet wird jedes Mal das ganze Gedaechtnis im Umkreis MEMORY_RADIUS, im
     robot_frame zum Bildzeitpunkt. Die lane_layer raeumen per Strahl vom Bot aus
     frei und tragen alle Punkte wieder ein; gemerkte Linien bleiben so stehen,
     vergessene verschwinden.
@@ -335,49 +365,16 @@ class lane_costmap_node(Node):
         super().__init__('lane_costmap_node')
 
         # --- Parameter ---
-        self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('output_topic', '/detect/lane_obstacles')
-        self.declare_parameter('pixel_stride', 2, irange(1, 20))
-        # Zellgroesse (m), gleich der resolution der Costmaps.
-        self.declare_parameter('memory_resolution', 0.025, frange(0.005, 0.2))
-        # Weiter entfernte Zellen bleiben gemerkt, werden aber nicht gesendet; nicht ueber
-        # die Reichweite der lane_layer (obstacle_max_range in nav2_params.yaml) hinaus.
-        self.declare_parameter('memory_radius', 2.0, frange(0.5, 10.0))
-        self.declare_parameter('line_confirm_frames', 3, irange(1, 100))
-        # Groesser als line_confirm_frames: ein Hindernis oder der eigene Schatten kann
-        # eine Linie kurz verdecken, ohne dass die LiDAR-Schattenpruefung greift.
-        self.declare_parameter('free_confirm_frames', 10, irange(1, 500))
-        # Jeder LiDAR-Punkt verdeckt fuer die Kamera einen Keil dieser halben Breite
-        # (m); Zellen bis shadow_margin vor dem Punkt zaehlen schon zum Hindernis.
-        self.declare_parameter('shadow_radius', 0.03, frange(0.0, 0.5))
-        self.declare_parameter('shadow_margin', 0.05, frange(0.0, 0.5))
-        # Linienverfolgung (m, Grad): Pixel bis line_margin um die Linienmitte werden
-        # Wand. Schrittweite, groesste Drehung je Schritt (enge Kurven), groesste
-        # ueberbrueckte Luecke. Knickt eine Linie gegen die andere um mehr als
-        # trace_parallel_deg ab, endet sie dort (Querlinie in L-Form).
-        # 0: nur Pixel direkt auf der verfolgten Mittellinie (ein Rasterpunkt NEAR_RES breit).
-        self.declare_parameter('line_margin', 0.0, frange(0.0, 0.2))
-        self.declare_parameter('trace_step', 0.03, frange(0.005, 0.2))
-        self.declare_parameter('trace_max_turn_deg', 35.0, frange(1.0, 90.0))
-        self.declare_parameter('trace_max_gap', 0.09, frange(0.0, 0.5))
-        self.declare_parameter('trace_parallel_deg', 60.0, frange(10.0, 90.0))
-        self.declare_parameter('center_path_topic', '/lane/center_path')
-        # Tiefe eines Streifens (m), zugleich Abstand der Posen im Pfad.
-        self.declare_parameter('center_bin_size', 0.05, frange(0.01, 0.5))
-        # Mindestzahl Mittelpunkte, sonst wird kein Pfad gesendet.
-        self.declare_parameter('center_min_points', 3, irange(2, 50))
-        # Ueber so viele Bilder wird die gemessene Spurbreite (Linienmitte zu
-        # Linienmitte) gemittelt (Median); sie gilt, wenn ein Bild nur eine Linie
-        # sieht. Kurz genug, dass der Wechsel von der 20-cm-Spur in den breiteren
-        # Hindernisbereich nach wenigen Bildern nachgezogen ist.
-        self.declare_parameter('center_width_history', 20, irange(1, 500))
-        self._param_names = [
-            'robot_frame', 'odom_frame', 'pixel_stride', 'memory_resolution', 'memory_radius',
-            'line_confirm_frames', 'free_confirm_frames', 'shadow_radius', 'shadow_margin',
-            'line_margin', 'trace_step', 'trace_max_turn_deg', 'trace_max_gap',
-            'trace_parallel_deg', 'center_bin_size', 'center_min_points',
-        ]
+        # Vor Ort einstellen, Werte nur in Lane_Costmap.yaml. Bilder in Folge, bis eine Zelle zur
+        # Linie bzw. wieder frei wird. free groesser als line: ein Hindernis oder der eigene
+        # Schatten kann eine Linie kurz verdecken, ohne dass die LiDAR-Schattenpruefung greift.
+        self.declare_parameter('line_confirm_frames', Parameter.Type.INTEGER, irange(1, 100))
+        self.declare_parameter('free_confirm_frames', Parameter.Type.INTEGER, irange(1, 500))
+        # Pixel bis so weit (m) um die Linienmitte werden Wand; 0: nur Pixel direkt auf der
+        # verfolgten Mittellinie (ein Rasterpunkt NEAR_RES breit).
+        self.declare_parameter('line_margin', Parameter.Type.DOUBLE, frange(0.0, 0.2))
+        self._param_names = ['line_confirm_frames', 'free_confirm_frames', 'line_margin']
+        require_params(self, self._param_names)
         read_params(self, self._param_names)
 
         # --- Subscriber ---
@@ -395,9 +392,9 @@ class lane_costmap_node(Node):
 
         # --- Publisher ---
         self.pub_lane_obstacles = self.create_publisher(
-            PointCloud2, self.get_parameter('output_topic').value, 1)
+            PointCloud2, LANE_OBSTACLES_TOPIC, 1)
         self.pub_center_path = self.create_publisher(
-            Path, self.get_parameter('center_path_topic').value, 1)
+            Path, CENTER_PATH_TOPIC, 1)
         self.clear_clients = {
             'local_costmap': (self.create_client(
                 ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap'),
@@ -416,7 +413,7 @@ class lane_costmap_node(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.control_mode = None
         self.memory = {}               # (ix, iy) im odom-Raster -> [ist_linie, gegenstimmen]
-        self._widths = deque(maxlen=self.get_parameter('center_width_history').value)
+        self._widths = deque(maxlen=CENTER_WIDTH_HISTORY)
         self._size_error_logged = False
         self._last_cloud_stamp = None
         self._seed_hints = {}           # Farbe -> (Y des Startpunkts, time.monotonic())
@@ -454,7 +451,7 @@ class lane_costmap_node(Node):
             return
         view = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(msg.height, msg.step)
         # Stuetzpunkte im halben Zellabstand, damit jede sichtbare Zelle getroffen wird.
-        step = max(1, int(self.memory_resolution / 2.0 / self._bev['res']))
+        step = max(1, int(MEMORY_RESOLUTION / 2.0 / self._bev['res']))
         vs, us = np.nonzero(view[::step, :msg.width:step] > 0)
         self._view_points = np.column_stack(
             bev_pixels_to_ground(self._bev, us * step, vs * step))
@@ -484,7 +481,7 @@ class lane_costmap_node(Node):
             return
 
         read_params(self, self._param_names)
-        stride = max(1, int(self.pixel_stride))
+        stride = max(1, int(PIXEL_STRIDE))
         yellow = self._pixels_to_ground(lane_mask.yellow_x, lane_mask.yellow_y, stride)
         white = self._pixels_to_ground(lane_mask.white_x, lane_mask.white_y, stride)
 
@@ -493,10 +490,10 @@ class lane_costmap_node(Node):
         stamp = lane_mask.header.stamp
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.odom_frame, self.robot_frame, Time.from_msg(stamp))
+                ODOM_FRAME, ROBOT_FRAME, Time.from_msg(stamp))
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.get_logger().warn(
-                f'Keine TF {self.odom_frame} <- {self.robot_frame} zum Bildzeitpunkt: {e}',
+                f'Keine TF {ODOM_FRAME} <- {ROBOT_FRAME} zum Bildzeitpunkt: {e}',
                 throttle_duration_sec=2.0)
             return
         robot_pose = pose2d_from_transform(tf)
@@ -556,7 +553,7 @@ class lane_costmap_node(Node):
             return
         header = Header()
         header.stamp = self._last_cloud_stamp
-        header.frame_id = self.robot_frame
+        header.frame_id = ROBOT_FRAME
         self.pub_lane_obstacles.publish(point_cloud2.create_cloud_xyz32(header, []))
 
     def _pixels_to_ground(self, xs, ys, stride):
@@ -574,13 +571,13 @@ class lane_costmap_node(Node):
     def _cells(self, points_odom):
         if len(points_odom) == 0:
             return set()
-        idx = np.unique(np.floor(points_odom / self.memory_resolution).astype(np.int64), axis=0)
+        idx = np.unique(np.floor(points_odom / MEMORY_RESOLUTION).astype(np.int64), axis=0)
         return set(map(tuple, idx.tolist()))
 
     def _lane_line_points(self, yellow, white):
         """Nur die Pixel (robot_frame, (N, 2)) der gelben und der weissen Spurlinie."""
         now = time.monotonic()
-        max_turn = math.radians(self.trace_max_turn_deg)
+        max_turn = math.radians(TRACE_MAX_TURN_DEG)
         lines, seeds = {}, {}
         for name, side in (('Gelb', 1), ('Weiss', -1)):
             pts = yellow if side > 0 else white
@@ -596,10 +593,10 @@ class lane_costmap_node(Node):
                 continue
             seeds[name] = seed
             self._seed_hints[name] = (float(seed[1]), now)
-            line, seed_index = trace_line(thin, seed, self.trace_step, max_turn, self.trace_max_gap)
+            line, seed_index = trace_line(thin, seed, TRACE_STEP, max_turn, TRACE_MAX_GAP)
             lines[name] = (pts, line, seed_index)
 
-        max_angle = math.radians(self.trace_parallel_deg)
+        max_angle = math.radians(TRACE_PARALLEL_DEG)
         kept = []
         for name, other in (('Gelb', 'Weiss'), ('Weiss', 'Gelb')):
             pts, line, seed_index = lines[name]
@@ -654,7 +651,7 @@ class lane_costmap_node(Node):
         if self._scanner_pose is None:
             try:
                 tf = self.tf_buffer.lookup_transform(
-                    self.robot_frame, self._scan.header.frame_id, rclpy.time.Time())
+                    ROBOT_FRAME, self._scan.header.frame_id, rclpy.time.Time())
             except (LookupException, ConnectivityException, ExtrapolationException):
                 return np.full(len(points), unknown, dtype=bool)
             self._scanner_pose = pose2d_from_transform(tf)
@@ -668,12 +665,12 @@ class lane_costmap_node(Node):
         # es ueberdecken. Statt jeden Punkt gegen jeden Treffer zu pruefen (bei 1-cm-Raster
         # ~17000 x 180, 40 ms je Bild) nur ein Nachschlagen je Punkt.
         ang_h, dist_h = np.arctan2(hits[:, 1], hits[:, 0]), np.hypot(hits[:, 0], hits[:, 1])
-        half = np.arctan2(self.shadow_radius, dist_h)
+        half = np.arctan2(SHADOW_RADIUS, dist_h)
         n_bins = int(math.ceil(2.0 * math.pi / SHADOW_BIN))
         start = np.floor((ang_h - half + math.pi) / SHADOW_BIN).astype(int)
         stop = np.floor((ang_h + half + math.pi) / SHADOW_BIN).astype(int)
         edge = np.full(n_bins, np.inf)
-        for b0, b1, d in zip(start, stop, dist_h - self.shadow_margin):
+        for b0, b1, d in zip(start, stop, dist_h - SHADOW_MARGIN):
             idx = np.arange(b0, b1 + 1) % n_bins
             edge[idx] = np.minimum(edge[idx], d)
 
@@ -685,15 +682,15 @@ class lane_costmap_node(Node):
     def _publish_memory(self, robot_pose, stamp):
         lines = [c for c, state in self.memory.items() if state[0]]
         if lines:
-            centers = (np.asarray(lines, dtype=np.float64) + 0.5) * self.memory_resolution
+            centers = (np.asarray(lines, dtype=np.float64) + 0.5) * MEMORY_RESOLUTION
             local = inverse_transform_points(robot_pose, centers)
-            local = local[np.hypot(local[:, 0], local[:, 1]) <= self.memory_radius]
+            local = local[np.hypot(local[:, 0], local[:, 1]) <= MEMORY_RADIUS]
             points = [(float(x), float(y), 0.0) for x, y in local]
         else:
             points = []
         header = Header()
         header.stamp = stamp
-        header.frame_id = self.robot_frame
+        header.frame_id = ROBOT_FRAME
         self.pub_lane_obstacles.publish(point_cloud2.create_cloud_xyz32(header, points))
         self._last_cloud_stamp = stamp
 
@@ -701,16 +698,16 @@ class lane_costmap_node(Node):
         half_width = float(np.median(self._widths)) / 2.0 if self._widths else None
         xs, ys, widths = lane_center_points(
             yellow, white, self._bev['x_min'], self._bev['x_max'],
-            self.center_bin_size, half_width)
+            CENTER_BIN_SIZE, half_width)
         # Die Breite auch in den anderen Modi messen: beim Umschalten ist
         # sonst noch keine bekannt, falls dann nur eine Linie zu sehen ist.
         if widths:
             self._widths.append(float(np.median(widths)))
         # Nur in diesen Modi plant jemand damit; sonst keine Planungsdaten senden.
-        if self.control_mode not in CENTER_PATH_MODES or len(xs) < self.center_min_points:
+        if self.control_mode not in CENTER_PATH_MODES or len(xs) < CENTER_MIN_POINTS:
             return
 
-        line = fit_center_line(xs, ys, self.center_bin_size)
+        line = fit_center_line(xs, ys, CENTER_BIN_SIZE)
         if line is None:
             return
         px, py, pyaw = line
@@ -719,7 +716,7 @@ class lane_costmap_node(Node):
 
         path = Path()
         path.header.stamp = stamp
-        path.header.frame_id = self.odom_frame
+        path.header.frame_id = ODOM_FRAME
         for (x, y), yaw in zip(poses_odom, pyaw + robot_yaw):
             pose = PoseStamped()
             pose.header = path.header

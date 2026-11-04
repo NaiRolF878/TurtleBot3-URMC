@@ -1,7 +1,3 @@
-bottom_left_x: -200
-bottom_left_y: 599
-bottom_right_x: 1000
-bottom_right_y: 599
 clahe_clip_limit: 2.0
 clahe_tile_grid_size: 8
 detection_row_factor: 0.80
@@ -18,9 +14,3 @@ lab_l_white_l: 201
 lab_l_yellow_h: 255
 lab_l_yellow_l: 146
 min_lane_width: 80
-top_left_x: 200
-top_left_y: 252
-top_right_x: 600
-top_right_y: 252
-use_metric_warp: false
-use_sim_time: false

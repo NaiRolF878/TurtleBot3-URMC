@@ -29,8 +29,8 @@ In `switch_control`, Werte aus `Parameter/Switch_Control.yaml` (live in rqt änd
 |---|---|---|
 | `obstacle_trigger_distance` | **0,30 m** (Code-Default 0,4) | LiDAR-Punkt im Prüfkegel näher als das → Obstacle, wenn keine Spurlinie dazwischen liegt |
 | `obstacle_check_angle_deg` | 45° | halber Öffnungswinkel nach vorn (±45°) |
-| `obstacle_clear_distance` / `obstacle_clear_angle_deg` | 0,40 m / 135° | Austritt: nichts näher als das im Bereich ±135° (270°, ohne den Keil hinten) |
-| `obstacle_clear_debounce` | 1,0 s | so lange frei, bevor zurück zu Lane |
+| `obstacle_clear_distance` / `OBSTACLE_CLEAR_ANGLE_DEG` | 0,40 m / 135° | Austritt: nichts näher als das im Bereich ±135° (270°, ohne den Keil hinten) |
+| `OBSTACLE_CLEAR_DEBOUNCE_S` | 1,0 s | so lange frei, bevor zurück zu Lane |
 
 Im Obstacle-Modus plant `planner_server` (NavFn) bei Bedarf einen Weg um die Hindernisse zu einem Punkt
 1 m voraus auf der Spurmitte; MPPI fährt ihn ab.

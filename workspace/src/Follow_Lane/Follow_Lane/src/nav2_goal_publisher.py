@@ -19,14 +19,23 @@ from nav2_msgs.action import ComputePathToPose, FollowPath
 from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, path_blocked, pose2d_from_transform, run_node,
-    yaw_from_quaternion)
+    ControlType, control_mode_from_msg, frange, path_blocked, pose2d_from_transform,
+    require_params, run_node, yaw_from_quaternion)
+
+ROBOT_FRAME = 'base_footprint'
+ODOM_FRAME = 'odom'
+CENTER_PATH_TOPIC = '/lane/center_path'
+# Gemessen an der Empfangszeit, nicht am Bildstempel: die Uhren von Bot und Rechner muessen
+# dafuer nicht synchron laufen.
+CENTER_PATH_MAX_AGE_S = 1.0
+WATCHDOG_PERIOD_S = 0.5
 
 # Modi, in denen nav2_goal_publisher selbst ein Ziel setzt und planen laesst.
 PLAN_MODES = (ControlType.Obstacle,)
@@ -52,7 +61,7 @@ GOAL_STATUS_TEXT = {
 class nav2_goal_publisher(Node):
     """Obstacle: Ziel ist ein Punkt goal_distance voraus auf der Spurmitte von
     lane_costmap_node (ueber ihr Ende hinaus in ihrer Richtung verlaengert). Ist sie
-    aelter als center_path_max_age, liegt das Ziel geradeaus. planner_server (NavFn)
+    aelter als CENTER_PATH_MAX_AGE_S, liegt das Ziel geradeaus. planner_server (NavFn)
     rechnet auf der global_costmap (LiDAR + Spurgedaechtnis) einen Weg darum herum,
     controller_server (MPPI) faehrt ihn ab. Keine Neuplanung im Takt, sonst springen die
     Wege: neu geplant wird nur, wenn eine gesperrte Zelle auf dem Pfad liegt (neu gesehenes
@@ -78,21 +87,16 @@ class nav2_goal_publisher(Node):
         super().__init__('nav2_goal_publisher')
 
         # --- Parameter ---
-        # Abstand des Planziels vom Bot (m). Muss hinter dem Hindernis liegen, sonst
-        # endet der Weg davor; MPPI schaut ~1 m voraus (nav2_params.yaml).
-        self.declare_parameter('goal_distance', 1.0, frange(0.2, 5.0))
-        self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('center_path_topic', '/lane/center_path')
-        # Gemessen an der Empfangszeit, nicht am Bildstempel: die Uhren von Bot
-        # und Rechner muessen dafuer nicht synchron laufen.
-        self.declare_parameter('center_path_max_age', 1.0, frange(0.1, 10.0))
-        # Ein Planweg mit einem Punkt mehr als so weit (m) hinter der Radachse wird
-        # verworfen: NavFn kennt keine Fahrtrichtung und fuehrt sonst hinter dem Bot
-        # aussen um die Spurlinien herum, wo die Kamera nie hingesehen hat. Etwas mehr
-        # als das Heck (0.101), damit Pfade aus der eigenen Zelle heraus durchgehen.
-        self.declare_parameter('max_path_backward', 0.12, frange(0.0, 2.0))
-        self.declare_parameter('watchdog_rate', 2.0, frange(0.2, 10.0))
+        # Vor Ort einstellen, Werte nur in Lane_Costmap.yaml. Abstand des Planziels vom Bot (m):
+        # muss hinter dem Hindernis liegen, sonst endet der Weg davor; MPPI schaut ~1 m voraus
+        # (nav2_params.yaml).
+        self.declare_parameter('goal_distance', Parameter.Type.DOUBLE, frange(0.2, 5.0))
+        # Ein Planweg mit einem Punkt mehr als so weit (m) hinter der Radachse wird verworfen:
+        # NavFn kennt keine Fahrtrichtung und fuehrt sonst hinter dem Bot aussen um die
+        # Spurlinien herum, wo die Kamera nie hingesehen hat. Etwas mehr als das Heck (0.101),
+        # damit Pfade aus der eigenen Zelle heraus durchgehen.
+        self.declare_parameter('max_path_backward', Parameter.Type.DOUBLE, frange(0.0, 2.0))
+        require_params(self, ['goal_distance', 'max_path_backward'])
 
         # --- Subscriber ---
         self.sub_control_mode = self.create_subscription(
@@ -100,7 +104,7 @@ class nav2_goal_publisher(Node):
         self.sub_explore_path = self.create_subscription(
             Path, '/tunnel/explore_path', self.cb_explore_path, 1)
         self.sub_center_path = self.create_subscription(
-            Path, self.get_parameter('center_path_topic').value, self.cb_center_path, 1)
+            Path, CENTER_PATH_TOPIC, self.cb_center_path, 1)
         self.sub_costmap = self.create_subscription(
             OccupancyGrid, '/global_costmap/costmap', self.cb_costmap, 1)
 
@@ -114,7 +118,7 @@ class nav2_goal_publisher(Node):
 
         # --- Timer ---
         self.timer = self.create_timer(
-            1.0 / self.get_parameter('watchdog_rate').value, self.cb_watchdog)
+            WATCHDOG_PERIOD_S, self.cb_watchdog)
 
         # --- Zustand ---
         self.tf_buffer = Buffer()
@@ -298,7 +302,7 @@ class nav2_goal_publisher(Node):
             return False
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.get_parameter('odom_frame').value, self.get_parameter('robot_frame').value,
+                ODOM_FRAME, ROBOT_FRAME,
                 rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException):
             return False
@@ -335,10 +339,10 @@ class nav2_goal_publisher(Node):
 
     def _obstacle_goal(self):
         """Planziel im odom-Frame, oder None ohne Roboterpose."""
-        odom_frame = self.get_parameter('odom_frame').value
+        odom_frame = ODOM_FRAME
         try:
             tf = self.tf_buffer.lookup_transform(
-                odom_frame, self.get_parameter('robot_frame').value, rclpy.time.Time())
+                odom_frame, ROBOT_FRAME, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self._set_status('keine Roboterpose (TF)')
             self.get_logger().warn(f'Keine Roboterpose fuer das Planziel: {e}',
@@ -381,7 +385,7 @@ class nav2_goal_publisher(Node):
         ohne Roboterpose. Der Pfad liegt im odom-Frame (global_frame des Planers)."""
         try:
             tf = self.tf_buffer.lookup_transform(
-                path.header.frame_id, self.get_parameter('robot_frame').value,
+                path.header.frame_id, ROBOT_FRAME,
                 rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.get_logger().warn(f'Keine Roboterpose fuer die Pfadpruefung: {e}',
@@ -397,7 +401,7 @@ class nav2_goal_publisher(Node):
         if self._center_path_received is None or len(self._latest_center_path.poses) < 2:
             return None
         age = (self.get_clock().now() - self._center_path_received).nanoseconds / 1e9
-        if age > self.get_parameter('center_path_max_age').value:
+        if age > CENTER_PATH_MAX_AGE_S:
             return None
         return self._latest_center_path
 
@@ -422,7 +426,7 @@ class nav2_goal_publisher(Node):
         self._goal_active = False
         self._active_points = None
         empty = Path()
-        empty.header.frame_id = self.get_parameter('odom_frame').value
+        empty.header.frame_id = ODOM_FRAME
         empty.header.stamp = self.get_clock().now().to_msg()
         self.pub_active_path.publish(empty)
 

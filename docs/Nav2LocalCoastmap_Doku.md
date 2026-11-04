@@ -116,7 +116,7 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem M
 ## 4. Die Nodes im Einzelnen
 
 ### `switch_control` — die Zustandsmaschine
-Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `lane_max_age`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer).
+Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `LANE_MAX_AGE_S`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`Hand`, `Schild` oder leer).
 
 ### `control_driving` — die einzige Quelle für Fahrbefehle
 Wählt je nach `/control/mode` den PID (Lane, TunnelEntry) oder reicht `/nav2/cmd_vel` durch (Obstacle, Tunnel); in jedem anderen Modus Null. Würde das äußere Rad schneller als 0,22 m/s (`MAX_WHEEL_VEL`), skaliert es v und ω gemeinsam herunter, die Bahn bleibt gleich. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
@@ -137,7 +137,7 @@ Zeichnet auf `/nav2/view` ein Bild davon, was Nav2 sieht und plant: im Tunnel di
 
 Oben steht die Statuszeile: Modus und Auslöser, was `nav2_goal_publisher` gerade tut (`/nav2/status`, z. B. „faehrt: Bahnplaner (Spurmitte)“ oder „kein Weg gefunden“), und darunter die letzte Warnung bzw. der letzte Fehler der Nav2-Knoten aus `/rosout`, zum Beispiel „controller_server: Failed to make progress“. Das ist der Abbruchgrund: Das FollowPath-Ergebnis meldet in Humble nur „abgebrochen“, den Grund schreibt `controller_server` nur ins Log. Rot heißt jünger als 10 s.
 
-Gezeigt wird ein Ausschnitt: außerhalb des Tunnels ein Quadrat von `local_view_size_m` (2,4 m) um den Bot. Das deckt die MPPI-Vorausschau (~1 m) mit Rand ab. Im Tunnel werden keine Spurlinien gezeichnet. Es ist zentriert, damit das Bild beim Lenken nicht springt. Im Tunnel ist es nur die schon gesehene Fläche plus `tunnel_view_margin_m` (0,3 m), sodass das Bild mit der Karte herauszoomt.
+Gezeigt wird ein Ausschnitt: außerhalb des Tunnels ein Quadrat von `LOCAL_VIEW_SIZE_M` (2,4 m) um den Bot. Das deckt die MPPI-Vorausschau (~1 m) mit Rand ab. Im Tunnel werden keine Spurlinien gezeichnet. Es ist zentriert, damit das Bild beim Lenken nicht springt. Im Tunnel ist es nur die schon gesehene Fläche plus `TUNNEL_VIEW_MARGIN_M` (0,3 m), sodass das Bild mit der Karte herauszoomt.
 
 `nav2_obstacle` öffnet dafür ein zweites `rqt_image_view`-Fenster.
 
@@ -160,18 +160,20 @@ Nav2-Standardkomponente. Berechnet auf der `global_costmap` (LiDAR + Spurgedäch
 
 ## 5. Parameter-Referenz — was anpassen, was bedeutet es
 
+In den YAMLs steht nur, was man vor Ort einstellt. Diese Parameter haben keinen Code-Default: Fehlt ein Wert, stoppt der Node mit klarer Meldung. Namen in GROSSBUCHSTABEN sind feste Konstanten im Code des Nodes.
+
 ### 5.1 `switch_control.py` → Datei `Switch_Control.yaml`
 
 | Parameter | Wert (YAML) | Bedeutung | Auswirkung |
 |---|---|---|---|
 | `obstacle_check_angle_deg` | 45.0° | **Halb**winkel des Prüfkegels nach vorne (Gesamtkegel 90°), in dem nach Hindernissen gesucht wird | Größer = reagiert auch auf seitlichere Objekte |
 | `obstacle_trigger_distance` | 0.30 m | Ab welcher Nähe (ab LiDAR) gilt "da ist ein Hindernis" | Größer = reagiert früher, Nav2 hat mehr Platz |
-| `obstacle_clear_angle_deg` | 135° | **Halb**winkel des Austrittsbereichs (270°, ohne den Keil direkt hinten) | Kleiner = Hindernisse schräg hinten halten den Obstacle-Modus nicht mehr |
+| `OBSTACLE_CLEAR_ANGLE_DEG` | 135° | **Halb**winkel des Austrittsbereichs (270°, ohne den Keil direkt hinten) | Kleiner = Hindernisse schräg hinten halten den Obstacle-Modus nicht mehr |
 | `obstacle_clear_distance` | 0.40 m | In diesem Umkreis darf nichts mehr liegen, damit es zurück zu Lane geht | Größer = bleibt länger im Obstacle-Modus |
-| `obstacle_clear_debounce` | 1.0 s | Wie lange der Austrittsbereich durchgehend frei sein muss | Größer = stabiler, aber langsamer zurück in den Lane-Modus; kleiner = kann bei flackernden Messwerten hin- und herspringen |
-| `line_block_tolerance` | 0.02 m | So nah muss ein Linienpunkt an der Strecke Bot → Hindernis liegen, damit er sie trennt | Größer = filtert großzügiger |
-| `line_obstacle_margin` | 0.05 m | Linienpunkte so dicht vor dem Hindernis zählen nicht (Hindernis steht auf der Linie, ragt also in die Fahrbahn) | Größer = Hindernisse nahe der Linie lösen eher aus |
-| `lane_max_age` | 0.5 s | Ist das Spurgedächtnis älter, wird nicht gefiltert | — |
+| `OBSTACLE_CLEAR_DEBOUNCE_S` | 1.0 s | Wie lange der Austrittsbereich durchgehend frei sein muss | Größer = stabiler, aber langsamer zurück in den Lane-Modus; kleiner = kann bei flackernden Messwerten hin- und herspringen |
+| `LINE_BLOCK_TOLERANCE` | 0.02 m | So nah muss ein Linienpunkt an der Strecke Bot → Hindernis liegen, damit er sie trennt | Größer = filtert großzügiger |
+| `LINE_OBSTACLE_MARGIN` | 0.05 m | Linienpunkte so dicht vor dem Hindernis zählen nicht (Hindernis steht auf der Linie, ragt also in die Fahrbahn) | Größer = Hindernisse nahe der Linie lösen eher aus |
+| `LANE_MAX_AGE_S` | 0.5 s | Ist das Spurgedächtnis älter, wird nicht gefiltert | — |
 
 Die Tunnelausfahrt läuft bewusst nur über den LiDAR — die Kamera ist in der Enclosure verboten.
 
@@ -181,16 +183,16 @@ Die Tunnelausfahrt läuft bewusst nur über den LiDAR — die Kamera ist in der 
 
 | Parameter | Wert | Bedeutung | Auswirkung |
 |---|---|---|---|
-| `pixel_stride` | 2 | Wie stark die Maskenpunkte ausgedünnt werden, bevor sie ins Gedächtnis gehen | Größer = weniger Punkte, spart Rechenzeit, aber gröbere Wand |
+| `PIXEL_STRIDE` | 2 | Wie stark die Maskenpunkte ausgedünnt werden, bevor sie ins Gedächtnis gehen | Größer = weniger Punkte, spart Rechenzeit, aber gröbere Wand |
 | `line_confirm_frames` | 3 | So viele Bilder in Folge mit Linie, bis eine Zelle als Linie gilt | Größer = robuster gegen Fehldetektionen, Linien erscheinen später |
 | `free_confirm_frames` | 10 | So viele Bilder in Folge ohne Linie (sichtbar, nicht verdeckt), bis eine Linie vergessen wird | Größer = Linien halten länger, falsche bleiben aber auch länger |
-| `memory_radius` | 2.0 m | Weiter entfernte Zellen werden vergessen | Nicht größer als die Reichweite der `lane_layer` (2,0 m) |
-| `memory_resolution` | 0.025 m | Zellgröße des Gedächtnisses | = `resolution` der Costmaps |
-| `shadow_radius` / `shadow_margin` | 0.03 / 0.05 m | Sichtschatten eines LiDAR-Punkts für die Kamera; Linienpixel darin fallen weg | Größer = verdeckte Linien werden sicherer behalten |
+| `MEMORY_RADIUS` | 2.0 m | Weiter entfernte Zellen werden vergessen | Nicht größer als die Reichweite der `lane_layer` (2,0 m) |
+| `MEMORY_RESOLUTION` | 0.01 m | Zellgröße des Gedächtnisses | = `resolution` der Costmaps |
+| `SHADOW_RADIUS` / `SHADOW_MARGIN` | 0.03 / 0.05 m | Sichtschatten eines LiDAR-Punkts für die Kamera; Linienpixel darin fallen weg | Größer = verdeckte Linien werden sicherer behalten |
 | `line_margin` | 0.04 m | Pixel bis so weit um die verfolgte Linienmitte werden Wand | Halbe Klebebandbreite plus Reserve; zu klein = Wand lückenhaft, zu groß = Reste von Querlinien |
-| `trace_step` / `trace_max_turn_deg` | 0.03 m / 35° | Schrittweite und größte Drehung je Schritt beim Verfolgen | 35° auf 3 cm folgt Kurven bis r ≈ 5 cm |
-| `trace_max_gap` | 0.09 m | Längere Lücken in einer Linie beenden sie | Größer = überbrückt mehr, kann aber auf Fremdes springen |
-| `trace_parallel_deg` | 60° | Knickt eine Linie gegen die andere stärker ab, endet sie (Querlinie in L-Form) | Kleiner = schneidet früher, auch in Spurverbreiterungen |
+| `TRACE_STEP` / `TRACE_MAX_TURN_DEG` | 0.03 m / 35° | Schrittweite und größte Drehung je Schritt beim Verfolgen | 35° auf 3 cm folgt Kurven bis r ≈ 5 cm |
+| `TRACE_MAX_GAP` | 0.09 m | Längere Lücken in einer Linie beenden sie | Größer = überbrückt mehr, kann aber auf Fremdes springen |
+| `TRACE_PARALLEL_DEG` | 60° | Knickt eine Linie gegen die andere stärker ab, endet sie (Querlinie in L-Form) | Kleiner = schneidet früher, auch in Spurverbreiterungen |
 
 Sendet in jedem Modus außer Tunnel. Pixel → Meter und Reichweite (bis 0,60 m) kommen aus `Parameter/bev.yaml`, nicht aus dieser Datei. Details: `docs/Nav2_Costmap_Werte.md`, Abschnitt 4.
 
@@ -203,9 +205,9 @@ Keine Parameter. Einfahrt, Zielwahl und Ausfahrt kommen ohne Maße der Enclosure
 | Parameter | Standard | Bedeutung | Auswirkung |
 |---|---|---|---|
 | `goal_distance` | 1.0 m | Obstacle-Modus: wie weit voraus das Planziel auf der (verlängerten) Spurmitte liegt | Muss hinter dem Hindernis liegen; größer = plant weiter voraus, aber jenseits von ~0,6 m kennt das Spurgedächtnis nur, was die Kamera auf dem Weg dorthin gesehen hat |
-| `center_path_max_age` | 1.0 s | bis zu welchem Alter die Spurmitte die Richtung des Ziels vorgibt; sonst geradeaus | Größer = folgt länger einer alten Spurmitte, wenn die Linien verdeckt sind |
+| `CENTER_PATH_MAX_AGE_S` | 1.0 s | bis zu welchem Alter die Spurmitte die Richtung des Ziels vorgibt; sonst geradeaus | Größer = folgt länger einer alten Spurmitte, wenn die Linien verdeckt sind |
 
-Die übrigen Parameter (`robot_frame`, `odom_frame`, `watchdog_rate`) sind technische Details, an denen normalerweise nichts verändert werden muss.
+Die übrigen Werte (`ROBOT_FRAME`, `ODOM_FRAME`, `WATCHDOG_PERIOD_S`) sind technische Details, an denen normalerweise nichts verändert werden muss.
 
 ### 5.6 `control_driving.py` → Code-Defaults (rqt)
 
@@ -213,10 +215,10 @@ PID-Werte stehen in `Control_driving_PID.yaml`. Die Zeitgrenzen haben nur Code-D
 
 | Parameter | Standard | Bedeutung |
 |---|---|---|
-| `lane_cmd_timeout` | 0.3 s | So lange ohne `/detect/lane` im Lane-Modus, dann Null |
-| `nav2_cmd_timeout` | 0.25 s | So lange ohne `/nav2/cmd_vel` im Obstacle-/Tunnel-Modus, dann Null (5 Perioden à 20 Hz) |
-| `mode_timeout` | 1.5 s | So lange ohne `/control/mode`, dann Null (switch_control sendet mit 2 Hz) |
-| `mode_switch_hold` | 0.3 s | Nach dem Wechsel in den Tunnel wird Nav2 so lange ignoriert |
+| `LANE_CMD_TIMEOUT` | 0.3 s | So lange ohne `/detect/lane` im Lane-Modus, dann Null |
+| `NAV2_CMD_TIMEOUT` | 0.25 s | So lange ohne `/nav2/cmd_vel` im Obstacle-/Tunnel-Modus, dann Null (5 Perioden à 20 Hz) |
+| `MODE_TIMEOUT` | 1.5 s | So lange ohne `/control/mode`, dann Null (switch_control sendet mit 2 Hz) |
+| `MODE_SWITCH_HOLD` | 0.3 s | Nach dem Wechsel in den Tunnel wird Nav2 so lange ignoriert |
 
 ### 5.7 `nav2_params.yaml` — Nav2-Kernkonfiguration
 
@@ -248,7 +250,7 @@ Beim Umschalten hält der Bot sofort an, bis Nav2 den ersten Befehl schickt. `na
 
 Hindernisse auf der anderen Seite einer Spurlinie werden ignoriert, beim Eintritt wie beim Austritt. Das Spurgedächtnis kennt auch Linien neben und hinter dem Bot, deshalb funktioniert der Filter auch für seitliche Hindernisse.
 
-Sobald im 270°-Bereich (vorn, seitlich, schräg hinten) für `obstacle_clear_debounce` Sekunden nichts näher als 0,2 m liegt, schaltet `switch_control` zurück zu `Lane`, und der PID übernimmt wieder.
+Sobald im 270°-Bereich (vorn, seitlich, schräg hinten) für `OBSTACLE_CLEAR_DEBOUNCE_S` Sekunden nichts näher als 0,2 m liegt, schaltet `switch_control` zurück zu `Lane`, und der PID übernimmt wieder.
 
 **Bekannte Grenze:** Auf der normalen Spur (20 cm zwischen den Linien, Burger 17,8 cm) ist neben einem Hindernis kein Platz. NavFn findet dort keinen Weg (Status „kein Weg gefunden“), der Bot bleibt stehen, statt die Spur zu verlassen. Abgeleitet, nicht auf dem Bot beobachtet.
 
@@ -290,7 +292,7 @@ Befahrbar heißt dabei immer: was NavFn befahren darf. Besuchte und gescheiterte
 - [ ] `line_confirm_frames`/`free_confirm_frames` prüfen: erscheinen Linien schnell genug, verschwinden Fehldetektionen?
 - [ ] Prüfen, ob MPPI mit `consider_footprint: true` die 20 Hz hält (Rechenlast)
 - [ ] `inflation_radius` im Hindernisbereich testen (Zug zur Mitte vs. enge Durchfahrten)
-- [ ] `obstacle_check_angle_deg`/`obstacle_trigger_distance`/`obstacle_clear_distance`/`obstacle_clear_debounce` mit dem echten Roboter/der echten Strecke testen (löst zu früh/zu spät aus? schaltet zu oft hin und her?)
+- [ ] `obstacle_check_angle_deg`/`obstacle_trigger_distance`/`obstacle_clear_distance`/`OBSTACLE_CLEAR_DEBOUNCE_S` mit dem echten Roboter/der echten Strecke testen (löst zu früh/zu spät aus? schaltet zu oft hin und her?)
 - [ ] Kompletten Ausweich-Durchlauf auf echter Hardware testen (ein Hindernis in die Fahrbahn stellen, beobachten ob sauber ausgewichen und zurückgeschaltet wird)
 
 **Tunnel-Modus:**

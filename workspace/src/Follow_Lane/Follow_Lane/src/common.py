@@ -12,6 +12,7 @@ from enum import Enum
 import numpy as np
 import rclpy
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.signals import SignalHandlerOptions
 
 # Wartezeit von spin_once; so schnell reagiert ein Node auf Strg+C.
@@ -68,6 +69,22 @@ def read_params(node, names):
     """
     for name in names:
         setattr(node, name, node.get_parameter(name).value)
+
+
+def require_params(node, names):
+    """Beendet den Node mit klarer Meldung, wenn ein Parameter ohne Code-Default keinen Wert
+    aus der YAML bekommen hat. So gibt es jeden Wert nur an einer Stelle."""
+    missing = []
+    for name in names:
+        try:
+            node.get_parameter(name)
+        except ParameterUninitializedException:
+            missing.append(name)
+    if missing:
+        node.get_logger().fatal(
+            f'Ohne Wert: {", ".join(missing)} -- YAML nicht geladen oder unvollstaendig. '
+            f'{node.get_name()} startet nicht.')
+        raise SystemExit(1)
 
 
 def control_mode_from_msg(node, msg):

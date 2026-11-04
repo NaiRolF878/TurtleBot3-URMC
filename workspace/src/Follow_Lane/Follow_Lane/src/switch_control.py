@@ -14,13 +14,14 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
+from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from Follow_Lane.src.common import (
-    ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, run_node,
-    scan_points, transform_points)
+    ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, require_params,
+    run_node, scan_points, transform_points)
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als mode_timeout nichts hoert.
@@ -31,20 +32,30 @@ LINES_LOST_S = 0.2
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
 
+# Halbwinkel des Austrittsbereichs: 135 = 270 Grad ohne den Keil hinten.
+OBSTACLE_CLEAR_ANGLE_DEG = 135.0
+OBSTACLE_CLEAR_DEBOUNCE_S = 1.0
+# Ein Linienpunkt naeher als LINE_BLOCK_TOLERANCE an der Strecke Bot -> Hindernis trennt beide.
+# Linienpunkte bis LINE_OBSTACLE_MARGIN vor dem Hindernis zaehlen nicht: steht es auf der
+# Linie, ragt es in die Fahrbahn.
+LINE_BLOCK_TOLERANCE = 0.02
+LINE_OBSTACLE_MARGIN = 0.05
+LANE_MAX_AGE_S = 0.5
+
 
 class switch_control(Node):
     """Lane -> Obstacle: ein LiDAR-Punkt im Kegel +/-obstacle_check_angle_deg naeher als
     obstacle_trigger_distance, und zwischen Bot und Punkt liegt keine Spurlinie. Ein
     Objekt hinter einer Linie gehoert nicht zur eigenen Fahrbahn.
 
-    Obstacle -> Lane: obstacle_clear_debounce lang kein solcher Punkt naeher als
-    obstacle_clear_distance im Bereich +/-obstacle_clear_angle_deg. Der Keil direkt
+    Obstacle -> Lane: OBSTACLE_CLEAR_DEBOUNCE_S lang kein solcher Punkt naeher als
+    obstacle_clear_distance im Bereich +/-OBSTACLE_CLEAR_ANGLE_DEG. Der Keil direkt
     hinter dem Bot bleibt aussen vor: aus dieser Richtung kam er gerade.
 
     Die Linien kommen aus dem Spurgedaechtnis von lane_costmap_node, kennen also auch
     Linien neben und hinter dem Bot, die die Kamera gerade nicht sieht. Es enthaelt
     nur die gelbe und die weisse Spurlinie: eine Querlinie vor dem Hindernis trennt nicht. Ist es aelter
-    als lane_max_age, zaehlt jeder Punkt (lieber zu oft Obstacle als ein Hindernis
+    als LANE_MAX_AGE_S, zaehlt jeder Punkt (lieber zu oft Obstacle als ein Hindernis
     uebersehen). Entfernungen und Winkel gelten ab dem LiDAR, die Linienpruefung ab
     der Bot-Mitte (base_footprint).
 
@@ -66,24 +77,14 @@ class switch_control(Node):
         super().__init__('switch_control')
 
         # --- Parameter ---
-        # Halbwinkel: der Kegel ist doppelt so breit.
-        self.declare_parameter('obstacle_check_angle_deg', 30.0, frange(1.0, 90.0))
-        self.declare_parameter('obstacle_trigger_distance', 0.4, frange(0.05, 3.0))
-        # Halbwinkel des Austrittsbereichs: 135 = 270 Grad ohne den Keil hinten.
-        self.declare_parameter('obstacle_clear_angle_deg', 135.0, frange(1.0, 180.0))
-        self.declare_parameter('obstacle_clear_distance', 0.2, frange(0.05, 3.0))
-        self.declare_parameter('obstacle_clear_debounce', 1.0, frange(0.0, 10.0))
-        # Ein Linienpunkt naeher als line_block_tolerance an der Strecke Bot -> Hindernis
-        # trennt beide. Linienpunkte bis line_obstacle_margin vor dem Hindernis zaehlen
-        # nicht: steht es auf der Linie, ragt es in die Fahrbahn.
-        self.declare_parameter('line_block_tolerance', 0.02, frange(0.0, 0.2))
-        self.declare_parameter('line_obstacle_margin', 0.05, frange(0.0, 0.5))
-        self.declare_parameter('lane_max_age', 0.5, frange(0.05, 5.0))
-        self._param_names = [
-            'obstacle_check_angle_deg', 'obstacle_trigger_distance',
-            'obstacle_clear_angle_deg', 'obstacle_clear_distance', 'obstacle_clear_debounce',
-            'line_block_tolerance', 'line_obstacle_margin', 'lane_max_age',
-        ]
+        # Vor Ort einstellen, Werte nur in Switch_Control.yaml. Halbwinkel: der Kegel ist
+        # doppelt so breit.
+        self.declare_parameter('obstacle_check_angle_deg', Parameter.Type.DOUBLE, frange(1.0, 90.0))
+        self.declare_parameter('obstacle_trigger_distance', Parameter.Type.DOUBLE, frange(0.05, 3.0))
+        self.declare_parameter('obstacle_clear_distance', Parameter.Type.DOUBLE, frange(0.05, 3.0))
+        self._param_names = ['obstacle_check_angle_deg', 'obstacle_trigger_distance',
+                             'obstacle_clear_distance']
+        require_params(self, self._param_names)
         read_params(self, self._param_names)
 
         # --- Subscriber ---
@@ -214,7 +215,7 @@ class switch_control(Node):
         self._set_mode(restored, 'Tunnel verlassen')
 
     def _update_obstacle_exit(self, scan):
-        if self._obstacle_in_lane(scan, self.obstacle_clear_angle_deg,
+        if self._obstacle_in_lane(scan, OBSTACLE_CLEAR_ANGLE_DEG,
                                   self.obstacle_clear_distance):
             self._obstacle_clear_since = None
             return
@@ -222,7 +223,7 @@ class switch_control(Node):
         now = self.get_clock().now()
         if self._obstacle_clear_since is None:
             self._obstacle_clear_since = now
-        elif (now - self._obstacle_clear_since).nanoseconds / 1e9 >= self.obstacle_clear_debounce:
+        elif (now - self._obstacle_clear_since).nanoseconds / 1e9 >= OBSTACLE_CLEAR_DEBOUNCE_S:
             self._set_mode(ControlType.Lane, 'Kein Hindernis mehr in der Naehe')
 
     def _obstacle_in_lane(self, scan, half_angle_deg, distance):
@@ -244,13 +245,13 @@ class switch_control(Node):
     def _fresh_lane_points(self):
         if self._lane_time is None or self._lane_points is None:
             return None
-        if time.monotonic() - self._lane_time > self.lane_max_age:
+        if time.monotonic() - self._lane_time > LANE_MAX_AGE_S:
             return None
         return self._lane_points
 
     def _behind_line(self, points, lanes):
         """Fuer jeden Punkt (M, 2): liegt ein Linienpunkt auf der Strecke vom Ursprung
-        (Bot-Mitte) zum Punkt, mehr als line_obstacle_margin vor ihm?"""
+        (Bot-Mitte) zum Punkt, mehr als LINE_OBSTACLE_MARGIN vor ihm?"""
         if lanes.size == 0:
             return np.zeros(len(points), dtype=bool)
         dist = np.hypot(points[:, 0], points[:, 1])
@@ -261,8 +262,8 @@ class switch_control(Node):
             return np.zeros(len(points), dtype=bool)
         along = lanes @ unit.T                                    # (N, M)
         across = np.abs(lanes[:, :1] * unit[:, 1] - lanes[:, 1:] * unit[:, 0])
-        between = (along > 0.0) & (along < dist - self.line_obstacle_margin)
-        return ((across <= self.line_block_tolerance) & between).any(axis=0)
+        between = (along > 0.0) & (along < dist - LINE_OBSTACLE_MARGIN)
+        return ((across <= LINE_BLOCK_TOLERANCE) & between).any(axis=0)
 
     def _scanner_pose(self, target_frame, scanner_frame):
         """Lage des Scanners im target_frame. Fest montiert, daher einmal nachschlagen."""

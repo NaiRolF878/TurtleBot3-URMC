@@ -1,50 +1,16 @@
 /lane_costmap_node:
   ros__parameters:
-    # Spurgedaechtnis fuer die lane_layer und Spurmitte (nur Obstacle), in jedem
-    # Modus ausser Tunnel (Kamera dort verboten), siehe Docstring in lane_costmap_node.py.
-    # Pixel -> Meter und Reichweite kommen aus Parameter/bev.yaml (dieselbe Datei,
-    # mit der ingress_node /lokal/bev erzeugt). Wurde die Kamera verstellt, die
-    # Extrinsik neu messen (scripts/tb/camera-extrinsics.py).
-    robot_frame: base_footprint
-    odom_frame: odom
-    output_topic: /detect/lane_obstacles
-    pixel_stride: 2
-
     # Spurgedaechtnis: eine Zelle wird erst nach so vielen Kamerabildern in Folge zur
     # Linie bzw. wieder frei.
-    memory_resolution: 0.01      # m, = resolution der local_costmap (global 2,5 cm)
-    memory_radius: 2.0           # m, Sendeumkreis (gemerkt wird alles), = obstacle_max_range der lane_layer
     line_confirm_frames: 3
     free_confirm_frames: 10
-    shadow_radius: 0.03          # m, Sichtschatten je LiDAR-Punkt
-    shadow_margin: 0.05          # m
-
-    # Wand werden nur gelbe und weisse Spurlinie: jede wird vom Bot aus verfolgt,
-    # nur Pixel bis line_margin um ihre Mitte zaehlen (Querlinien, Papier, helle
-    # Flaechen nicht). Pixel am Hindernis und in seinem LiDAR-Schatten fallen weg.
     # m, 0 = nur die Linienmitte wird Wand. Mit 0.04 waren die Linien in der Costmap
     # 8-10 cm breit und liessen in der 20-cm-Spur keinen Platz fuer den Bot (17,8 cm).
     line_margin: 0.0
-    trace_step: 0.03             # m
-    trace_max_turn_deg: 35.0     # je Schritt; 35 Grad auf 3 cm folgt Kurven bis r ~5 cm
-    trace_max_gap: 0.09          # m, laengere Luecken beenden die Linie
-    trace_parallel_deg: 60.0     # knickt eine Linie gegen die andere staerker ab, endet sie
-
-    # Spurmitte: keine Spurbreite einstellen, sie wird laufend gemessen.
-    center_path_topic: /lane/center_path
-    center_bin_size: 0.05        # m, Tiefe eines Streifens
-    center_min_points: 3
-    center_width_history: 20     # Bilder; Median der gemessenen Breite
 
 /nav2_goal_publisher:
   ros__parameters:
-    # Obstacle-Modus: Planziel goal_distance voraus auf der Spurmitte (solange sie
-    # juenger ist als center_path_max_age, Empfangszeit), sonst geradeaus.
-    center_path_topic: /lane/center_path
-    center_path_max_age: 1.0
+    # Obstacle-Modus: Planziel goal_distance (m) voraus auf der Spurmitte.
     goal_distance: 1.0
     # Planwege, die weiter als das (m) hinter die Radachse fuehren, werden verworfen.
     max_path_backward: 0.12
-    robot_frame: base_footprint
-    odom_frame: odom
-    watchdog_rate: 2.0

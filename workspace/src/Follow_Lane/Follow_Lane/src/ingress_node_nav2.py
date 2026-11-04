@@ -26,6 +26,12 @@ CALIBRATION = 'imx219_800x600.yaml'
 EXTRINSICS = 'extrinsics_800x600.yaml'
 
 
+# Nur fuer Fisheye-Kalibrierungen (distortion_model: equidistant): wie viel vom weiten Bildwinkel
+# nach dem Entzerren bleibt. 0.0 = auf gueltige Pixel zuschneiden (keine schwarzen Raender, Rand
+# geht verloren), 1.0 = alles behalten (schwarze Ecken).
+FISHEYE_BALANCE = 0.0
+
+
 class ingress_node(Node):
     """Im Tunnel und vor der ersten /control/mode wird kein Kamerabild verarbeitet:
     in der Enclosure ist die Kamera laut Reglement verboten, und ein Neustart dort
@@ -34,16 +40,6 @@ class ingress_node(Node):
 
     def __init__(self):
         super().__init__('ingress_node')
-
-        # --- Parameter ---
-        self.declare_parameter('undistort', True)
-        # Nur fuer Fisheye-Kalibrierungen (distortion_model: equidistant): wie viel vom
-        # weiten Bildwinkel nach dem Entzerren bleibt. 0.0 = auf gueltige Pixel
-        # zuschneiden (keine schwarzen Raender, Rand geht verloren), 1.0 = alles
-        # behalten (schwarze Ecken).
-        self.declare_parameter('balance', 0.0)
-        # Direkt aus dem Rohbild in einem Remap, unabhaengig von 'undistort'.
-        self.declare_parameter('publish_bev', True)
 
         # --- Subscriber ---
         self.sub_control_mode = self.create_subscription(
@@ -96,14 +92,13 @@ class ingress_node(Node):
             self.get_logger().error(f'Bild konnte nicht dekodiert werden: {e}')
             return
 
-        if self.K is not None and self.bev_spec is not None \
-                and self.get_parameter('publish_bev').value:
+        if self.K is not None and self.bev_spec is not None:
             bev_msg = self.bridge.cv2_to_imgmsg(self._bev(cv_image), encoding='bgr8')
             bev_msg.header.stamp = img.header.stamp
             bev_msg.header.frame_id = 'bev'
             self.pub_bev.publish(bev_msg)
 
-        if self.K is not None and self.get_parameter('undistort').value:
+        if self.K is not None:
             cv_image = self._undistort(cv_image)
 
         out_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
@@ -151,7 +146,7 @@ class ingress_node(Node):
     def _bev(self, raw):
         """Rohbild -> metrische Vogelperspektive (eine Remap-Tabelle je Bildgroesse)."""
         h, w = raw.shape[:2]
-        balance = float(self.get_parameter('balance').value)
+        balance = FISHEYE_BALANCE
         if self._bev_size != (w, h, balance):
             K_raw = self.K.copy()
             K_raw[0] *= w / self.cal_w
@@ -180,7 +175,7 @@ class ingress_node(Node):
 
     def _undistort(self, img):
         h, w = img.shape[:2]
-        balance = float(self.get_parameter('balance').value)
+        balance = FISHEYE_BALANCE
         if self._map_size != (w, h, balance):
             # K gilt fuer die Kalibrieraufloesung; bei anderer Bildgroesse mitskalieren.
             K = self.K.copy()

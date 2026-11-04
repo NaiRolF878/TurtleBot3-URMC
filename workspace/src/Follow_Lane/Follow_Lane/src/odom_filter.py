@@ -11,8 +11,8 @@ von Metern.
 
 Gerechnet wird wie im turtlebot3_node (odometry.use_imu: true): Weg aus den Raedern,
 Drehung aus dem IMU-Gierwinkel. Verworfen wird jede Nachricht, deren Raddrehung seit der
-letzten gueltigen schneller waere als max_wheel_speed; die naechste wird wieder gegen die
-letzte gueltige gerechnet. Ebenso ein IMU-Sprung ueber max_yaw_rate, dann gilt die Drehung
+letzten gueltigen schneller waere als MAX_WHEEL_SPEED; die naechste wird wieder gegen die
+letzte gueltige gerechnet. Ebenso ein IMU-Sprung ueber MAX_YAW_RATE, dann gilt die Drehung
 aus den Raedern.
 
 Voraussetzung: der Bot sendet die TF nicht selbst (bot-up.sh, BOT_ODOM_TF=false). Tut er
@@ -31,8 +31,21 @@ from sensor_msgs.msg import Imu, JointState
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
-from Follow_Lane.src.common import frange, irange, read_params, run_node, yaw_from_quaternion
+from Follow_Lane.src.common import run_node, yaw_from_quaternion
 
+ODOM_FRAME = 'odom'
+ROBOT_FRAME = 'base_footprint'
+LEFT_JOINT = 'wheel_left_joint'
+RIGHT_JOINT = 'wheel_right_joint'
+# Burger: wheels.radius / wheels.separation aus turtlebot3_bringup/param/burger.yaml
+WHEEL_RADIUS = 0.033
+WHEEL_SEPARATION = 0.160
+# Burger faehrt hoechstens 0,22 m/s bzw. 2,84 rad/s; Reserve fuer Rauschen.
+MAX_WHEEL_SPEED = 0.5
+MAX_YAW_RATE = 5.0
+# Bleiben so viele Nachrichten in Folge unplausibel, war es kein Ausreisser (z.B. Zaehler im
+# OpenCR zurueckgesetzt): neue Werte uebernehmen, ohne zu fahren.
+RESYNC_AFTER = 10
 # So lange (s) nach einer fremden odom-TF bleibt die eigene aus.
 FOREIGN_TF_HOLD_S = 2.0
 # Annahme fuer dt, wenn zwei Nachrichten denselben Zeitstempel tragen.
@@ -47,26 +60,6 @@ class odom_filter(Node):
 
     def __init__(self):
         super().__init__('odom_filter')
-
-        # --- Parameter ---
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('left_joint', 'wheel_left_joint')
-        self.declare_parameter('right_joint', 'wheel_right_joint')
-        # Burger: wheels.radius / wheels.separation aus turtlebot3_bringup/param/burger.yaml
-        self.declare_parameter('wheel_radius', 0.033, frange(0.01, 0.2))
-        self.declare_parameter('wheel_separation', 0.160, frange(0.05, 1.0))
-        # Burger faehrt hoechstens 0,22 m/s bzw. 2,84 rad/s; Reserve fuer Rauschen.
-        self.declare_parameter('max_wheel_speed', 0.5, frange(0.05, 5.0))
-        self.declare_parameter('max_yaw_rate', 5.0, frange(0.5, 20.0))
-        # Bleiben so viele Nachrichten in Folge unplausibel, war es kein Ausreisser
-        # (z.B. Zaehler im OpenCR zurueckgesetzt): neue Werte uebernehmen, ohne zu fahren.
-        self.declare_parameter('resync_after', 10, irange(2, 1000))
-        self.declare_parameter('use_imu', True)
-        self._param_names = ['odom_frame', 'robot_frame', 'left_joint', 'right_joint',
-                             'wheel_radius', 'wheel_separation', 'max_wheel_speed',
-                             'max_yaw_rate', 'resync_after', 'use_imu']
-        read_params(self, self._param_names)
 
         # --- Subscriber ---
         self.sub_joints = self.create_subscription(
@@ -96,24 +89,23 @@ class odom_filter(Node):
 
     def cb_tf(self, msg):
         for tf in msg.transforms:
-            if tf.header.frame_id != self.odom_frame or tf.child_frame_id != self.robot_frame:
+            if tf.header.frame_id != ODOM_FRAME or tf.child_frame_id != ROBOT_FRAME:
                 continue
             stamp = (tf.header.stamp.sec, tf.header.stamp.nanosec)
             if stamp not in self._own_stamps:
                 self._foreign_tf_time = time.monotonic()
 
     def cb_joint_states(self, msg):
-        read_params(self, self._param_names)
         try:
-            left = msg.position[msg.name.index(self.left_joint)]
-            right = msg.position[msg.name.index(self.right_joint)]
+            left = msg.position[msg.name.index(LEFT_JOINT)]
+            right = msg.position[msg.name.index(RIGHT_JOINT)]
         except (ValueError, IndexError):
             self.get_logger().warn(
-                f'/joint_states ohne {self.left_joint}/{self.right_joint}: {list(msg.name)}',
+                f'/joint_states ohne {LEFT_JOINT}/{RIGHT_JOINT}: {list(msg.name)}',
                 throttle_duration_sec=10.0)
             return
         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        imu_yaw = self._imu_yaw if self.use_imu else None
+        imu_yaw = self._imu_yaw
 
         if self._last_wheels is None:
             self._accept(now, left, right, imu_yaw)
@@ -122,11 +114,11 @@ class odom_filter(Node):
         last_t, last_left, last_right = self._last_wheels
         dt = now - last_t if now > last_t else DEFAULT_DT_S
         d_left, d_right = left - last_left, right - last_right
-        max_step = self.max_wheel_speed / self.wheel_radius * dt
+        max_step = MAX_WHEEL_SPEED / WHEEL_RADIUS * dt
         if not (math.isfinite(d_left) and math.isfinite(d_right)) \
                 or max(abs(d_left), abs(d_right)) > max_step:
             self._rejected += 1
-            if self._rejected < self.resync_after:
+            if self._rejected < RESYNC_AFTER:
                 self.get_logger().warn(
                     f'Radwerte verworfen: links {d_left:+.3f} rad, rechts {d_right:+.3f} rad '
                     f'in {dt * 1000:.0f} ms (erlaubt {max_step:.3f})', throttle_duration_sec=1.0)
@@ -137,11 +129,11 @@ class odom_filter(Node):
             self._accept(now, left, right, imu_yaw)
             return
 
-        d_s = self.wheel_radius * (d_left + d_right) / 2.0
-        d_yaw = self.wheel_radius * (d_right - d_left) / self.wheel_separation
+        d_s = WHEEL_RADIUS * (d_left + d_right) / 2.0
+        d_yaw = WHEEL_RADIUS * (d_right - d_left) / WHEEL_SEPARATION
         if imu_yaw is not None and self._last_imu_yaw is not None:
             d_imu = wrap(imu_yaw - self._last_imu_yaw)
-            if abs(d_imu) <= self.max_yaw_rate * dt:
+            if abs(d_imu) <= MAX_YAW_RATE * dt:
                 d_yaw = d_imu
             else:
                 self.get_logger().warn(
@@ -167,8 +159,8 @@ class odom_filter(Node):
 
         odom = Odometry()
         odom.header.stamp = stamp
-        odom.header.frame_id = self.odom_frame
-        odom.child_frame_id = self.robot_frame
+        odom.header.frame_id = ODOM_FRAME
+        odom.child_frame_id = ROBOT_FRAME
         odom.pose.pose.position.x, odom.pose.pose.position.y = x, y
         odom.pose.pose.orientation = q
         odom.twist.twist.linear.x, odom.twist.twist.angular.z = v, w
@@ -183,7 +175,7 @@ class odom_filter(Node):
             return
         tf = TransformStamped()
         tf.header = odom.header
-        tf.child_frame_id = self.robot_frame
+        tf.child_frame_id = ROBOT_FRAME
         tf.transform.translation.x, tf.transform.translation.y = x, y
         tf.transform.rotation = q
         self._own_stamps.append((stamp.sec, stamp.nanosec))

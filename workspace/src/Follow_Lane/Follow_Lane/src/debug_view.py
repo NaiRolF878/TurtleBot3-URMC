@@ -54,6 +54,9 @@ MODE_COLOR = {
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
 
+# Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
+CLICK_TOPIC = '/lokal/debug_view_mouse_left'
+
 # Welche Quelle control_driving je Modus auf /control/cmd_vel durchreicht; in allen
 # anderen Modi sendet er Null.
 MODE_SOURCE = {
@@ -75,9 +78,6 @@ class debug_view(Node):
     def __init__(self):
         super().__init__('debug_view')
 
-        # --- Parameter ---
-        self.declare_parameter('click_topic', '/lokal/debug_view_mouse_left')
-
         # --- Subscriber ---
         self.sub_lane_debug = self.create_subscription(
             FollowLaneDebug, '/detect/lane_debug', self.cb_lane_debug, 1)
@@ -95,7 +95,7 @@ class debug_view(Node):
         self.sub_lane_obstacles = self.create_subscription(
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         self.sub_click = self.create_subscription(
-            Point, self.get_parameter('click_topic').value, self.cb_click, 1)
+            Point, CLICK_TOPIC, self.cb_click, 1)
 
         # --- Publisher ---
         self.pub_debug_image = self.create_publisher(Image, '/lokal/debug_view', 1)

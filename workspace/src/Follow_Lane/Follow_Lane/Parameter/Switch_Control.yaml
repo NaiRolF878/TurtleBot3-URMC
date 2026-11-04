@@ -10,14 +10,5 @@
     obstacle_trigger_distance: 0.30
 
     # --- Austritt Obstacle -> Lane ---
-    # Halbwinkel 135 = 270 Grad: vorn, seitlich und schraeg hinten. Der Keil direkt
-    # hinter dem Bot zaehlt nicht, aus dieser Richtung kam er gerade.
-    obstacle_clear_angle_deg: 135.0
+    # Im Bereich vorn, seitlich und schraeg hinten (270 Grad) nichts naeher als das (m).
     obstacle_clear_distance: 0.40
-    # So lange (s) muss der Bereich frei sein, bevor es zurueck zu Lane geht.
-    obstacle_clear_debounce: 1.0
-
-    # --- Linienfilter (Spurgedaechtnis von lane_costmap_node) ---
-    line_block_tolerance: 0.02
-    line_obstacle_margin: 0.05
-    lane_max_age: 0.5
