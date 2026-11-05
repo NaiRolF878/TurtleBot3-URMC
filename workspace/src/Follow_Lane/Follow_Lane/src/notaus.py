@@ -13,6 +13,11 @@
 * Zustand auf /notaus/drive (std_msgs/Bool, latched) fuer GUIs/andere Nodes.
 * Taste L: /control/clear_maps (std_msgs/Empty), lane_costmap_node leert Spurgedaechtnis und
   Costmaps, wenn sie nicht mehr zur Odometrie passen (Bot angehoben). Erst absetzen, dann L.
+  Im Tunnel-Modus zusaetzlich Neustart vor dem Tunnel (Modus bleibt Tunnel): Eingangssperre
+  neu an der aktuellen Pose (keepout_zone_node), Tunnel-Explorer von vorn mit Tuersuche,
+  laufendes Nav2-Ziel abgebrochen. Bot also erst vor den Eingang stellen, dann L.
+* Taste O: Obstacle-Modus an/aus (Parameter obstacle_enabled von switch_control, wie das
+  Haekchen in rqt). Aus heisst: kein Wechsel nach Obstacle, aus Obstacle sofort zurueck zu Lane.
 * Beim Beenden: mehrfach Stopp. Danach kommt nichts mehr zum Bot durch (kein Remapping mehr).
 """
 import os
@@ -26,6 +31,7 @@ import tty
 import rclpy
 from geometry_msgs.msg import Twist
 from rcl_interfaces.msg import SetParametersResult
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -53,6 +59,8 @@ class notaus(Node):
         self.pub_clear_maps = self.create_publisher(Empty, '/control/clear_maps', 1)
         self.create_subscription(Twist, '/control/cmd_vel', self.cb_cmd, 1)
         self.create_service(SetBool, '/notaus/set', self.cb_srv)
+        self.get_switch_params = self.create_client(GetParameters, '/switch_control/get_parameters')
+        self.set_switch_params = self.create_client(SetParameters, '/switch_control/set_parameters')
         self.add_on_set_parameters_callback(self.cb_params)
         self.create_timer(1.0 / STOP_RATE_HZ, self.tick)
 
@@ -82,6 +90,35 @@ class notaus(Node):
         else:
             self.pub_clear_maps.publish(Empty())
             self.get_logger().warn('Taste L: Spurgedaechtnis und Costmaps werden geleert.')
+        print_state(self.drive)
+
+    def toggle_obstacle(self):
+        """Taste O: obstacle_enabled von switch_control lesen und umgekehrt setzen."""
+        if not self.get_switch_params.service_is_ready():
+            self.get_logger().error('Taste O: switch_control nicht erreichbar.')
+            print_state(self.drive)
+            return
+        req = GetParameters.Request(names=['obstacle_enabled'])
+        self.get_switch_params.call_async(req).add_done_callback(self._cb_obstacle_read)
+
+    def _cb_obstacle_read(self, future):
+        values = future.result().values if future.result() is not None else []
+        if not values:
+            self.get_logger().error('Taste O: obstacle_enabled nicht lesbar.')
+            print_state(self.drive)
+            return
+        enabled = not values[0].bool_value
+        req = SetParameters.Request(
+            parameters=[Parameter('obstacle_enabled', Parameter.Type.BOOL, enabled).to_parameter_msg()])
+        self.set_switch_params.call_async(req).add_done_callback(
+            lambda f, e=enabled: self._cb_obstacle_set(f, e))
+
+    def _cb_obstacle_set(self, future, enabled):
+        ok = future.result() is not None and all(r.successful for r in future.result().results)
+        if ok:
+            self.get_logger().warn(f'Taste O: Obstacle-Modus {"AN" if enabled else "AUS"}.')
+        else:
+            self.get_logger().error('Taste O: obstacle_enabled nicht gesetzt.')
         print_state(self.drive)
 
     def publish_state(self):
@@ -116,9 +153,9 @@ class notaus(Node):
 
 def print_state(drive):
     if drive:
-        sys.stdout.write('\r\033[K\033[1;42;30m  >> FAHREN  \033[0m   Leertaste = STOPP, L = Karten leeren, q = beenden ')
+        sys.stdout.write('\r\033[K\033[1;42;30m  >> FAHREN  \033[0m   Leertaste = STOPP, L = Karten leeren, O = Obstacle an/aus, q = beenden ')
     else:
-        sys.stdout.write('\r\033[K\033[1;41;37m  || STOPP   \033[0m   Leertaste = FAHREN, L = Karten leeren, q = beenden ')
+        sys.stdout.write('\r\033[K\033[1;41;37m  || STOPP   \033[0m   Leertaste = FAHREN, L = Karten leeren, O = Obstacle an/aus, q = beenden ')
     sys.stdout.flush()
 
 
@@ -136,6 +173,8 @@ def keyboard_loop(node, stop_event):
             node.set_drive(not node.drive, 'Leertaste')
         elif ch in (b'l', b'L'):
             node.clear_maps()
+        elif ch in (b'o', b'O'):
+            node.toggle_obstacle()
         elif ch in (b'q', b'Q', b'\x03'):
             stop_event.set()
 

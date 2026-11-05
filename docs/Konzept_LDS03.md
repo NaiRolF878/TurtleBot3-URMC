@@ -16,7 +16,7 @@ Costmap und Nav2. Wie die gemeinsamen Teile aktuell gehalten werden, steht in
 | Modus         | Ausloeser (switch_control)                                   | Fahrbefehl (control_driving)          |
 |---------------|--------------------------------------------------------------|---------------------------------------|
 | `Lane`        | Start, Ende von Obstacle; nach dem Tunnel der Modus davor    | PID auf den Spurfehler + Ausweich-Offset |
-| `Obstacle`    | Frontzone naeher als `takeover_distance`                     | Ausweichmanoever aus `/avoid/zones`   |
+| `Obstacle`    | Frontzone naeher als `takeover_distance`, `obstacle_enabled` | Ausweichmanoever aus `/avoid/zones`   |
 | `TunnelEntry` | Button im Debugbild oder Tunnelschild                        | PID auf den Spurfehler, ohne Offset   |
 | `Tunnel`      | Beide Spurlinien enden an der Oeffnung                       | Nav2 (`/nav2/cmd_vel`)                |
 

@@ -18,13 +18,16 @@ BOT_WIDTH = 0.178
 MIN_OPENING_M = 0.225
 LETHAL_COST = 100
 # Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar: einzelne Strahlen ins
-# Unbekannte. Waende sind schon um robot_radius aufgeblasen, die Bot-MITTE darf schmal fahren.
-MIN_PASSAGE_M = 0.075
+# Unbekannte. Waende sind in der global_costmap um robot_radius aufgeblasen, die Bot-MITTE darf
+# schmal fahren. 0.075 passte zum 2,5-cm-Raster und sperrte Luecken unter ~25 cm; bei 1 cm
+# reichen 2 Zellen (Luecken ab ~20 cm, 2026-11-05).
+MIN_PASSAGE_M = 0.02
 # Liegt die naechste befahrbare Flaeche weiter vom Bot weg, steht er in keiner.
 MAX_START_GAP_M = 0.15
-# Wandzellen mit einer Luecke bis hierhin gehoeren zusammen (Zellen je Seite): ab ~1,6 m
-# liegen die Strahlen (0,9 Grad) weiter auseinander als eine 2,5-cm-Zelle.
-WALL_GAP_CELLS = 1
+# Wandzellen mit einer Luecke bis hierhin (m je Seite) gehoeren zusammen: ab ~1,6 m liegen die
+# Strahlen (0,9 Grad) weiter als 2,5 cm auseinander. In Metern, damit es nicht an der
+# Zellgroesse der global_costmap haengt (2026-11-05: 2,5 -> 1 cm).
+WALL_GAP_M = 0.025
 # So weit (m) hinter die Tuerlinie faehrt die Einfahrt: Heck 0.101 + footprint_padding 0.01 +
 # xy_goal_tolerance 0.15, damit der ganze Bot auch bei fruehem "erreicht" drin ist.
 DOOR_DEPTH_M = 0.261
@@ -253,10 +256,10 @@ def hull_mask(hull, shape, info_res, origin_xy):
     return mask.astype(bool)
 
 
-def connected_walls(grid, seeds_rc):
+def connected_walls(grid, seeds_rc, info_res):
     """Wandzellen (Maske), die mit den Seeds (N, 2; Zeile, Spalte) verbunden sind."""
     lethal = (grid == LETHAL_COST).astype(np.uint8)
-    size = 2 * WALL_GAP_CELLS + 1
+    size = 2 * max(1, int(round(WALL_GAP_M / info_res))) + 1
     closed = cv2.dilate(lethal, np.ones((size, size), np.uint8))
     _, labels = cv2.connectedComponents(closed, connectivity=8)
     h, w = grid.shape

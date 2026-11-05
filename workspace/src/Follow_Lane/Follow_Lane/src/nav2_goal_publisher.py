@@ -21,7 +21,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import String, UInt8
+from std_msgs.msg import Empty, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
@@ -108,6 +108,8 @@ class nav2_goal_publisher(Node):
             Path, CENTER_PATH_TOPIC, self.cb_center_path, 1)
         self.sub_costmap = self.create_subscription(
             OccupancyGrid, '/global_costmap/costmap', self.cb_costmap, 1)
+        self.sub_clear_maps = self.create_subscription(
+            Empty, '/control/clear_maps', self.cb_clear_maps, 1)
 
         # --- Publisher ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -171,6 +173,15 @@ class nav2_goal_publisher(Node):
 
     def cb_costmap(self, grid):
         self._costmap = grid
+
+    def cb_clear_maps(self, _msg):
+        # Taste L im Tunnel (Neustart vor dem Tunnel): der alte Explorer-Pfad fuehrte vom
+        # alten Standort weg, also abbrechen; den naechsten liefert tunnel_explorer_node.
+        if self.control_mode != ControlType.Tunnel:
+            return
+        self._latest_explore_path = None
+        self._cancel_goal()
+        self._set_status('Tunnel zurueckgesetzt (Taste L)')
 
     def cb_center_path(self, path):
         first = self._center_path_received is None

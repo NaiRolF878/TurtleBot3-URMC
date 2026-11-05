@@ -18,14 +18,15 @@ Gemeinsame Dateien mit Aenderungen (hier entstehen beim Merge Konflikte):
 
 | Datei | Abweichung |
 |-------|------------|
-| `src/switch_control.py` | Lane <-> Obstacle ueber `/avoid/zones` mit Hysterese statt LiDAR-Kegel + Linienfilter; `takeover_*` ohne Code-Default |
+| `src/switch_control.py` | Lane <-> Obstacle ueber `/avoid/zones` mit Hysterese statt LiDAR-Kegel + Linienfilter; `takeover_*` ohne Code-Default; `obstacle_enabled` wirkt auf diese Uebernahme |
 | `src/control_driving.py` | Lane: PID + Offset; Obstacle: Ausweichmanoever; TunnelEntry: PID ohne Offset; Nav2 nur im Tunnel (`NAV2_MODES`); `avoid_*` ohne Code-Default, `AVOID_TIMEOUT` |
 | `src/nav2_goal_publisher.py` | plant nie (`PLAN_MODES` leer), Nav2 nur im Tunnel; Docstring, Kommentare |
 | `src/lane_costmap_node.py` | keine Spurmitte (`CENTER_PATH_MODES` leer), Docstring |
 | `src/debug_view.py` | Anzeige der Fahrquelle je Modus (`MODE_SOURCE`) |
 | `Parameter/Switch_Control.yaml` | `takeover_*` statt `obstacle_*` |
 | `Parameter/Control_driving_PID_Wide.yaml` | zusaetzlich `avoid_linear_speed`, `avoid_angular_speed` |
-| `launch/nav2_obstacle.launch.py` | startet avoid_node, Docstring, Kommentar zu `/nav2/cmd_vel` |
+| `launch/nav2_obstacle.launch.py` | startet avoid_node, Docstring, Kommentare zu `/nav2/cmd_vel` und `obstacle:=true` |
+| `launch/follow_lane.launch.py` | Kommentar zu `obstacle_enabled`: Obstacle braucht avoid_node statt Nav2 |
 | `scripts/tb/launchers/nav2_obstacle.sh` | avoid_node im Prozessmuster, Kopfkommentar |
 | `setup.py` | Eintrag `avoid_node` |
 | `workspace/src/follow_lane_msg/CMakeLists.txt` | `msg/AvoidZones.msg` |

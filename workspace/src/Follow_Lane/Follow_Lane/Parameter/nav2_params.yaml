@@ -60,7 +60,21 @@ controller_server:
       stateful: true
 
     FollowPath:
-      plugin: "nav2_mppi_controller::MPPIController"
+      # RotationShim vor MPPI (2026-11-05): MPPI wuerfelt vx um den aktuellen Wert, reine
+      # Drehungen auf der Stelle kommen dabei kaum vor -- der Bot blieb stehen, obwohl
+      # Drehen gepasst haette. Weicht die Pfadrichtung (Pfadpunkt forward_sampling_distance
+      # voraus) um mehr als angular_dist_threshold ab, dreht der Shim auf der Stelle und
+      # prueft die Drehung simulate_ahead_time voraus mit dem Footprint auf Kollision
+      # (Heck-Ecken 12,2 cm von der Achse). Danach faehrt MPPI. Die MPPI-Parameter bleiben
+      # unter FollowPath.* (der Shim gibt seinen Namen an den primary_controller weiter),
+      # FollowPath.vx_max aus tunnel_explorer_node greift also weiter.
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_mppi_controller::MPPIController"
+      angular_dist_threshold: 0.785
+      forward_sampling_distance: 0.3
+      rotate_to_heading_angular_vel: 1.2
+      max_angular_accel: 3.2
+      simulate_ahead_time: 1.0
       # Vorausschau 90 * model_dt 0.05 = 4,5 s, * vx_max 0.22 m/s ~ 0,99 m: deckt das
       # Planziel von nav2_goal_publisher ab (goal_distance 1.0 m in Lane_Costmap.yaml).
       # Regel: time_steps * model_dt * vx_max >= goal_distance.
@@ -220,17 +234,23 @@ global_costmap:
       # 7x7 m -> 280x280 Zellen. Bewusst groeber als local_costmap (1 cm): ab ~0,6 m
       # liegen die LiDAR-Strahlen weiter als 1 cm auseinander, dazwischen bliebe es
       # "unbekannt", und unbekannt ist fuer NavFn gesperrt. Bei 0.05 auch
-      resolution: 0.025
+      # 2026-11-05 auf Nutzerwunsch 0.025 -> 0.01 (wie local_costmap): bei 2,5 cm waren Luecken
+      # unter ~23 cm fuer NavFn zu, obwohl der Bot (17,8 cm) durchpasst. Beobachten: Strahl-
+      # luecken als "unbekannt" (s. oben) und Rechenlast (700x700 statt 280x280 Zellen).
+      resolution: 0.01
       # Kreis statt Footprint: NavFn plant fuer einen Punkt und prueft keine
       # Roboterform. 0.09 = halbe Breite des Burger (178 mm). Mit 0.105 waren die
       # Spurlinien um je 10,5 cm gesperrt und der Planer fand zwischen nahen Linien
       # keine Luecke mehr (2026-11-03). Den echten Umriss prueft MPPI.
-      robot_radius: 0.09
+      robot_radius: 0.10
       # Nie gesehene Zellen bleiben "unbekannt" (-1), statt als frei zu gelten. Der
       # Tunnel-Explorer sucht genau die Grenze frei/unbekannt; ohne das findet er nie
       # ein Ziel. Zusammen mit allow_unknown:false plant NavFn nur durch Gesehenes.
       track_unknown_space: true
       always_send_full_costmap: true
+      # inflation_layer ist hier noetig: nur ueber ihn kennt NavFn die Bot-Groesse (er sperrt
+      # robot_radius um jedes Hindernis). Ganz ohne plante er wie fuer einen Punkt -- Ziele und
+      # Wege direkt an der Wand, Tunnel-Explorer lahm (2026-11-05). Einstellung siehe unten.
       plugins: ["obstacle_layer", "lane_layer", "entrance_layer", "inflation_layer"]
 
       obstacle_layer:
@@ -295,10 +315,17 @@ global_costmap:
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
 
+      # Nur der Bot-Radius, kein breiter Kostensaum (2026-11-05, vorher 0.3 / 3.0): bis
+      # robot_radius 0.09 gesperrt, bis 0.10 teuer, dahinter Kosten ~0. Luecken ab ~20-22 cm
+      # passierbar (Bot 17,8 cm). Mit 0.3/3.0 war jede enge Luecke fast maximal teuer und MPPI
+      # brach ab ("Optimizer fail").
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.3
+        cost_scaling_factor: 20.0
+        # 0.12 statt 0.10: Nav2 rechnet aus robot_radius + footprint_padding einen inscribed
+        # radius von 0.108 und warnte bei 0.10 ("inflation radius smaller than inscribed").
+        # Sperrt nicht mehr als vorher, die Zellen 0.108-0.12 bekommen nur kleine Kosten.
+        inflation_radius: 0.12
 
 local_costmap:
   local_costmap:
@@ -409,11 +436,13 @@ local_costmap:
       # die guenstigste Stelle; deshalb haengt der Wert nicht an der Spurbreite.
       # Muss groesser bleiben als der Umkreis des Footprints (0.122 m plus Nav2s
       # footprint_padding, Standard 0.01), sonst prueft MPPI den Footprint nicht
-      # mehr rechtzeitig. Gewaehlt, nicht vermessen.
+      # mehr rechtzeitig. 2026-11-05: 0.2/3.0 -> 0.13/20. Mit 0.2/3.0 kostete die ganze
+      # 20-cm-Spur ~200 (Mitte 252*e^(-3*0.063)), MPPI traute sich kaum hinein; mit 0.13/20
+      # Mitte ~70, nach aussen steil steigend.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.2
+        cost_scaling_factor: 20.0
+        inflation_radius: 0.13
 
 lifecycle_manager_navigation:
   ros__parameters:
