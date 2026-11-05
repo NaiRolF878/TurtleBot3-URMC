@@ -2,7 +2,8 @@
 
 Ein:  /avoid/zones (AvoidZones), /detect/sign, /control/tunnel_request, /detect/lines_lost,
       /tunnel/outside
-Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String)
+Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
+      /control/obstacle_enabled (Bool, fuer den Offset in control_driving)
 Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier.
 """
 import time
@@ -59,8 +60,8 @@ class switch_control(Node):
         self.declare_parameter('takeover_release_distance', Parameter.Type.DOUBLE, frange(0.05, 5.0))
         self.declare_parameter('takeover_release_debounce', Parameter.Type.DOUBLE, frange(0.0, 10.0))
         # Obstacle ueberhaupt erlauben (rqt-Haekchen, Taste O im Not-Aus). follow_lane.sh setzt
-        # false: dort laeuft kein avoid_node. Abschalten in Obstacle -> Lane. Der Offset im
-        # Lane-Modus bleibt davon unberuehrt.
+        # false: dort laeuft kein avoid_node. Abschalten in Obstacle -> Lane, und control_driving
+        # rechnet keinen Offset mehr: nur noch Spurfolge.
         self.declare_parameter('obstacle_enabled', Parameter.Type.BOOL)
         self._param_names = ['takeover_distance', 'takeover_release_distance',
                              'takeover_release_debounce', 'obstacle_enabled']
@@ -82,6 +83,7 @@ class switch_control(Node):
         # --- Publisher ---
         self.pub_control_mode = self.create_publisher(UInt8, '/control/mode', 1)
         self.pub_tunnel_source = self.create_publisher(String, '/control/tunnel_source', 1)
+        self.pub_obstacle_enabled = self.create_publisher(Bool, '/control/obstacle_enabled', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(MODE_PUBLISH_PERIOD_S, self.cb_timer)
@@ -159,6 +161,9 @@ class switch_control(Node):
     def _publish_mode(self):
         self.pub_control_mode.publish(UInt8(data=self.control_mode.value))
         self.pub_tunnel_source.publish(String(data=self._tunnel_source))
+        # Direkt vom Parameter: rqt und Taste O setzen ihn, auch wenn kein /avoid/zones kommt.
+        self.pub_obstacle_enabled.publish(
+            Bool(data=bool(self.get_parameter('obstacle_enabled').value)))
 
     def _enter_tunnel(self, source):
         if self.control_mode in TUNNEL_MODES:

@@ -1,9 +1,10 @@
 """Einzige Quelle fuer Fahrbefehle: waehlt je nach /control/mode den Regler.
 
 Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /avoid/zones (AvoidZones),
-      /nav2/cmd_vel (Twist)
+      /control/obstacle_enabled (Bool), /nav2/cmd_vel (Twist)
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel
-Lane: PID auf Spurfehler + Ausweich-Offset. TunnelEntry: PID ohne Offset. Obstacle:
+Lane: PID auf Spurfehler + Ausweich-Offset (nur mit obstacle_enabled). TunnelEntry: PID ohne
+Offset. Obstacle:
 Ausweichmanoever aus /avoid/zones. Tunnel: /nav2/cmd_vel. Obstacle und Tunnel auf die
 Radgrenze skaliert.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
@@ -14,7 +15,7 @@ from follow_lane_msg.msg import AvoidZones
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from std_msgs.msg import Float64, UInt8
+from std_msgs.msg import Bool, Float64, UInt8
 
 from Follow_Lane.src.common import (
     ControlType, control_mode_from_msg, frange, read_params, require_params, run_node)
@@ -93,6 +94,8 @@ class control_driving(Node):
             Float64, '/detect/lane', self.cb_lane_error, 1)
         self.sub_avoid_zones = self.create_subscription(
             AvoidZones, '/avoid/zones', self.cb_avoid_zones, 1)
+        self.sub_obstacle_enabled = self.create_subscription(
+            Bool, '/control/obstacle_enabled', self.cb_obstacle_enabled, 1)
         self.sub_nav2_cmd_vel = self.create_subscription(
             Twist, '/nav2/cmd_vel', self.cb_nav2_cmd_vel, 1)
 
@@ -112,6 +115,8 @@ class control_driving(Node):
         self._zones = None
         self._zones_time = None
         self._avoid_time = None
+        # False bis zur ersten Meldung von switch_control: im Zweifel reine Spurfolge.
+        self._obstacle_enabled = False
         self._reset_pid()
 
         self.get_logger().info('Started control_driving Node.')
@@ -161,6 +166,9 @@ class control_driving(Node):
         offset = self._avoid_offset(now) if self.control_mode == ControlType.Lane else 0.0
         self.pub_cmd_vel.publish(self._pid(msg.data + offset))
         self._applied_offset = offset
+
+    def cb_obstacle_enabled(self, msg):
+        self._obstacle_enabled = msg.data
 
     def cb_avoid_zones(self, msg):
         now = time.monotonic()
@@ -217,8 +225,8 @@ class control_driving(Node):
 
     def _avoid_offset(self, now):
         """Offset von avoid_node, 0.0 wenn veraltet: faellt avoid_node aus, faehrt der
-        PID reine Spurfolge statt dauerhaft schief."""
-        if not self._fresh(self._zones_time, now, AVOID_TIMEOUT):
+        PID reine Spurfolge statt dauerhaft schief. 0.0 auch mit obstacle_enabled false."""
+        if not self._obstacle_enabled or not self._fresh(self._zones_time, now, AVOID_TIMEOUT):
             return 0.0
         return float(self._zones.offset)
 

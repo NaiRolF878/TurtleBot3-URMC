@@ -86,10 +86,12 @@ springt der Modus an der Schwelle zwischen PID und Ausweichmanoever.
 Bleibt `/avoid/zones` im Obstacle-Modus laenger als `AVOID_TIMEOUT` aus, sendet
 control_driving Null.
 
-`obstacle_enabled` (switch_control, Taste O im Not-Aus, Haekchen in rqt) schaltet die
-Uebernahme ab: kein Wechsel nach Obstacle, aus Obstacle sofort zurueck zu Lane. Der Offset
-im Lane-Modus bleibt. `nav2_obstacle.launch.py` startet mit `true`, `follow_lane.launch.py`
-mit `false` (dort laeuft kein avoid_node).
+`obstacle_enabled` (switch_control, Taste O im Not-Aus, Haekchen in rqt) schaltet das
+ganze Ausweichen ab: kein Wechsel nach Obstacle, aus Obstacle sofort zurueck zu Lane, und
+kein Offset im Lane-Modus. Der Bot faehrt dann nur Spurfolge. switch_control meldet den
+Wert auf `/control/obstacle_enabled`, control_driving rechnet den Offset nur bei `true`.
+`nav2_obstacle.launch.py` startet mit `true`, `follow_lane.launch.py` mit `false` (dort
+laeuft kein avoid_node).
 
 ## Diagnose
 

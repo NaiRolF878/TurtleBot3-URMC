@@ -18,8 +18,8 @@ Gemeinsame Dateien mit Aenderungen (hier entstehen beim Merge Konflikte):
 
 | Datei | Abweichung |
 |-------|------------|
-| `src/switch_control.py` | Lane <-> Obstacle ueber `/avoid/zones` mit Hysterese statt LiDAR-Kegel + Linienfilter; `takeover_*` ohne Code-Default; `obstacle_enabled` wirkt auf diese Uebernahme |
-| `src/control_driving.py` | Lane: PID + Offset; Obstacle: Ausweichmanoever; TunnelEntry: PID ohne Offset; Nav2 nur im Tunnel (`NAV2_MODES`); `avoid_*` ohne Code-Default, `AVOID_TIMEOUT` |
+| `src/switch_control.py` | Lane <-> Obstacle ueber `/avoid/zones` mit Hysterese statt LiDAR-Kegel + Linienfilter; `takeover_*` ohne Code-Default; `obstacle_enabled` wirkt auf diese Uebernahme und wird auf `/control/obstacle_enabled` gemeldet |
+| `src/control_driving.py` | Lane: PID + Offset; Obstacle: Ausweichmanoever; TunnelEntry: PID ohne Offset; Nav2 nur im Tunnel (`NAV2_MODES`); `avoid_*` ohne Code-Default, `AVOID_TIMEOUT`; Offset nur mit `/control/obstacle_enabled` |
 | `src/nav2_goal_publisher.py` | plant nie (`PLAN_MODES` leer), Nav2 nur im Tunnel; Docstring, Kommentare |
 | `src/lane_costmap_node.py` | keine Spurmitte (`CENTER_PATH_MODES` leer), Docstring |
 | `src/debug_view.py` | Anzeige der Fahrquelle je Modus (`MODE_SOURCE`) |
