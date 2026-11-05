@@ -38,8 +38,11 @@ BLOCKED = (40, 40, 220)       # 99 inscribed / 100 lethal: Bot-Umriss wuerde kol
 LANE_YELLOW = (0, 230, 255)
 LANE_WHITE = (255, 255, 255)
 ROBOT = (255, 60, 0)
-HEADING = (200, 0, 200)
-PATH = (255, 255, 0)
+HEADING = (20, 20, 20)        # schwarz
+# Magenta mit dunklem Rand (OUTLINE): hebt sich von gruen, rot und grau ab. Vorher cyan,
+# auf gruen kaum lesbar.
+PATH = (255, 0, 255)
+OUTLINE = (30, 30, 30)
 WALL = (0, 140, 255)
 SCAN = (255, 190, 120)
 
@@ -95,8 +98,8 @@ class nav2_view(Node):
         rot    nicht befahrbar (Hindernis, Spurwand, Sicherheitsabstand fuer den Bot-Umriss)
         grau   noch nicht gescannt / unbekannt
         gelb / weiss  erkannte Spurlinien (/detect/lane_mask), nicht im Tunnel
-        blau   Umriss des Bots (published_footprint der local_costmap), magenta Fahrtrichtung
-        cyan   Pfad, dem Nav2 gerade folgt, mit Ziel (X); nur waehrend einer Fahrt
+        blau   Umriss des Bots (published_footprint der local_costmap), schwarz Fahrtrichtung
+        magenta Pfad, dem Nav2 gerade folgt, mit Ziel (X); nur waehrend einer Fahrt
         orange Eingangssperre     hellblau LiDAR-Punkte
 
     Oben eine Statuszeile: Modus, was nav2_goal_publisher gerade tut, und die letzte
@@ -353,8 +356,10 @@ class nav2_view(Node):
         if path.header.frame_id != ODOM_FRAME:
             return
         line = np.array([px(p.pose.position.x, p.pose.position.y) for p in path.poses], np.int32)
+        cv2.polylines(body, [line], False, OUTLINE, 5, cv2.LINE_AA)
         cv2.polylines(body, [line], False, PATH, 2, cv2.LINE_AA)
         gx, gy = line[-1]
+        cv2.drawMarker(body, (int(gx), int(gy)), OUTLINE, cv2.MARKER_TILTED_CROSS, 20, 5)
         cv2.drawMarker(body, (int(gx), int(gy)), PATH, cv2.MARKER_TILTED_CROSS, 18, 2)
 
     def draw_robot(self, body, px):
@@ -409,7 +414,7 @@ class nav2_view(Node):
         x = 8
         for col, text in ((FREE, 'befahrbar'), (BLOCKED, 'blockiert'), (UNKNOWN, 'unbekannt'),
                           (LANE_YELLOW, 'gelb'), (LANE_WHITE, 'weiss'), (PATH, 'Pfad'),
-                          (ROBOT, 'Bot')):
+                          (ROBOT, 'Bot'), (WALL, 'Sperre')):
             cv2.rectangle(legend, (x, 7), (x + 12, 19), col, -1)
             cv2.putText(legend, text, (x + 16, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
                         (220, 220, 220), 1, cv2.LINE_AA)

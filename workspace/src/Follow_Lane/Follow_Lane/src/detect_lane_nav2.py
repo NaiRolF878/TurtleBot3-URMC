@@ -35,10 +35,12 @@ LANE_MASK_STRIDE = 2
 LINE_MAX_WIDTH_CM = 8.0
 # Reste kleiner als das (cm^2) nach dem Filtern sind Rauschen.
 LINE_MIN_AREA_CM2 = 3.0
-# Eigener Bot vorn im Bild (Halter/Stuetzkugel, blankes Metall wirkt weiss): Bereich bis
-# SELF_MASK_X_CM vor der Radachse und +-SELF_MASK_Y_CM ausblenden.
-SELF_MASK_X_CM = 9.0
-SELF_MASK_Y_CM = 4.0
+# Eigener Bot vorn im Bild (gruener Magnet, Halter/Stuetzkugel, blankes Metall wirkt weiss):
+# Bereich bis SELF_MASK_X_CM vor der Radachse und +-SELF_MASK_Y_CM in BEIDEN Farbmasken
+# schwarz (self_mask), dort sieht man nie Fahrbahn. Magnet laut Debugbild bis ~10,5 cm vor der
+# Achse und +-4,5 cm (docs/images/Debug View/image_magnet.png; vorher 9 x 4 und nur Costmap).
+SELF_MASK_X_CM = 11.0
+SELF_MASK_Y_CM = 5.0
 # Linien-Tracking: hoechstens so weit (cm) darf sich eine Linie von Bild zu Bild bewegen.
 LINE_MAX_JUMP_CM = 5.0
 # So lange (s) wird die letzte Position einer verlorenen Linie gehalten.
@@ -175,6 +177,10 @@ class detect_lane(Node):
         kernel = np.ones((ERODE_KERNEL, ERODE_KERNEL), np.uint8)
         mask_yellow = cv2.erode(mask_yellow, kernel, iterations=1)
         mask_white = cv2.erode(mask_white, kernel, iterations=1)
+        # Eigenen Bot (Magnet) in beiden Masken schwarz: gilt damit fuer PID, Kreuzung,
+        # Linienende (TunnelEntry), Costmap und das Masken-Debugbild.
+        self.self_mask(mask_yellow)
+        self.self_mask(mask_white)
         # Formfilter (shape_filter) bewusst NICHT hier: er stanzt runde Loecher in echte
         # Linien, wo sie in der BEV breiter als LINE_MAX_WIDTH_CM wirken (Querlinien sind in
         # Fahrtrichtung verschmiert, Abzweige). Er wirkt nur auf die Costmap im Obstacle-Modus
@@ -447,21 +453,26 @@ class detect_lane(Node):
         corners = [c for _, cs in corners_per_poly for c in cs]
         return polies, horizontal, vertical, corners, intersection_corners
 
-    def shape_filter(self, mask):
-        """Nur Linienfoermiges behalten: eigenen Bot ausblenden, zu dicke Flaechen und
-        kleine Reste entfernen. Ohne bev.yaml (kein Massstab) unveraendert."""
+    def self_mask(self, mask):
+        """Eigenen Bot (Magnet) in der Maske schwarz setzen, in place: Zeilen mit
+        X < SELF_MASK_X_CM, Spalten mit |Y| < SELF_MASK_Y_CM. Ohne bev.yaml unveraendert."""
         b = self._bev
         if b is None or mask.shape[:2] != (b['height'], b['width']):
-            return mask
-        px_per_cm = 0.01 / b['res']
-        mask = mask.copy()
-
-        # 1. Eigener Bot: Zeilen mit X < SELF_MASK_X_CM, Spalten mit |Y| < SELF_MASK_Y_CM
+            return
         if SELF_MASK_X_CM > 0 and SELF_MASK_Y_CM > 0:
             v0 = int((b['x_max'] - SELF_MASK_X_CM / 100.0) / b['res'])
             u0 = int((b['y_half'] - SELF_MASK_Y_CM / 100.0) / b['res'])
             u1 = int(np.ceil((b['y_half'] + SELF_MASK_Y_CM / 100.0) / b['res']))
             mask[max(0, v0):, max(0, u0):min(mask.shape[1], u1)] = 0
+
+    def shape_filter(self, mask):
+        """Nur Linienfoermiges behalten: zu dicke Flaechen und kleine Reste entfernen (der
+        eigene Bot ist schon in find_lane per self_mask raus). Ohne bev.yaml unveraendert."""
+        b = self._bev
+        if b is None or mask.shape[:2] != (b['height'], b['width']):
+            return mask
+        px_per_cm = 0.01 / b['res']
+        mask = mask.copy()
 
         # 2. Dicke Flaechen: Mittelpunkte, um die ein Kreis mit Durchmesser LINE_MAX_WIDTH_CM
         #    ganz in die Maske passt (Abstand zum Rand > r), und alles bis 1,5 r darum
