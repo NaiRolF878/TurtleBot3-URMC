@@ -21,6 +21,20 @@ RUN apt-get update && apt-get install -y \
     ros-humble-nav2-bringup \
     && rm -rf /var/lib/apt/lists/*
 
+# Neuere diagnostic-updater-Version: mit der aus dem Basis-Image (4.0.6) startet der
+# Nav2-lifecycle_manager nicht (exit 127, docs/MEMORY.md 2026-10-23).
+RUN apt-get update && apt-get install -y \
+    ros-humble-diagnostic-updater \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# TensorRT fuer YOLO-Modelle (.engine). Laeuft nur mit NVIDIA-GPU im Container
+# (hostRequirements.gpu in devcontainer.json); ohne GPU geht der Import, das Ausfuehren nicht.
+# Version fest: .engine-Dateien laufen nur mit der TensorRT-Version, mit der sie gebaut wurden.
+RUN python3 -m pip install --no-cache-dir tensorrt==10.15.1.29
+# CUDA-Runtime fuer Python (GPU-Speicher/Kopien fuer TensorRT, Follow_Lane/src/yolo_trt.py).
+RUN python3 -m pip install --no-cache-dir cuda-python==13.0.3
+
 ENV TURTLEBOT3_MODEL=burger
 ENV ROS_DOMAIN_ID=33
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp

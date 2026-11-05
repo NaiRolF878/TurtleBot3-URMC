@@ -42,6 +42,7 @@ setup(
             'debug_view           = Follow_Lane.src.debug_view:main',
             'detect_lane_nav2     = Follow_Lane.src.detect_lane_nav2:main',
             'ingress_node         = Follow_Lane.src.ingress_node:main',
+            'image_recorder       = Follow_Lane.src.image_recorder:main',
             'ingress_node_nav2    = Follow_Lane.src.ingress_node_nav2:main',
             'keepout_zone_node    = Follow_Lane.src.keepout_zone_node:main',
             'lane_costmap_node    = Follow_Lane.src.lane_costmap_node:main',

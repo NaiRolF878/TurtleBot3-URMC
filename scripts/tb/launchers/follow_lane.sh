@@ -6,11 +6,16 @@
 # Der Bot faehrt NICHT von selbst: erst LEERTASTE in diesem Terminal gibt die Fahrt frei,
 # nochmal Leertaste = STOPP. Alternativ rqt_reconfigure -> Node notaus -> Haekchen "drive".
 # q oder Strg+C beendet den Not-Aus (sendet Stopp) und danach die ganze Pipeline.
+#
+# FOLLOW_LANE_LAUNCH=<datei.launch.py> startet eine andere Launch-Datei mit demselben Ablauf
+# (genutzt von follow_lane_record.sh).
+LAUNCH_FILE="${FOLLOW_LANE_LAUNCH:-follow_lane.launch.py}"
+LOG_NAME="${LAUNCH_FILE%.launch.py}"
 
 # Laeuft schon eine Pipeline (z.B. in einem anderen Terminal)? Zwei gleichzeitig senden auf
 # dieselben Topics -- flackernde Debug-Bilder, und zwei Not-Aus-Knoten, von denen einer im STOPP
 # dauernd Null an den Bot schickt.
-PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view|image_recorder)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Follow-Lane-Pipeline:"
     ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/[^/]*/##; s# --ros-args.*##'
@@ -23,7 +28,7 @@ if pgrep -f "$PATTERN" >/dev/null; then
     # Zuerst den Not-Aus (sendet beim Beenden Stopp), dann die Launch-Prozesse und Knoten
     pkill -INT -f 'lib/Follow_Lane/notaus( |$)'
     sleep 1
-    pkill -INT -f 'ros2 launch Follow_Lane (follow_lane|nav2_obstacle).launch.py'
+    pkill -INT -f 'ros2 launch Follow_Lane (follow_lane|follow_lane_record|nav2_obstacle).launch.py'
     sleep 3
     pkill -TERM -f "$PATTERN"
     sleep 1
@@ -39,15 +44,15 @@ fi
 # logs/ ist in .gitignore). logs/pipeline/follow_lane-latest.log zeigt immer auf den letzten Lauf.
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 mkdir -p "$REPO_ROOT/logs/pipeline"
-NODE_LOG="$REPO_ROOT/logs/pipeline/follow_lane-$(date +%Y%m%d-%H%M%S).log"
-ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/follow_lane-latest.log"
+NODE_LOG="$REPO_ROOT/logs/pipeline/$LOG_NAME-$(date +%Y%m%d-%H%M%S).log"
+ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/$LOG_NAME-latest.log"
 
 # set -m: Hintergrundjobs bekommen eine eigene Prozessgruppe. Ohne das IGNORIEREN sie in einem
 # Skript SIGINT (Bash-Regel fuer '&' ohne Job-Control) -- dann laesst sich die Pipeline nicht mehr
 # mit Strg+C/kill -INT beenden. So erreicht Strg+C im Terminal nur den Not-Aus im Vordergrund,
 # und cleanup() beendet die Pipeline danach gezielt.
 set -m
-ros2 launch Follow_Lane follow_lane.launch.py > "$NODE_LOG" 2>&1 &
+ros2 launch Follow_Lane "$LAUNCH_FILE" > "$NODE_LOG" 2>&1 &
 LAUNCH_PID=$!
 set +m
 cleanup() {

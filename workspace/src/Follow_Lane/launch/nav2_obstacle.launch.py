@@ -34,8 +34,10 @@ def generate_launch_description():
         DeclareLaunchArgument('image_view', default_value='true'),
 
         # Basis: ingress_node_nav2, detect_lane_nav2, control_driving, switch_control, debug_view
+        # obstacle:=true -- hier laeuft Nav2, also darf switch_control auf Obstacle schalten.
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(os.path.join(LAUNCH_DIR, 'follow_lane.launch.py'))),
+            PythonLaunchDescriptionSource(os.path.join(LAUNCH_DIR, 'follow_lane.launch.py')),
+            launch_arguments={'obstacle': 'true'}.items()),
 
         Node(
             package='Follow_Lane', executable='lane_costmap_node', name='lane_costmap_node',
@@ -91,6 +93,12 @@ def generate_launch_description():
         Node(
             package='rqt_image_view', executable='rqt_image_view', name='rqt_nav2_view',
             arguments=['/nav2/view'],
+            condition=IfCondition(LaunchConfiguration('image_view')),
+        ),
+        # Drittes Fenster: Rohbild mit Schranken-Maske und projizierter Kreuzungserkennung.
+        Node(
+            package='rqt_image_view', executable='rqt_image_view', name='rqt_debug_view_raw',
+            arguments=['/lokal/debug_view_raw'],
             condition=IfCondition(LaunchConfiguration('image_view')),
         ),
     ])

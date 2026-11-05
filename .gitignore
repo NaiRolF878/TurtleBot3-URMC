@@ -51,6 +51,9 @@ logs/
 # Vision-Datensatz von scripts/tb/dataset-capture.py
 dataset/
 
+# YOLO-Training und Gewichte (.pt/.onnx/.engine, zu gross fuers Repo) -- separat verteilen.
+Yolo/
+
 # Lokales Allerlei, das nicht zum eigentlichen Projekt gehoert (z.B. Bot-Melodien) -- nicht ins Repo.
 misc/
 

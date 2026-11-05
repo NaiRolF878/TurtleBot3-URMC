@@ -1,9 +1,12 @@
 """Spurerkennung auf der Vogelperspektive: Spurfehler fuer den PID und Linienpixel fuer Nav2.
+Auf dem Rohbild: Schranke (Blau-Maske) und YOLO-Objekte (TensorRT).
 
-Ein:  /lokal/bev, /control/mode
+Ein:  /lokal/bev, /lokal/raw_image, /control/mode
 Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
       /detect/lane_mask (LaneMask fuer lane_costmap_node),
-      /detect/lines_lost (Bool, nur TunnelEntry)
+      /detect/lines_lost (Bool, nur TunnelEntry),
+      /detect/barrier, /detect/barrier_pixels, /detect/barrier_debug/compressed,
+      /detect/objects (vision_msgs/Detection2DArray, Pixel im Rohbild)
 Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 """
 import array
@@ -16,11 +19,13 @@ import numpy as np
 
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Point32, Polygon
+from geometry_msgs.msg import Point32, Polygon, PolygonStamped
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.time import Time
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Bool, Float64, UInt8
+from std_msgs.msg import Bool, Float64, Int32, UInt8
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
 from Follow_Lane.src import bev_geometry
@@ -70,6 +75,16 @@ CLOSE_KERNEL = 11
 MAX_CORNER_DX_M = 0.06
 # So viele der letzten Bilder muessen die Kreuzung zeigen, bevor sie als erkannt gilt.
 INTERSECTION_CONFIRM = (3, 5)
+# Schranken-Debugbild (Rohbild) hoechstens so oft (s).
+BARRIER_DEBUG_PERIOD_S = 0.1
+# YOLO (Schilder, andere Bots, Startlinie) auf dem Rohbild: TensorRT-Engine relativ zum
+# Repo-Ordner (muss mit der TensorRT-Version im Container gebaut sein, siehe yolo_trt.py).
+# Ohne Engine oder GPU laeuft der Node ohne YOLO weiter.
+YOLO_ENGINE = 'Yolo/yolo26s_800/weights/best_trt10.15_fp16.engine'
+YOLO_CONF = 0.25      # Mindest-Konfidenz einer Box
+YOLO_IOU = 0.7        # Ueberlappung, ab der NMS die schwaechere Box derselben Klasse verwirft
+# Aelter (s) darf das Rohbild fuer YOLO nicht sein.
+YOLO_MAX_AGE_S = 0.5
 
 
 class detect_lane(Node):
@@ -111,8 +126,12 @@ class detect_lane(Node):
         # an, damit wechselndes Licht die festen Schwellwerte nicht verfaelscht.
         self.declare_parameter('clahe_clip_limit', Parameter.Type.DOUBLE, frange(0.1, 40.0))
         self.declare_parameter('clahe_tile_grid_size', Parameter.Type.INTEGER, irange(1, 64))
+        # Schranke: ab so vielen blauen Pixeln im Suchbereich des Rohbilds gilt sie als da.
+        # Die aktuelle Zahl steht im Debugbild, danach einstellen.
+        self.declare_parameter('thresh_blue_pixel', Parameter.Type.INTEGER, irange(0, 500000))
         self._param_names += ['detection_row_factor', 'min_lane_width',
-                              'clahe_clip_limit', 'clahe_tile_grid_size']
+                              'clahe_clip_limit', 'clahe_tile_grid_size',
+                              'thresh_blue_pixel']
         require_params(self, self._param_names)
         try:
             self._bev = bev_geometry.load_bev_spec(
@@ -127,6 +146,8 @@ class detect_lane(Node):
         # Tiefe 1: die Kamera liefert 30 Bilder/s, die Verarbeitung hier ist langsamer.
         # Mit tieferer Queue stapeln sich Frames und der Regler lenkt nach Bildern,
         # die bis zu ~330 ms alt sind. Das neueste Bild ist immer das beste.
+        self.sub_raw_image = self.create_subscription(Image, '/lokal/raw_image', self.cbGetRawImage, 1)
+
         self.sub_bev = self.create_subscription(Image, '/lokal/bev', self.cb_bev, 1)
 
         # --- Publisher ---
@@ -138,10 +159,22 @@ class detect_lane(Node):
         # vom komprimierten Debug-Bild oben, das nur zum Anschauen gedacht ist.
         self.pub_lane_mask = self.create_publisher(LaneMask, '/detect/lane_mask', 1)
         self.pub_lines_lost = self.create_publisher(Bool, '/detect/lines_lost', 1)
+        # Schranke: True = Schwelle erreicht (switch_control schaltet auf Stop), Zahl der
+        # blauen Pixel fuers Debugbild, Rohbild mit blauer Maske zum Einstellen.
+        self.pub_barrier = self.create_publisher(Bool, '/detect/barrier', 1)
+        self.pub_barrier_pixels = self.create_publisher(Int32, '/detect/barrier_pixels', 1)
+        self.pub_barrier_debug = self.create_publisher(
+            CompressedImage, '/detect/barrier_debug/compressed', 1)
+        # Kreuzungsfeld (Mitte zwischen den Ecken, BEV-Pixel), sobald bestaetigt; sonst leer.
+        self.pub_intersection = self.create_publisher(PolygonStamped, '/detect/intersection', 1)
+        # YOLO-Boxen im Rohbild (Pixel), Header = der des Rohbilds.
+        self.pub_objects = self.create_publisher(Detection2DArray, '/detect/objects', 1)
 
         # --- Zustand ---
         self.bridge = CvBridge()
         self.control_mode = None
+        self.raw_image = None    # letztes /lokal/raw_image (Schranke)
+        self._barrier_debug_time = 0.0
         self.is_running = False
         self.img_height = None   # Groesse des Bilds, pro Frame gesetzt
         self.img_width = None
@@ -151,10 +184,40 @@ class detect_lane(Node):
         self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
         self._intersection_hits = deque(maxlen=INTERSECTION_CONFIRM[1])
         self._intersection_seen = False
+        self.yolo = self.load_yolo()
+        self._yolo_times = []    # Dauer je Bild (ms) fuers gedrosselte Log
 
         self.get_logger().info('Started detect_lane Node (Nav2-Zweig).')
 
+    def load_yolo(self):
+        """YoloTRT oder None (keine Engine, keine GPU, falsche TensorRT-Version)."""
+        # Repo-Ordner: vom Install-Ordner des Pakets aufwaerts, bis Yolo/ auftaucht.
+        path = None
+        d = get_package_share_directory('Follow_Lane')
+        while d != os.path.dirname(d):
+            if os.path.isfile(os.path.join(d, YOLO_ENGINE)):
+                path = os.path.join(d, YOLO_ENGINE)
+                break
+            d = os.path.dirname(d)
+        if path is None:
+            self.get_logger().warn(f'{YOLO_ENGINE} nicht gefunden -- YOLO aus.')
+            return None
+        try:
+            from Follow_Lane.src.yolo_trt import YoloTRT
+            yolo = YoloTRT(path, conf=YOLO_CONF, iou=YOLO_IOU)
+        except Exception as e:  # noqa: BLE001 -- ohne GPU/TensorRT laeuft der Rest weiter
+            self.get_logger().warn(f'YOLO nicht ladbar ({e}) -- YOLO aus.')
+            return None
+        self.get_logger().info(f'YOLO geladen: {path} ({len(yolo.names)} Klassen, '
+                               f'Eingang {yolo.in_w}x{yolo.in_h}).')
+        return yolo
+
     # --- Callbacks ---
+
+    def cbGetRawImage(self, img):
+        self.raw_image = img
+        self.detectBarrier()
+        self.vision_detection()
 
     def cb_control_mode(self, msg):
         new_mode = control_mode_from_msg(self, msg)
@@ -411,10 +474,23 @@ class detect_lane(Node):
                 stop_line = (corners['links'], corners['rechts'])
         self._report_intersection(stop_line, corners)
 
-        # Debug: Haltelinie und kleine Rauten an den Ecken als Polygone (rot).
+        # Debug: Haltelinie, Kreuzungsflaechen und kleine Rauten an den Ecken als
+        # Polygone (rot).
         marks = []
+        center = None
         if stop_line is not None:
             marks.append(np.array(stop_line, np.int32).reshape(-1, 1, 2))
+            areas = self.intersection_areas(stop_line, full)
+            center = areas['mitte']
+            for area in areas.values():
+                marks.append(area.reshape(-1, 1, 2))
+        # Bestaetigte Kreuzung (Mitte, BEV-Pixel) fuers Rohbild-Debug; leer = keine.
+        out = PolygonStamped()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.header.frame_id = 'bev'
+        if center is not None and self._intersection_seen:
+            out.polygon.points = [Point32(x=float(x), y=float(y), z=0.0) for x, y in center]
+        self.pub_intersection.publish(out)
         for c in corners.values():
             x, y = int(c[0]), int(c[1])
             marks.append(np.array([[x, y - 8], [x + 8, y], [x, y + 8], [x - 8, y]],
@@ -492,6 +568,61 @@ class detect_lane(Node):
         t = ((b1[0] - a1[0]) * d2[1] - (b1[1] - a1[1]) * d2[0]) / den
         return a1 + t * d1
 
+    def intersection_areas(self, stop_line, mask):
+        bot_l, bot_r = (np.asarray(p, float) for p in stop_line)
+        width = bot_r[0] - bot_l[0]
+        y_near = min(bot_l[1], bot_r[1])
+        y_top = self.get_y_for_driving(mask, bot_l[0] + 10, bot_r[0] - 10, y_near, None)
+        if y_top is None:
+            y_top = max(0.0, y_near - width)
+        top_l, top_r = np.array([bot_l[0], y_top]), np.array([bot_r[0], y_top])
+        arm = np.array([width, 0.0])
+        return {
+            'mitte': np.array([top_l, top_r, bot_r, bot_l], np.int32),
+            'links': np.array([top_l - arm, top_l, bot_l, bot_l - arm], np.int32),
+            'rechts': np.array([top_r, top_r + arm, bot_r + arm, bot_r], np.int32),
+        }
+
+    def get_y_for_driving(self, mask, x_from, x_to, y_start, no_lane_value, min_gap=5):
+        """Gegenstueck zu get_x_for_driving, aber spaltenweise: sucht in den Spalten
+        x_from..x_to von y_start aus NACH OBEN die naechste waagerechte Kante
+        (z.B. die querliegende Linie am Ende einer ┴-Kreuzung).
+        min_gap: Zeilen direkt ueber y_start ignorieren, damit nicht die Kante
+        an der Ecke selbst gefunden wird. (aus detect_lane.py, Kalibrierung-Tests)"""
+        grad = cv2.Sobel(mask, cv2.CV_16S, 0, 1, ksize=3, scale=1, delta=0,
+                         borderType=cv2.BORDER_DEFAULT)
+        th1 = cv2.convertScaleAbs(grad) > 127
+
+        y_end = int(y_start) - min_gap
+        if y_end <= 0:
+            return no_lane_value
+
+        a = []
+        for col in range(max(0, int(x_from)), min(mask.shape[1], int(x_to))):
+            hits = np.flatnonzero(th1[:y_end, col])
+            if hits.size:
+                a.append(hits[-1])      # groesstes y oberhalb = naechste Kante ueber der Ecke
+        if len(a) > 10:
+            return int(np.median(a))
+        return no_lane_value
+
+    def get_x_beside(self, mask, y, x_start, direction, min_gap=5):
+        """get_x_for_driving, aber nur auf einer Seite von x_start: direction=-1 sucht
+        links davon die naechste Kante, +1 rechts davon, None ohne Kante. Noetig bei der
+        kombinierten Maske, sonst findet die Suche den Streifen der Ecke selbst.
+        (aus detect_lane.py, Kalibrierung-Tests; noch ungenutzt)"""
+        x_start = int(x_start)
+        if direction < 0:
+            x_end = x_start - min_gap
+            if x_end <= 0:
+                return None
+            return self.get_x_for_driving(mask[:, :x_end], int(y), left_line=True)
+        x_begin = x_start + min_gap
+        if x_begin >= mask.shape[1]:
+            return None
+        x = self.get_x_for_driving(mask[:, x_begin:], int(y), left_line=False)
+        return None if x is None else x + x_begin
+
     def _res(self):
         return self._bev['res'] if self._bev is not None else 0.00125
 
@@ -568,6 +699,64 @@ class detect_lane(Node):
             (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
         return mask_yellow, mask_white
 
+    def detectBarrier(self):
+        if self.raw_image is None or self.control_mode in (None, ControlType.Tunnel):
+            return None
+
+        try:
+            # Auch hier: das Rohbild kann vor dem ersten BEV-Bild (find_lane) kommen.
+            read_params(self, self._param_names)
+            cv_image = self.bridge.imgmsg_to_cv2(self.raw_image, desired_encoding='bgr8')
+            img_height, img_width = cv_image.shape[:2]
+            x0, y0 = int(img_width * 0.33), int(img_height * 0.10)
+            x1, y1 = int(img_width * 0.66), int(img_height * 0.40)
+            roi = cv_image[y0:y1, x0:x1]
+            mask_blue = self.blue_mask(roi)
+            num_blue_pixel = cv2.countNonZero(mask_blue)
+        except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
+            self.get_logger().error(f'Schrankenerkennung fehlgeschlagen: {e}',
+                                    throttle_duration_sec=5.0)
+            return None
+
+        barrier = num_blue_pixel >= self.thresh_blue_pixel
+        self.pub_barrier.publish(Bool(data=barrier))
+        self.pub_barrier_pixels.publish(Int32(data=num_blue_pixel))
+        self.publish_barrier_debug(cv_image, mask_blue, (x0, y0, x1, y1), num_blue_pixel,
+                                   barrier)
+        return barrier
+
+    def publish_barrier_debug(self, img, mask_blue, roi, num_blue_pixel, barrier):
+        """Rohbild mit blauer Maske im Suchbereich, Rahmen und Pixelzahl. Nur wenn es
+        jemand anschaut."""
+        if self.pub_barrier_debug.get_subscription_count() == 0:
+            return
+        # Hoechstens BARRIER_DEBUG_PERIOD_S: das Rohbild kommt 30x/s, JPEG kostet Zeit.
+        now = time.monotonic()
+        if now - self._barrier_debug_time < BARRIER_DEBUG_PERIOD_S:
+            return
+        self._barrier_debug_time = now
+        x0, y0, x1, y1 = roi
+        view = img.copy()
+        area = view[y0:y1, x0:x1]
+        hit = mask_blue > 0
+        area[hit] = (0.4 * area[hit] + 0.6 * np.array([255, 0, 0])).astype(np.uint8)
+        # Suchbereich blau umrandet, Text rot sobald die Schwelle erreicht ist.
+        cv2.rectangle(view, (x0, y0), (x1 - 1, y1 - 1), (255, 0, 0), 2)
+        color = (0, 0, 255) if barrier else (0, 255, 0)
+        text = f'Blau: {num_blue_pixel} / {self.thresh_blue_pixel}'
+        if barrier:
+            text += '  SCHRANKE'
+        cv2.putText(view, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+        success, encoded = cv2.imencode('.jpg', view)
+        if not success:
+            return
+        msg = CompressedImage()
+        msg.header = self.raw_image.header
+        msg.format = 'jpeg'
+        msg.data = array.array('B', encoded.tobytes())
+        self.pub_barrier_debug.publish(msg)
+
     def blue_mask(self, img):
         """Blau-Maske aus dem BGR-Bild (Schranke): CLAHE auf L, dann Schwellen in LAB."""
         lab = self.apply_clahe(img)
@@ -582,6 +771,49 @@ class detect_lane(Node):
         clahe = cv2.createCLAHE(clipLimit=float(self.clahe_clip_limit),
                                 tileGridSize=(tile_size, tile_size))
         return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
+
+    def vision_detection(self):
+        """YOLO auf dem letzten Rohbild, Boxen auf /detect/objects. Im Tunnel aus
+        (Reglement), wie die Schranke. Gibt die Liste (x0, y0, x1, y1, score, class_id,
+        name) zurueck, None ohne Bild/YOLO."""
+        if self.yolo is None or self.raw_image is None \
+                or self.control_mode in (None, ControlType.Tunnel):
+            return None
+
+        age = (self.get_clock().now() - Time.from_msg(self.raw_image.header.stamp)).nanoseconds / 1e9
+        if age > YOLO_MAX_AGE_S:
+            return None
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(self.raw_image, desired_encoding='bgr8')
+            t0 = time.monotonic()
+            detections = self.yolo.detect(cv_image)
+            self._yolo_times.append((time.monotonic() - t0) * 1000.0)
+        except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
+            self.get_logger().error(f'YOLO fehlgeschlagen: {e}', throttle_duration_sec=5.0)
+            return None
+        if len(self._yolo_times) >= 100:
+            self.get_logger().info(
+                f'YOLO: {np.mean(self._yolo_times):.1f} ms/Bild (Mittel), '
+                f'max {np.max(self._yolo_times):.1f} ms')
+            self._yolo_times = []
+
+        out = Detection2DArray()
+        out.header = self.raw_image.header
+        for x0, y0, x1, y1, score, _, name in detections:
+            det = Detection2D()
+            det.header = self.raw_image.header
+            det.bbox.center.position.x = (x0 + x1) / 2.0
+            det.bbox.center.position.y = (y0 + y1) / 2.0
+            det.bbox.size_x = x1 - x0
+            det.bbox.size_y = y1 - y0
+            hyp = ObjectHypothesisWithPose()
+            hyp.hypothesis.class_id = name
+            hyp.hypothesis.score = score
+            det.results.append(hyp)
+            out.detections.append(det)
+        self.pub_objects.publish(out)
+        return detections
+
 
     # Linien-Tracking entsprechend zur Duckiebot Challenge (DuckieRace,
     # intersection_handling) umgebaut: naechste Kante zur letzten Position, verlorene
@@ -649,6 +881,8 @@ class detect_lane(Node):
     # --- Beenden ---
 
     def shut_down(self):
+        if self.yolo is not None:
+            self.yolo.close()
         self.get_logger().info('Shutting down detect_lane Node (Nav2-Zweig).')
 
 

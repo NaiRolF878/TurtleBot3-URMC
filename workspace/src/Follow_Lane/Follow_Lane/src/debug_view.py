@@ -10,18 +10,22 @@ import os
 
 import cv2
 import numpy as np
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Point, Twist
+from geometry_msgs.msg import Point, PolygonStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import BatteryState, Image, PointCloud2
-from std_msgs.msg import Bool, String, UInt8
+from sensor_msgs.msg import BatteryState, CompressedImage, Image, PointCloud2
+from std_msgs.msg import Bool, Int32, String, UInt8
+from vision_msgs.msg import Detection2DArray
 
 from follow_lane_msg.msg import FollowLaneDebug
+from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import ControlType, control_mode_from_msg, run_node
+from Follow_Lane.src.ingress_node_nav2 import CALIBRATION, EXTRINSICS, FISHEYE_BALANCE
 
 BATT_FULL_V = 12.6    # 4.2 V/Zelle
 BATT_EMPTY_V = 11.0
@@ -53,6 +57,21 @@ MODE_COLOR = {
 }
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
+
+# YOLO-Boxen nur zeichnen, wenn sie hoechstens so viel (s) vom Rohbild abweichen.
+OBJECTS_MAX_DT_S = 0.3
+# Farbe (BGR) je YOLO-Klasse, unbekannte grau.
+OBJECT_COLOR = {
+    'tb':         (255, 80, 0),      # blau
+    'park':       (255, 200, 0),
+    'tunnel':     (200, 120, 255),
+    'stop':       (40, 40, 230),     # rot
+    'left':       (0, 200, 255),
+    'right':      (0, 140, 255),
+    'work':       (0, 255, 255),     # gelb
+    'start_line': (60, 255, 180),
+    'no_entry':   (120, 0, 200),
+}
 
 # Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
 CLICK_TOPIC = '/lokal/debug_view_mouse_left'
@@ -96,9 +115,23 @@ class debug_view(Node):
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         self.sub_click = self.create_subscription(
             Point, CLICK_TOPIC, self.cb_click, 1)
+        # Schranke: Zahl der blauen Pixel im Suchbereich und ob die Schwelle erreicht ist.
+        self.sub_barrier_pixels = self.create_subscription(
+            Int32, '/detect/barrier_pixels', self.cb_barrier_pixels, 1)
+        self.sub_barrier = self.create_subscription(Bool, '/detect/barrier', self.cb_barrier, 1)
+        # Rohbild-Ansicht: Schranken-Debugbild (Rohbild mit blauer Maske) als Grundlage, dazu
+        # die Kreuzungserkennung aus der BEV ins Rohbild projiziert.
+        self.sub_barrier_debug = self.create_subscription(
+            CompressedImage, '/detect/barrier_debug/compressed', self.cb_barrier_debug, 1)
+        self.sub_intersection = self.create_subscription(
+            PolygonStamped, '/detect/intersection', self.cb_intersection, 1)
+        # YOLO-Boxen (Pixel im Rohbild) fuer die Rohbild-Ansicht.
+        self.sub_objects = self.create_subscription(
+            Detection2DArray, '/detect/objects', self.cb_objects, 1)
 
         # --- Publisher ---
         self.pub_debug_image = self.create_publisher(Image, '/lokal/debug_view', 1)
+        self.pub_debug_raw = self.create_publisher(Image, '/lokal/debug_view_raw', 1)
         self.pub_tunnel_request = self.create_publisher(Bool, '/control/tunnel_request', 1)
 
         # --- Timer ---
@@ -116,6 +149,17 @@ class debug_view(Node):
         self.battery_level = None
         self.lane_obstacle_points = 0
         self.lane_obstacle_stamp = None
+        self.barrier_pixels = None
+        self.barrier = False
+        self.intersection = None          # bestaetigtes Kreuzungsfeld (N, 2) in BEV-Pixeln
+        self.objects = None               # letztes Detection2DArray (YOLO)
+        self._bev_to_raw = None           # 3x3 BEV-Pixel -> Rohbild-Pixel (entzerrt)
+        self._bev_to_raw_size = None
+        try:
+            self._bev_spec = bev_geometry.load_bev_spec(
+                os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
+        except Exception:  # noqa: BLE001 -- ohne bev.yaml kein Abstand zur Kreuzung
+            self._bev_spec = None
         # Lage des Tunnel-Buttons im zuletzt gesendeten Bild (x0, y0, x1, y1).
         self._tunnel_button = None
         self.battery_icons = self._load_battery_icons()
@@ -144,6 +188,34 @@ class debug_view(Node):
 
     def cb_odom(self, odom):
         self.actual_v = odom.twist.twist.linear.x
+
+    def cb_barrier_pixels(self, msg):
+        self.barrier_pixels = msg.data
+
+    def cb_barrier(self, msg):
+        self.barrier = msg.data
+
+    def cb_intersection(self, msg):
+        pts = [(p.x, p.y) for p in msg.polygon.points]
+        self.intersection = np.array(pts, np.float64) if len(pts) >= 3 else None
+
+    def cb_objects(self, msg):
+        self.objects = msg
+
+    def cb_barrier_debug(self, msg):
+        if self.pub_debug_raw.get_subscription_count() == 0:
+            return
+        try:
+            raw = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:  # noqa: BLE001 -- kaputtes Einzelbild nur melden
+            self.get_logger().error(f'Rohbild-Debug nicht dekodierbar: {e}',
+                                    throttle_duration_sec=5.0)
+            return
+        self.draw_intersection_raw(raw)
+        self.draw_objects_raw(raw, msg.header.stamp)
+        out = self.bridge.cv2_to_imgmsg(self.compose(raw), encoding='bgr8')
+        out.header = msg.header
+        self.pub_debug_raw.publish(out)
 
     def cb_battery_state(self, state):
         self.battery_level = self.battery_percent(state)
@@ -182,8 +254,23 @@ class debug_view(Node):
         camera = self.camera_view()
         if camera is None:
             return
-        cam_h, cam_w = camera.shape[:2]
+        final_debug_image = self.compose(camera)
+        if self.control_mode is not None:
+            bx0, by0, bx1, by1 = TUNNEL_BUTTON
+            off_x, off_y = camera.shape[1] + PANEL_W, HEAD_H
+            self._tunnel_button = (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1)
 
+        msg = self.bridge.cv2_to_imgmsg(final_debug_image, encoding='bgr8')
+        age = self.lane_debug_age()
+        if age is not None and age <= LANE_DEBUG_STALE_S:
+            msg.header = self.follow_lane_debug.raw_image.header
+        else:
+            msg.header.stamp = self.get_clock().now().to_msg()
+        self.pub_debug_image.publish(msg)
+
+    def compose(self, camera):
+        """Kopfzeile (Datum, Akku) ueber Kamerabild und den beiden Seitenpanels."""
+        cam_h, cam_w = camera.shape[:2]
         panel_generic = self.build_generic_panel(cam_h)
         panel_mode = self.build_mode_panel(cam_h, PANEL_W)
 
@@ -195,21 +282,106 @@ class debug_view(Node):
         cv2.putText(head_panel, now.strftime('%H:%M'), (200, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2, cv2.LINE_AA)
         self.draw_battery(head_panel, total_w)
+        return np.vstack([head_panel, np.hstack([camera, panel_generic, panel_mode])])
 
-        final_debug_image = np.vstack([head_panel, np.hstack([camera, panel_generic, panel_mode])])
+    def bev_to_raw(self, shape):
+        """3x3 BEV-Pixel -> Pixel im entzerrten Rohbild dieser Groesse; None ohne
+        Kalibrierung. Dieselbe Rechnung wie ingress_node_nav2 (gleiche Dateien, balance)."""
+        h, w = shape[:2]
+        if self._bev_to_raw_size == (w, h):
+            return self._bev_to_raw
+        self._bev_to_raw_size = (w, h)
+        self._bev_to_raw = None
+        pdir = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
+        try:
+            with open(os.path.join(pdir, 'camera_info', CALIBRATION)) as f:
+                cal = yaml.safe_load(f)
+            with open(os.path.join(pdir, 'camera_info', EXTRINSICS)) as f:
+                ext = yaml.safe_load(f)
+            self._bev_spec = bev_geometry.load_bev_spec(pdir)
+        except Exception as e:  # noqa: BLE001 -- ohne Kalibrierung keine Projektion
+            self.get_logger().warn(f'Keine Kalibrierung fuers Rohbild-Debug ({e}).')
+            return None
+        K = np.array(cal['camera_matrix']['data'], np.float64).reshape(3, 3)
+        K[0] *= w / cal['image_width']
+        K[1] *= h / cal['image_height']
+        if cal.get('distortion_model', 'plumb_bob') in ('equidistant', 'fisheye'):
+            D = np.array(cal['distortion_coefficients']['data'], np.float64).reshape(4, 1)
+            K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                K, D, (w, h), np.eye(3), balance=FISHEYE_BALANCE)
+        self._bev_to_raw = bev_geometry.bev_to_image_homography(self._bev_spec, ext, K)
+        return self._bev_to_raw
 
-        if self.control_mode is not None:
-            bx0, by0, bx1, by1 = TUNNEL_BUTTON
-            off_x, off_y = cam_w + PANEL_W, HEAD_H
-            self._tunnel_button = (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1)
+    def draw_intersection_raw(self, raw):
+        """Kreuzungserkennung (Laengs-/Querkanten, Haltelinie, Ecken, Felder) und die
+        verfolgten Spurpunkte aus der BEV ins Rohbild zeichnen; bestaetigte Kreuzung mit
+        Rahmen und Abstand."""
+        M = self.bev_to_raw(raw.shape)
+        d = self.follow_lane_debug
+        if M is None or d is None or (self.lane_debug_age() or 1e9) > LANE_DEBUG_STALE_S:
+            return
 
-        msg = self.bridge.cv2_to_imgmsg(final_debug_image, encoding='bgr8')
-        age = self.lane_debug_age()
-        if age is not None and age <= LANE_DEBUG_STALE_S:
-            msg.header = self.follow_lane_debug.raw_image.header
-        else:
-            msg.header.stamp = self.get_clock().now().to_msg()
-        self.pub_debug_image.publish(msg)
+        def proj(pts):
+            pts = np.asarray(pts, np.float64).reshape(-1, 1, 2)
+            return cv2.perspectiveTransform(pts, M).reshape(-1, 2).astype(np.int32)
+
+        for poly in d.polygons:
+            pts = proj([[p.x, p.y] for p in poly.points])
+            cv2.polylines(raw, [pts], True, (0, 0, 255), 2, cv2.LINE_AA)
+        for lines, color in ((d.horizontal_lines, (144, 238, 144)),
+                             (d.vertical_lines, (240, 16, 255))):
+            for line in lines:
+                a, b = proj([[line.points[0].x, line.points[0].y],
+                             [line.points[1].x, line.points[1].y]])
+                cv2.line(raw, tuple(map(int, a)), tuple(map(int, b)), color, 3, cv2.LINE_AA)
+        for (x, y), color in (((d.center_yellow_x, d.center_yellow_y), (0, 255, 255)),
+                              ((d.center_white_x, d.center_white_y), (255, 255, 255))):
+            p = proj([[x, y]])[0]
+            cv2.circle(raw, (int(p[0]), int(p[1])), 7, color, -1, cv2.LINE_AA)
+
+        if self.intersection is not None:
+            box = proj(self.intersection)
+            x, y, bw, bh = cv2.boundingRect(box)
+            cv2.rectangle(raw, (x, y), (x + bw, y + bh), (0, 255, 0), 3)
+            dist = self.intersection_distance()
+            label = 'KREUZUNG' + ('' if dist is None else f' {dist * 100:.0f} cm')
+            cv2.putText(raw, label, (x, max(25, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 255, 0), 2, cv2.LINE_AA)
+
+    def draw_objects_raw(self, raw, stamp):
+        """YOLO-Boxen mit Klasse und Konfidenz; nur wenn sie zum Rohbild passen (Zeit)."""
+        objs = self.objects
+        if objs is None:
+            return
+        dt = abs((objs.header.stamp.sec - stamp.sec) + (objs.header.stamp.nanosec - stamp.nanosec) * 1e-9)
+        if dt > OBJECTS_MAX_DT_S:
+            return
+        h, w = raw.shape[:2]
+        for det in objs.detections:
+            if not det.results:
+                continue
+            name = det.results[0].hypothesis.class_id
+            score = det.results[0].hypothesis.score
+            cx, cy = det.bbox.center.position.x, det.bbox.center.position.y
+            x0 = int(max(0, cx - det.bbox.size_x / 2))
+            y0 = int(max(0, cy - det.bbox.size_y / 2))
+            x1 = int(min(w - 1, cx + det.bbox.size_x / 2))
+            y1 = int(min(h - 1, cy + det.bbox.size_y / 2))
+            color = OBJECT_COLOR.get(name, (160, 160, 160))
+            cv2.rectangle(raw, (x0, y0), (x1, y1), color, 2)
+            label = f'{name} {score:.2f}'
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            ty = y0 - 4 if y0 - th - 6 >= 0 else y0 + th + 4
+            cv2.rectangle(raw, (x0, ty - th - 3), (x0 + tw + 4, ty + 3), color, -1)
+            cv2.putText(raw, label, (x0 + 2, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1,
+                        cv2.LINE_AA)
+
+    def intersection_distance(self):
+        """Abstand (m) der Haltelinie (Unterkante des Kreuzungsfelds) ab Radachse."""
+        if self.intersection is None or self._bev_spec is None:
+            return None
+        v = float(self.intersection[:, 1].max())
+        return self._bev_spec['x_max'] - (v + 0.5) * self._bev_spec['res']
 
     def camera_view(self):
         """Kamerabild mit Spurmarkierungen; im Tunnel, ohne Bild oder bei veraltetem
@@ -290,6 +462,10 @@ class debug_view(Node):
         lane_error = '--' if self.follow_lane_debug is None \
             else f'{self.follow_lane_debug.lane_error:+.3f}'
         cv2.putText(panel, lane_error, (8, 315), font, 1, (80, 80, 255), 2, cv2.LINE_AA)
+        cv2.putText(panel, 'Blaue Pixel:', (8, 365), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+        blue = '--' if self.barrier_pixels is None else str(self.barrier_pixels)
+        blue_color = (80, 80, 255) if self.barrier else (255, 160, 60)
+        cv2.putText(panel, blue, (8, 400), font, 1, blue_color, 2, cv2.LINE_AA)
         return panel
 
     def build_mode_panel(self, height, width):
@@ -320,6 +496,11 @@ class debug_view(Node):
 
         self.draw_lane_obstacle_status(panel)
         self.draw_tunnel_button(panel)
+        cv2.putText(panel, 'Kreuzung:', (8, 375),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+        dist = self.intersection_distance()
+        text, ink = ('--', (120, 120, 120)) if dist is None else (f'{dist * 100:.0f} cm', (0, 255, 0))
+        cv2.putText(panel, text, (8, 410), cv2.FONT_HERSHEY_SIMPLEX, 1, ink, 2, cv2.LINE_AA)
         return panel
 
     def draw_tunnel_button(self, panel):

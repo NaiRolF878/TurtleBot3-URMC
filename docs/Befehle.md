@@ -49,6 +49,7 @@ tb             # Menü mit allen Launchern
 | Launcher | Was er macht |
 |---|---|
 | `follow_lane.sh` | komplette Spurverfolgung + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
+| `follow_lane_record.sh` | wie `follow_lane.sh`, dazu während der Fahrt jede Sekunde ein YOLO-Trainingsbild, abwechselnd Original (`_roh`) und entzerrt (`_entzerrt`), nach `dataset/fahrt_<datum>_<zeit>/` (nicht im Stand/Tunnel) |
 | `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel), RViz und Draufsicht `/nav2/view` |
 | `extrinsik_view.sh` | Kamerabild mit 10-cm-Bodengitter + Vogelperspektive, Brett wird live vermessen |
 | `rqt_debug.sh` | Bildanzeige (`/lokal/raw_image`, `/lokal/bev`, Debug-Bilder) |
@@ -64,6 +65,8 @@ Der Bot fährt **nie von selbst** los. Freigabe und Stopp, jeweils umschalten:
 - **Befehl**: `ros2 service call /notaus/set std_srvs/srv/SetBool "{data: true}"` (`false` = Stopp)
 
 **Taste L** im Terminal von `nav2_obstacle.sh`: Spurgedächtnis und beide Costmaps leeren, wenn sie nicht mehr zur Odometrie passen (Bot angehoben). Erst absetzen, dann im Stand drücken.
+
+**Taste O** im Not-Aus-Terminal: Obstacle-Modus an/aus (`obstacle_enabled` von `switch_control`, auch als Häkchen in rqt). Start: `nav2_obstacle.sh` an, `follow_lane.sh` aus. Aus heißt: kein Wechsel nach Obstacle, aus Obstacle sofort zurück zu Lane.
 
 Zustand: `ros2 topic echo /notaus/drive`. Kommt von `control_driving` 0,5 s nichts, sendet der Not-Aus selbst Stopp.
 Läuft der Not-Aus nicht, kommt **kein** Fahrbefehl zum Bot. Kette: `control_driving` → `/control/cmd_vel` → `notaus` → `/cmd_vel`;
@@ -153,3 +156,49 @@ bash scripts/tb/launchers/extrinsik_view.sh           # live prüfen
 | `ros2 topic list` fast leer | `--no-daemon` anhängen; Domain prüfen (`echo $ROS_DOMAIN_ID` muss 33 sein) |
 | OpenCR nicht gefunden (`ttyACM0`) | nach Reset liegt er auf `ttyACM1` |
 | rviz zeigt keine LIDAR-Punkte | Bot-Uhr falsch → `sync-time.sh`, danach Bringup neu starten |
+
+## GPU im Container (TensorRT / YOLO)
+
+Einmalig **auf dem Host** (nicht im Container), Ubuntu mit installiertem NVIDIA-Treiber
+(`nvidia-smi` muss auf dem Host laufen):
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+docker run --rm --gpus all ubuntu nvidia-smi     # Test: muss die GPU zeigen
+```
+
+Danach in VS Code „Dev Containers: Rebuild Container“. `devcontainer.json` fordert die GPU mit
+`hostRequirements.gpu: "optional"` an -- ohne GPU/Toolkit (z.B. anderer Laptop) startet der
+Container trotzdem, nur ohne GPU. Im Container prüfen: `nvidia-smi`,
+`python3 -c "import tensorrt as trt; print(trt.__version__)"`.
+
+TensorRT-Engines (`.engine`) sind an GPU und TensorRT-Version gebunden: auf dem Rechner bauen,
+auf dem sie laufen (z.B. `YOLO('best.pt').export(format='engine')`). Auf dem Pi des Bots gibt es
+kein TensorRT.
+
+### YOLO-Engine bauen (im Container, ohne torch)
+
+Aus der ONNX-Datei mit der TensorRT-Version des Containers (~4 min, FP16):
+
+```bash
+cd Yolo/yolo26s_800/weights
+python3 -c "
+import tensorrt as trt
+L = trt.Logger(trt.Logger.WARNING); b = trt.Builder(L)
+net = b.create_network(0); p = trt.OnnxParser(net, L)
+assert p.parse(open('best.onnx', 'rb').read())
+c = b.create_builder_config(); c.set_flag(trt.BuilderFlag.FP16)
+open('best_trt10.15_fp16.engine', 'wb').write(b.build_serialized_network(net, c))"
+```
+
+`detect_lane_nav2` lädt `YOLO_ENGINE` (Konstante oben in der Datei, relativ zum Repo-Ordner) und
+sendet die Boxen auf `/detect/objects` (vision_msgs/Detection2DArray, Pixel im Rohbild). Die
+Rohbild-Ansicht `/lokal/debug_view_raw` zeichnet sie ein. Ohne Engine/GPU läuft der Node ohne YOLO
+(Warnung im Log).

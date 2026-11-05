@@ -9,6 +9,10 @@
     "-e", "DISPLAY=${localEnv:DISPLAY}",
     "-v", "/tmp/.X11-unix:/tmp/.X11-unix"
   ],
+  // NVIDIA-GPU in den Container (TensorRT/YOLO). "optional": mit GPU und NVIDIA Container
+  // Toolkit auf dem Host startet der Container mit --gpus all, ohne beides trotzdem.
+  // Host einmalig einrichten: docs/Befehle.md, Abschnitt "GPU im Container".
+  "hostRequirements": { "gpu": "optional" },
   "mounts": [
     "source=/dev,target=/dev,type=bind"
   ],
