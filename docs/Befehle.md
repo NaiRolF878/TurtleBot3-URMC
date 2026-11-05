@@ -66,6 +66,8 @@ Der Bot fährt **nie von selbst** los. Freigabe und Stopp, jeweils umschalten:
 
 **Taste L** im Terminal von `nav2_obstacle.sh`: Spurgedächtnis und beide Costmaps leeren, wenn sie nicht mehr zur Odometrie passen (Bot angehoben). Erst absetzen, dann im Stand drücken.
 
+**Taste O** im Not-Aus-Terminal: Obstacle-Modus an/aus (`obstacle_enabled` von `switch_control`, auch als Häkchen in rqt). Start: `nav2_obstacle.sh` an, `follow_lane.sh` aus. Aus heißt: kein Wechsel nach Obstacle, aus Obstacle sofort zurück zu Lane.
+
 Zustand: `ros2 topic echo /notaus/drive`. Kommt von `control_driving` 0,5 s nichts, sendet der Not-Aus selbst Stopp.
 Läuft der Not-Aus nicht, kommt **kein** Fahrbefehl zum Bot. Kette: `control_driving` → `/control/cmd_vel` → `notaus` → `/cmd_vel`;
 Nav2 sendet auf `/nav2/cmd_vel`, `control_driving` reicht das nur im Obstacle-/Tunnel-Modus durch.

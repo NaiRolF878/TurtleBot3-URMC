@@ -7,7 +7,7 @@ dock_slow_gap_px: 80.0
 dock_vel: 0.03
 kd: 1.7
 ki: 0.15
-kp: 15.0
+kp: 8.0
 maneuver_dist_tol: 0.01
 maneuver_k_ang: 2.5
 maneuver_k_lin: 1.5

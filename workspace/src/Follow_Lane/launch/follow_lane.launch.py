@@ -45,6 +45,10 @@ def launch_setup(context, *args, **kwargs):
     detect_params = load_flat_params(LaunchConfiguration('detect_params').perform(context))
     control_params = load_flat_params(LaunchConfiguration('control_params').perform(context))
     switch_params = load_flat_params(LaunchConfiguration('switch_control_params').perform(context))
+    # Obstacle nur mit Nav2 (nav2_obstacle.launch.py setzt obstacle:=true). Ohne Nav2 kaeme
+    # in Obstacle kein Fahrbefehl, der Bot bliebe stehen. Live umschaltbar in rqt.
+    switch_params['obstacle_enabled'] = \
+        LaunchConfiguration('obstacle').perform(context).lower() == 'true'
     # Zusaetzliche Datei mit Node-Bloecken (storage.launch.py: Storage.yaml); ueberschreibt
     # die Werte davor, weil sie spaeter in der Liste steht.
     storage_params = LaunchConfiguration('storage_params').perform(context)
@@ -83,6 +87,7 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'Control_driving_PID_Wide.yaml')),
         DeclareLaunchArgument('switch_control_params',
             default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
+        DeclareLaunchArgument('obstacle', default_value='false'),
         DeclareLaunchArgument('storage_params', default_value=''),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),

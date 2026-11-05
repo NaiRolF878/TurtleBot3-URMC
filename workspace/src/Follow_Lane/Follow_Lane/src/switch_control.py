@@ -29,9 +29,12 @@ from Follow_Lane.src.storage_sequence import StorageSequence
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als mode_timeout nichts hoert.
 MODE_PUBLISH_PERIOD_S = 0.5
-# So lange (s) muessen beide Spurlinien fehlen, bis die Kamera ausgeht: mehrere Bilder,
-# aber die Bot-Nase ist dann noch vor dem Linienende (Suchzeile endet ~10 cm vor der Achse).
-LINES_LOST_S = 0.2
+# So viele Bilder in Folge muessen beide Spurlinien fehlen, bis die Kamera ausgeht. Zaehlt
+# Bilder statt Zeit: mit 0,2 s reichte ein einziges langsames Bild, und TunnelEntry endete
+# 0,6 s nach dem Button (2026-11-05). Ein Bild mit Linie setzt den Zaehler zurueck.
+LINES_LOST_FRAMES = 5
+# Kommt so lange (s) gar kein Bild (detect_lane steht), gilt die Spur ebenfalls als zu Ende.
+LINES_NO_IMAGE_S = 1.0
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
 
@@ -91,8 +94,12 @@ class switch_control(Node):
         self.declare_parameter('obstacle_check_angle_deg', Parameter.Type.DOUBLE, frange(1.0, 90.0))
         self.declare_parameter('obstacle_trigger_distance', Parameter.Type.DOUBLE, frange(0.05, 3.0))
         self.declare_parameter('obstacle_clear_distance', Parameter.Type.DOUBLE, frange(0.05, 3.0))
+        # Obstacle ueberhaupt erlauben (rqt-Haekchen, Taste O im Not-Aus). follow_lane.sh setzt
+        # false: dort laeuft kein Nav2, in Obstacle bliebe der Bot nur stehen. Abschalten in
+        # Obstacle -> Lane.
+        self.declare_parameter('obstacle_enabled', Parameter.Type.BOOL)
         self._param_names = ['obstacle_check_angle_deg', 'obstacle_trigger_distance',
-                             'obstacle_clear_distance']
+                             'obstacle_clear_distance', 'obstacle_enabled']
         # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop.
         self.declare_parameter('initial_mode', Parameter.Type.STRING)
         require_params(self, self._param_names + ['initial_mode'])
@@ -126,7 +133,8 @@ class switch_control(Node):
         self._mode_before_tunnel = None
         self._tunnel_source = ''          # 'auto' (Schild) oder 'manuell' (Button)
         self._obstacle_clear_since = None
-        self._lines_seen_time = None      # zuletzt eine Spurlinie gesehen (TunnelEntry)
+        self._lines_lost_count = 0        # Bilder in Folge ohne Spurlinie (TunnelEntry)
+        self._lines_msg_time = None       # letztes /detect/lines_lost (TunnelEntry)
         self._lane_points = None          # (N, 2) im Frame der Wolke
         self._lane_frame = None
         self._lane_time = None
@@ -170,8 +178,10 @@ class switch_control(Node):
             self._leave_tunnel()
 
     def cb_lines_lost(self, msg):
-        if self.control_mode == ControlType.TunnelEntry and not msg.data:
-            self._lines_seen_time = time.monotonic()
+        if self.control_mode != ControlType.TunnelEntry:
+            return
+        self._lines_msg_time = time.monotonic()
+        self._lines_lost_count = self._lines_lost_count + 1 if msg.data else 0
         self._update_tunnel_entry()
 
     def cb_tunnel_outside(self, msg):
@@ -183,7 +193,10 @@ class switch_control(Node):
         read_params(self, self._param_names)
 
         self._update_tunnel_entry()
-        if self.control_mode == ControlType.Lane and not self.storage.active:
+        if self.control_mode == ControlType.Obstacle and not self.obstacle_enabled:
+            self._set_mode(ControlType.Lane, 'Obstacle abgeschaltet (obstacle_enabled)')
+        elif self.control_mode == ControlType.Lane and self.obstacle_enabled \
+                and not self.storage.active:
             if self._obstacle_in_lane(scan, self.obstacle_check_angle_deg,
                                       self.obstacle_trigger_distance):
                 self._set_mode(ControlType.Obstacle, 'Hindernis in der Fahrbahn')
@@ -226,14 +239,21 @@ class switch_control(Node):
             return
         self._mode_before_tunnel = self.control_mode
         self._tunnel_source = source
-        self._lines_seen_time = time.monotonic()
+        self._lines_lost_count = 0
+        self._lines_msg_time = time.monotonic()
         self._set_mode(ControlType.TunnelEntry, f'Tunnel ausgeloest ({source})')
 
     def _update_tunnel_entry(self):
-        """Ohne neue Bilder gilt die Spur ebenfalls als zu Ende."""
-        if self.control_mode == ControlType.TunnelEntry \
-                and time.monotonic() - self._lines_seen_time >= LINES_LOST_S:
-            self._set_mode(ControlType.Tunnel, 'Spurlinien enden')
+        """LINES_LOST_FRAMES Bilder in Folge ohne Spurlinie -> Tunnel. Ohne neue Bilder
+        (LINES_NO_IMAGE_S) gilt die Spur ebenfalls als zu Ende."""
+        if self.control_mode != ControlType.TunnelEntry:
+            return
+        if self._lines_lost_count >= LINES_LOST_FRAMES:
+            self._set_mode(ControlType.Tunnel,
+                           f'Spurlinien enden ({self._lines_lost_count} Bilder ohne Linie)')
+        elif time.monotonic() - self._lines_msg_time >= LINES_NO_IMAGE_S:
+            self._set_mode(ControlType.Tunnel,
+                           f'Spurlinien enden (seit {LINES_NO_IMAGE_S:.1f} s kein Bild)')
 
     def _leave_tunnel(self):
         restored = self._mode_before_tunnel or ControlType.Lane
