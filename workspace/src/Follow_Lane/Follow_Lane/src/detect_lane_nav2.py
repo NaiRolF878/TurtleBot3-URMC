@@ -28,17 +28,15 @@ from Follow_Lane.src.common import (
 
 # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
 LANE_MASK_STRIDE = 2
-# Formfilter (in cm, ueber Parameter/bev.yaml in Pixel umgerechnet), nur fuer Nav2 und das
-# Spurende, der PID arbeitet ohne ihn. Spurlinien sind ~5 cm breit (+ Unschaerfe ~6 cm, an
-# Ecken/Abzweigen ~7 cm). Wo ein Kreis dieses Durchmessers hineinpasst, ist es keine Linie
-# (helle Waende, Papier, Spiegelungen -- in der BEV breit verschmiert).
+# Formfilter (cm, ueber bev.yaml in Pixel), nur fuer Nav2 und das Spurende. Spurlinien (2 cm)
+# wirken in der BEV verschmiert breiter, an Ecken bis ~7 cm. Wo ein Kreis dieses Durchmessers
+# hineinpasst, ist es keine Linie (helle Waende, Papier, Spiegelungen).
 LINE_MAX_WIDTH_CM = 8.0
 # Reste kleiner als das (cm^2) nach dem Filtern sind Rauschen.
 LINE_MIN_AREA_CM2 = 3.0
-# Eigener Bot vorn im Bild (gruener Magnet, Halter/Stuetzkugel, blankes Metall wirkt weiss):
-# Bereich bis SELF_MASK_X_CM vor der Radachse und +-SELF_MASK_Y_CM in BEIDEN Farbmasken
-# schwarz (self_mask), dort sieht man nie Fahrbahn. Magnet laut Debugbild bis ~10,5 cm vor der
-# Achse und +-4,5 cm (docs/images/Debug View/image_magnet.png; vorher 9 x 4 und nur Costmap).
+# Eigener Bot vorn im Bild (Magnet, Halter): bis SELF_MASK_X_CM vor der Radachse und
+# +-SELF_MASK_Y_CM in beiden Farbmasken schwarz. Der Magnet reicht laut Debugbild bis
+# ~10,5 cm vor die Achse und +-4,5 cm.
 SELF_MASK_X_CM = 11.0
 SELF_MASK_Y_CM = 5.0
 # Linien-Tracking: hoechstens so weit (cm) darf sich eine Linie von Bild zu Bild bewegen.
@@ -110,9 +108,7 @@ class detect_lane(Node):
         # --- Subscriber ---
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cb_control_mode, 1)
-        # Tiefe 1: die Kamera liefert 30 Bilder/s, die Verarbeitung hier ist langsamer.
-        # Mit tieferer Queue stapeln sich Frames und der Regler lenkt nach Bildern,
-        # die bis zu ~330 ms alt sind. Das neueste Bild ist immer das beste.
+        # Tiefe 1: die Verarbeitung ist langsamer als 30 Bilder/s, nur das neueste zaehlt.
         self.sub_bev = self.create_subscription(Image, '/lokal/bev', self.cb_bev, 1)
 
         # --- Publisher ---
@@ -292,8 +288,8 @@ class detect_lane(Node):
 
         # Schon hier ausduennen: lane_costmap_node verwirft ohnehin die meisten Punkte
         # wieder, in voller Aufloesung waeren es zehntausende int32 pro Frame.
-        # Nur im Obstacle-Modus: helle Flaechen (Waende, Papier, Spiegelungen) und den eigenen
-        # Bot aus den Spurwaenden nehmen, damit Nav2 beim Ausweichen nicht an Scheinwaenden scheitert.
+        # Nur im Obstacle-Modus: helle Flaechen aus den Spurwaenden nehmen, damit Nav2 beim
+        # Ausweichen nicht an Scheinwaenden scheitert.
         if self.control_mode == ControlType.Obstacle:
             mask_yellow = self.shape_filter(mask_yellow)
             mask_white = self.shape_filter(mask_white)
@@ -477,11 +473,8 @@ class detect_lane(Node):
         # 2. Dicke Flaechen: Mittelpunkte, um die ein Kreis mit Durchmesser LINE_MAX_WIDTH_CM
         #    ganz in die Maske passt (Abstand zum Rand > r), und alles bis 1,5 r darum
         #    herum (der Kreis selbst + ausgefranster Rand) aus der Maske nehmen.
-        #    Wie ein Opening mit Kreiskern, per Distanztransformation aber ~3x schneller
-        #    (6 statt 22 ms bei 640x440 und 8 cm).
-        #    Helle Flaechen werden oft nur lueckenhaft erkannt (viele kleine Loecher) --
-        #    fuer die Dickenpruefung erst Luecken bis ~2 cm schliessen, entfernt wird aus
-        #    der Originalmaske. Echte Linien liegen > 2 cm auseinander und bleiben getrennt.
+        #    Fuer die Dickenpruefung erst Luecken bis ~2 cm schliessen (helle Flaechen sind
+        #    lueckenhaft), entfernt wird aus der Originalmaske.
         r = LINE_MAX_WIDTH_CM * px_per_cm / 2.0
         g = max(3, int(round(2.0 * px_per_cm)) | 1)
         closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
@@ -519,10 +512,8 @@ class detect_lane(Node):
                                 tileGridSize=(tile_size, tile_size))
         return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
 
-    # Linien-Tracking entsprechend zur Duckiebot Challenge (DuckieRace,
-    # intersection_handling) umgebaut: naechste Kante zur letzten Position, verlorene
-    # Linie halten, Sprung pro Bild begrenzen. Zusaetzlich: Haltezeit, Sprung in cm.
-    # Frage an FaFelF: Gab es einen Grund, warum du dies anders geloest hast?
+    # Linien-Tracking: naechste Kante zur letzten Position, verlorene Linie LINE_HOLD_TIME_S
+    # halten, Sprung je Bild auf LINE_MAX_JUMP_CM begrenzen.
 
     def anchor_column(self, name, now):
         """Letzte Spalte der Linie, None ohne Detektion in den letzten LINE_HOLD_TIME_S s."""

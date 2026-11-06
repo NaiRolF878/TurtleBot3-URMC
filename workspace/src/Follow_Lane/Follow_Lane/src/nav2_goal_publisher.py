@@ -159,7 +159,7 @@ class nav2_goal_publisher(Node):
         self._latest_center_path = None
         self._center_path_received = None
 
-        # Auch Obstacle <-> Tunnel abbrechen, sonst laeuft die alte Fahrt weiter.
+        # Beim Verlassen eines aktiven Modus abbrechen, sonst laeuft die alte Fahrt weiter.
         if was_active:
             self._cancel_goal()
         if new_mode in ACTIVE_MODES:

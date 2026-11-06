@@ -24,9 +24,8 @@ PUBLISH_PERIOD_S = 0.2
 # Heck 0.101 + footprint_padding 0.01 + 0.05 Reserve: erst dann liegt keine Wandzelle
 # mehr unter dem Bot.
 WALL_DELAY_M = 0.16
-# Laenge der Sperre (m), mittig auf dem Bot quer zur Fahrtrichtung. Eingang max. 30 cm breit
-# (Nutzer, 2026-11-05) + je 5 cm, weil der Bot nicht genau mittig im Eingang stehen muss; der
-# Ueberstand liegt auf der Tunnelwand und stoert nicht.
+# Laenge der Sperre (m), mittig quer zur Fahrtrichtung: Eingang max. 30 cm + je 5 cm, weil der
+# Bot nicht genau mittig steht. Der Ueberstand liegt auf der Tunnelwand.
 WALL_WIDTH_M = 0.4
 # Abstand der Wandpunkte (m): = kleinste resolution der Costmaps (global und local 0.01),
 # sonst bleiben Luecken.
@@ -36,9 +35,8 @@ WALL_POINT_STEP_M = 0.01
 class keepout_zone_node(Node):
     """Sendet eine virtuelle Wand an der Stelle, an der switch_control von TunnelEntry nach
     Tunnel wechselt (Spurlinien enden = Eingang): quer zur Fahrtrichtung durch die Radachse,
-    WALL_WIDTH_M lang, im odom-Frame, damit sie ortsfest bleibt. Vorher kam sie von der
-    Tuererkennung im Scan (/tunnel/door) und lag oft falsch (2026-11-05). Ohne TunnelEntry
-    davor (Start im Tunnel) gibt es keine Wand.
+    WALL_WIDTH_M lang, im odom-Frame, damit sie ortsfest bleibt. Ohne TunnelEntry davor
+    (Start im Tunnel) gibt es keine Wand.
 
     Gesendet wird sie erst, wenn der Bot WALL_DELAY_M hinter der Tuer ist. Sonst stuende er
     in ihr und MPPI saehe jede Bewegung als Kollision.
