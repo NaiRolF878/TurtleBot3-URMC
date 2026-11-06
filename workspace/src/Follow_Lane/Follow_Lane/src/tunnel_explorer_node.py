@@ -40,10 +40,8 @@ MAP_SETTLE_S = 1.5
 EXIT_HOLD_S = 1.0
 # Um diesen Radius (m) gilt eine Stelle als dieselbe: xy_goal_tolerance des Reglers.
 SAME_TARGET_M = 0.15
-# Reglerwerte im Tunnel, beim Verlassen zurueck auf NORMAL (muss zu nav2_params.yaml passen):
-# - progress_checker (Mindestweg m in Sekunden): lockerer, sonst brach controller_server alle
-#   3 s ab und der Explorer plante neu (2026-11-05).
-# - FollowPath.vx_max (m/s): langsamer zwischen den engen Waenden.
+# Reglerwerte im Tunnel, beim Verlassen zurueck auf NORMAL (= nav2_params.yaml): lockerer
+# Fortschritt (Mindestweg m in Sekunden) und langsamer zwischen den engen Waenden.
 TUNNEL_CONTROLLER = {
     'progress_checker.required_movement_radius': 0.05,
     'progress_checker.movement_time_allowance': 6.0,
@@ -425,10 +423,8 @@ class tunnel_explorer_node(Node):
 
     def _finish_target(self, failed):
         if self._kind == 'Tuer':
-            # Die Tuer bleibt auch nach einem Fehlschlag fest: frueher wurde sie verworfen und
-            # neu gesucht, dabei fand der Scan Luecken zwischen beliebigen Objekten (4 "Tueren"
-            # in einer Fahrt, 2026-11-05) und die Eingangssperre sprang mit. Weiter geht es mit
-            # der Suche, die die Tuer als Eingangslinie nutzt.
+            # Die Tuer bleibt auch nach einem Fehlschlag fest (neu gesucht faende der Scan
+            # Luecken zwischen beliebigen Objekten). Weiter mit der Suche.
             self._phase = EXPLORING
         else:
             self._done.append(self._target)

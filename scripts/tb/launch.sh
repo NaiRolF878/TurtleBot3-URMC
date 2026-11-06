@@ -7,10 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/tb-env.sh"
 [ $? -ne 0 ] && exit 1
 
-# Bei jedem Start bauen: nach git pull / Branch-Wechsel fehlen sonst neue Programme,
-# Launch-Dateien oder Nachrichten (z.B. "executable 'ingress_node_nav2' not found").
-# Ohne Aenderungen dauert das ~2-3 s. --symlink-install ist Pflicht: dann wirken
-# Aenderungen an Python-Dateien und YAMLs auch ohne Build sofort (docs/MEMORY.md).
+# Bei jedem Start bauen (~2-3 s ohne Aenderungen): nach git pull oder Branch-Wechsel fehlen
+# sonst neue Programme oder Nachrichten. --symlink-install: Python und YAML wirken sofort.
 echo "Baue Workspace (colcon build --symlink-install) ..."
 BUILD_LOG=$(cd "$REPO_ROOT/workspace" && colcon build --symlink-install 2>&1)
 if [ $? -ne 0 ]; then
@@ -48,10 +46,8 @@ select launcher in "${launchers[@]#$SCRIPT_DIR/launchers/}"; do
     if [[ "$do_log" =~ ^[jJyY] ]]; then
         bash "$SCRIPT_DIR/status_log.sh" &
         LOG_PID=$!
-        # Logger zusammen mit dem Launcher beenden, sonst laeuft er als Waise weiter.
-        # Erst die Kinder (sleep bzw. das laufende "ros2 topic echo"): bash arbeitet
-        # ein Signal erst ab, wenn das aktuelle Vordergrund-Kommando zurueckkehrt --
-        # ohne das bliebe der kill bis zu einer halben Minute liegen.
+        # Logger mit dem Launcher beenden, erst seine Kinder: bash arbeitet ein Signal erst
+        # nach dem laufenden Vordergrund-Kommando ab.
         stop_logger() {
             [ -n "$LOG_PID" ] || return
             pkill -P "$LOG_PID" 2>/dev/null

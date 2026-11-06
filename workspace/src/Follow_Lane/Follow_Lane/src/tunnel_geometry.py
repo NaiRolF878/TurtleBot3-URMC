@@ -16,15 +16,12 @@ BOT_LENGTH = 0.138
 BOT_WIDTH = 0.178
 LETHAL_COST = 100
 # Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar: einzelne Strahlen ins
-# Unbekannte. Waende sind in der global_costmap um robot_radius aufgeblasen, die Bot-MITTE darf
-# schmal fahren. 0.075 passte zum 2,5-cm-Raster und sperrte Luecken unter ~25 cm; bei 1 cm
-# reichen 2 Zellen (Luecken ab ~20 cm, 2026-11-05).
+# Unbekannte. Die Waende sind schon um robot_radius aufgeblasen, die Bot-Mitte darf schmal fahren.
 MIN_PASSAGE_M = 0.02
 # Liegt die naechste befahrbare Flaeche weiter vom Bot weg, steht er in keiner.
 MAX_START_GAP_M = 0.15
 # Wandzellen mit einer Luecke bis hierhin (m je Seite) gehoeren zusammen: ab ~1,6 m liegen die
-# Strahlen (0,9 Grad) weiter als 2,5 cm auseinander. In Metern, damit es nicht an der
-# Zellgroesse der global_costmap haengt (2026-11-05: 2,5 -> 1 cm).
+# Strahlen (0,9 Grad) weiter als 2,5 cm auseinander.
 WALL_GAP_M = 0.025
 # So weit (m) hinter die Tuerlinie faehrt die Einfahrt: Heck 0.101 + footprint_padding 0.01 +
 # xy_goal_tolerance 0.15, damit der ganze Bot auch bei fruehem "erreicht" drin ist.

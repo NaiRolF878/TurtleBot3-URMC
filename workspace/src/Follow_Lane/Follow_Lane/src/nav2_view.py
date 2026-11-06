@@ -34,13 +34,12 @@ from Follow_Lane.src.common import (
 UNKNOWN = (128, 128, 128)
 FREE = (60, 200, 60)          # Kosten 0
 NEAR = (20, 90, 30)           # Kosten 98: noch befahrbar, aber dicht am Hindernis
-BLOCKED = (40, 40, 220)       # 99 inscribed / 100 lethal: Bot-Umriss wuerde kollidieren
+BLOCKED = (40, 40, 220)       # 99 inscribed / 100 lethal: gesperrt
 LANE_YELLOW = (0, 230, 255)
 LANE_WHITE = (255, 255, 255)
 ROBOT = (255, 60, 0)
 HEADING = (20, 20, 20)        # schwarz
-# Magenta mit dunklem Rand (OUTLINE): hebt sich von gruen, rot und grau ab. Vorher cyan,
-# auf gruen kaum lesbar.
+# Magenta mit dunklem Rand (OUTLINE): hebt sich von gruen, rot und grau ab.
 PATH = (255, 0, 255)
 OUTLINE = (30, 30, 30)
 WALL = (0, 140, 255)
@@ -135,10 +134,8 @@ class nav2_view(Node):
         self.create_subscription(LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
 
         # --- Publisher ---
-        # Image, nicht CompressedImage auf .../compressed: rqt_image_view abonniert das
-        # Topic teils als Image, teils als CompressedImage und bricht dann mit
-        # "incompatible type" ab. nav2_view und rqt laufen beide auf dem Laptop, das
-        # Bild geht nicht uebers Netz.
+        # Image statt CompressedImage: rqt_image_view bricht sonst mit "incompatible type" ab.
+        # Beide laufen auf dem Laptop, das Bild geht nicht uebers Netz.
         self.pub_view = self.create_publisher(Image, '/nav2/view', 1)
 
         # --- Timer ---
