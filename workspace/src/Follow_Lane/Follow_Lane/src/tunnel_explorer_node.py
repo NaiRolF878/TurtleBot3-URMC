@@ -324,7 +324,9 @@ class tunnel_explorer_node(Node):
             if (center - entrance) @ inward <= 0.0:
                 continue
             target = geo.nearest_free(free, res, origin, center + direction * geo.BOT_LENGTH, width)
-            if target is not None and not self._is_done(target):
+            # Liegt das Ziel noch in der Huelle, war die Luecke fuer NavFn zu eng.
+            if target is not None and cv2.pointPolygonTest(hull, target, False) < 0 \
+                    and not self._is_done(target):
                 return target
         return None
 

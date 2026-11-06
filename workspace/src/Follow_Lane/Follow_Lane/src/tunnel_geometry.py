@@ -14,8 +14,6 @@ FOOTPRINT = np.array([[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 
                       [-0.101, 0.069], [-0.101, -0.069], [-0.033, -0.089], [0.033, -0.089]])
 BOT_LENGTH = 0.138
 BOT_WIDTH = 0.178
-# Schmalste Luecke fuer NavFn: 2 * (robot_radius 0.09 + footprint_padding 0.01) + eine Zelle.
-MIN_OPENING_M = 0.225
 LETHAL_COST = 100
 # Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar: einzelne Strahlen ins
 # Unbekannte. Waende sind in der global_costmap um robot_radius aufgeblasen, die Bot-MITTE darf
@@ -79,7 +77,7 @@ def find_openings(angles, ranges, origin=(0.0, 0.0)):
                 continue
             a, b = points[i], points[j]
             width = float(np.hypot(*(b - a)))
-            if width < MIN_OPENING_M:
+            if width < BOT_WIDTH:
                 continue
             between = (i + np.arange(step // 4 + 1, step - step // 4)) % n
             seen = between[finite[between]]
@@ -185,8 +183,6 @@ def hull_openings(hull, origin, angles, ranges):
     for group in groups:
         a, b = crossings[group[0]], crossings[group[-1]]
         width = float(np.hypot(*(b - a)))
-        if width < MIN_OPENING_M:
-            continue
         center = (a + b) / 2.0
         direction = center - origin
         openings.append((center, width, direction / max(np.hypot(*direction), 1e-9)))
