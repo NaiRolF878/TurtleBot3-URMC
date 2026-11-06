@@ -40,8 +40,8 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 |---|---|---|
 | `rolling_window` | `true` | `true` |
 | `width` / `height` | 4 / 4 m | 7 / 7 m |
-| `resolution` | 0.025 m | 0.025 m |
-| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.09 m |
+| `resolution` | 0.01 m | 0.01 m |
+| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.10 m |
 | `global_frame` | `odom` | `odom` |
 
 ### `rolling_window`
@@ -65,9 +65,8 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
   1. **Die Reichweite, die der Sensor aktuell halten kann.** Der LDS-03 misst
      bis 12 m, hat aber nur 0,9° Winkelauflösung. Der Abstand zwischen zwei
      Strahlen ist `r · 0,9° · π/180 = r · 0,0157`. Ab etwa **3,2 m** ist dieser
-     Abstand größer als 5 cm (bei 2,5-cm-Zellen schon ab ~1,6 m größer als eine
-     Zelle). Darüber wird das Freiräumen
-     lückenhaft, und schmale Hindernisse fallen zwischen zwei Strahlen durch.
+     Abstand größer als 5 cm. Darüber wird das Freiräumen lückenhaft, und schmale
+     Hindernisse fallen zwischen zwei Strahlen durch.
      Eine halbe Kartenbreite weit über ~3,2 m hinaus bringt also nur unsichere
      Zellen. Global: 7 m → 3,5 m halbe Breite, passend zu `raytrace_max_range` 3.5.
   2. **Nur local_costmap: die Vorausschau des Reglers.** MPPI plant aktuell
@@ -82,35 +81,35 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
   local_costmap reicht der Pfad über die Karte hinaus.
 
 ### `resolution`
-- **Was er bewirkt:** Kantenlänge einer Zelle, 0,025 m.
-- **Woher:** gewählt: Spurlinien (~2 cm) und Hindernisränder werden feiner
-  abgebildet als bei 5 cm, kosten aber ~4× so viele Zellen.
-- **Was kaputtgeht:** Andere Werte hängen an ihm: die 3,2-m-Grenze oben und
-  die Quantisierung des `inflation_radius` (Abschnitt 3). Außerdem wird jede
-  Linie auf ganze Zellen vergröbert. Wo nur wenige Zentimeter Luft sind, kann
-  der Footprint deshalb schon eine Linienzelle berühren, obwohl real noch Platz
-  wäre. Wer `resolution` ändert, muss diese Werte neu rechnen.
+- **Was er bewirkt:** Kantenlänge einer Zelle, 0,01 m in beiden Karten.
+- **Woher:** gewählt: Spurlinien (~2 cm), Hindernisränder und der Umriss werden auf
+  1 cm genau abgebildet. Die Mindestbreiten in Abschnitt 3 hängen daran.
+- **Was kaputtgeht:** Jeder Treffer belegt die ganze Zelle, in die er fällt: Lücken
+  werden je Seite um bis zu eine Zelle schmaler. Feiner kostet Rechenzeit: 4 × 4 m
+  sind 160 000 Zellen.
 
 ### `footprint` (local_costmap)
 - **Was er bewirkt:** der Umriss des Burger relativ zu `base_footprint`. Mit
   `consider_footprint: true` im `CostCritic` gilt eine Trajektorie als
   Kollision, sobald dieser Umriss eine belegte Zelle berührt. Das gilt für
   Linien, Hindernisse und Enclosure-Wände gleichermaßen.
-- **Woher:** abgeleitet aus 138 × 178 mm (Reglement) und der TurtleBot3-URDF.
-  Der Rumpf sitzt dort 3,2 cm hinter der Radachse, reicht also 3,7 cm nach vorn
-  und 10,1 cm nach hinten, seitlich ±6,9 cm. Die Räder liegen bei ±8,9 cm außen
-  und ±3,3 cm vor und hinter der Achse. Eingetragen ist die konvexe Hülle aus
-  beidem. Nav2 legt zusätzlich `footprint_padding` (Standard 1 cm) darum.
+- **Woher:** ROBOTIS: 138 × 178 mm, der ganze Bot liegt im Kreis r = 105 mm um die
+  Radachse. Der Rumpf reicht 3,7 cm nach vorn und 10,1 cm nach hinten, seitlich
+  ±6,9 cm, hinten auf den Kreis abgerundet. Die Räder liegen bei ±8,9 cm außen und
+  ±3,3 cm vor und hinter der Achse. Nav2 legt `footprint_padding` (Standard 1 cm, in
+  x und y) darum: Umkreis mit Polster 0,119 m. Derselbe Umriss steht in
+  `tunnel_geometry.FOOTPRINT`; wer ihn ändert, ändert beide.
 - **Was kaputtgeht:** Ein zu kleiner Umriss lässt den Bot Linien überfahren und
   Wände streifen, ein zu großer macht enge Durchfahrten unpassierbar. Da alle
   Burger laut Reglement identisch sind, muss der Wert nie angepasst werden.
 
 ### `robot_radius` (global_costmap)
-- **Was er bewirkt:** Zellen, die näher als dieser Radius an einem Hindernis
-  liegen, gelten für den Mittelpunkt des Roboters als Kollision. Nur für
-  `planner_server` (NavFn), im Obstacle- und im Tunnel-Modus. NavFn plant für einen Punkt und prüft
-  keinen Umriss, deshalb bleibt hier der Kreis.
-- **Woher:** 1,6 cm über der halben Breite des Burger (178 mm / 2 = 0,089 m).
+- **Was er bewirkt:** Die Inflation sperrt um jedes Hindernis einen Saum aus
+  `robot_radius` + `footprint_padding`, als 16-Eck gerechnet 0,108 m. Diese Zellen
+  (Kosten 253) sind für NavFn Wand. Nur für `planner_server` (NavFn), im Obstacle- und
+  im Tunnel-Modus. NavFn plant für einen Punkt ohne Ausrichtung, deshalb bleibt hier
+  der Kreis als Ersatz für die halbe Bot-Breite.
+- **Woher:** 1,1 cm über der halben Breite des Burger (178 mm / 2 = 0,089 m).
 - **Was kaputtgeht:** Ist der Wert zu klein, plant NavFn Wege zu dicht an den
   Enclosure-Wänden. Jede Wandberührung kostet einen Punkt. Ist eine Lücke für
   den Kreis zu eng, findet NavFn keinen Weg, auch wenn der echte Umriss passen
@@ -166,9 +165,8 @@ ankommt.
 - **`obstacle_max_range` 100.0:** Weil die Wolke im Frame `odom` ankommt, zählt
   diese Reichweite **ab dem odom-Nullpunkt**, nicht ab dem Roboter. *Woher:*
   gewählt, praktisch unbegrenzt. Was außerhalb des mitfahrenden Fensters liegt,
-  verwirft die Costmap ohnehin. *Was kaputtging:* Mit 3.0 fiel die Sperre ohne
-  Meldung weg, sobald der Tunneleingang mehr als 3 m vom Startpunkt entfernt
-  lag. Das ist aus der Nav2-Logik abgeleitet, auf dem Bot nicht beobachtet.
+  verwirft die Costmap ohnehin. *Was kaputtgeht:* Mit 3.0 fiele die Sperre ohne
+  Meldung weg, sobald der Tunneleingang mehr als 3 m vom odom-Nullpunkt entfernt liegt.
 
 ---
 
@@ -177,8 +175,8 @@ ankommt.
 | Wert | local_costmap | global_costmap |
 |---|---|---|
 | `consider_footprint` (`CostCritic`) | `true` | – |
-| `inflation_radius` | 0.20 m | 0.3 m |
-| `cost_scaling_factor` | 3.0 | 3.0 |
+| `inflation_radius` | 0.13 m | 0.12 m |
+| `cost_scaling_factor` | 20.0 | 20.0 |
 
 ### Das Prinzip
 
@@ -198,34 +196,46 @@ Wert von der Korridorbreite ab:
 ### Warum der `lane_layer` vor dem `inflation_layer` steht
 
 MPPI prüft den Umriss aus Rechenzeitgründen nur dort, wo die Kosten am
-Mittelpunkt schon erhöht sind, also im Saum einer belegten Zelle. Stünde der
+Mittelpunkt mindestens die Kosten am Umkreis des Footprints erreichen, also im Saum
+einer belegten Zelle. Stünde der
 `lane_layer` hinter dem `inflation_layer`, hätten die Linien keinen Saum.
 MPPI würde dann an den Linien gar nicht mit dem Umriss prüfen, und die Räder
 könnten unbemerkt über eine Linie fahren.
 
-### `inflation_radius`
-- **Was er bewirkt:** Um jede belegte Zelle (LiDAR-Hindernis, Spurlinie,
+### `inflation_radius` und `cost_scaling_factor`
+- **Was sie bewirken:** Um jede belegte Zelle (LiDAR-Hindernis, Spurlinie,
   Enclosure-Wand, Eingangssperre) zieht der `inflation_layer` einen
-  Kostengradienten. Ohne ihn hätte die Zelle direkt neben einer Wand noch
-  Kosten 0, und der Regler wiche erst im letzten Moment aus.
-- **Woher:** gewählt, nicht vermessen. Global 0.3 m für `planner_server`.
-- **Bedingung:** `inflation_radius` > Umkreis des Footprints (0,122 m +
-  `footprint_padding`). Sonst beginnt der Saum zu weit innen, und die Prüfung
-  mit dem Umriss setzt zu spät ein (siehe oben).
-- **Was kaputtgeht:** Ist der Wert zu klein, fährt der Bot dicht an Wänden und
-  Linien entlang. Ist er zu groß, werden enge Durchfahrten teuer und MPPI
-  zögert. **Im Hindernisbereich und in der Enclosure testen.**
-- Nav2 rundet den Inflationsradius auf ganze Zellen auf. Werte, die kein
-  Vielfaches von `resolution` (0.025) sind, wirken wie das nächste größere
-  Vielfache.
+  Kostengradienten, mit Faktor 20 steil fallend. Ohne ihn hätte die Zelle direkt
+  neben einer Wand noch Kosten 0, und der Regler wiche erst im letzten Moment aus.
+- **Bedingungen:**
+  - local: `inflation_radius` ≥ Umkreis des Footprints mit Polster (0,119 m),
+    sonst prüft MPPI den Umriss an den äußersten Ecken nicht (siehe oben).
+  - global: `inflation_radius` ≥ `robot_radius` + Polster (0,108 m), sonst warnt Nav2
+    beim Start und der Sperrsaum fehlt.
+- **Was kaputtgeht:** Ein breiter, flacher Saum (z. B. 0,3 m bei Faktor 3) macht jede
+  enge Lücke fast maximal teuer, MPPI traut sich nicht hinein. **Im Hindernisbereich
+  und in der Enclosure testen.**
+
+### Mindestbreiten bei 1-cm-Zellen
+
+| Stufe | braucht | Herkunft |
+|---|---|---|
+| Bot real | 0,178 m gerade, bis 0,193 m schräg | Umriss |
+| NavFn | 21 freie Zellen = 0,21 m | Pfadzelle ≥ 11 Zellen von jeder Wand (Saum 0,108) |
+| MPPI gerade | 20 freie Zellen = 0,20 m | Umriss mit Polster 0,198 m |
+| MPPI 15° / 30° / 45° schräg | 0,214 / 0,220 / 0,219 m | Umriss mit Polster |
+| Drehen auf der Stelle | 0,238 m | Umkreis mit Polster |
+
+Eine Lücke wird durch die Rasterung je Seite um bis zu eine Zelle schmaler. Ist sie
+für NavFn gerade breit genug, kommt MPPI nur durch, wenn der Bot fast gerade davor
+steht.
 
 ### Auf der normalen 20-cm-Spur
 
-Dort fährt im Normalfall der PID, nicht Nav2. Löst der Obstacle-Modus trotzdem
-aus, bleibt zwischen Umriss und Linienzellen nur ~1 cm Luft pro Seite, weniger
-als eine Zelle. Erwartbar findet MPPI dann keine kollisionsfreie Trajektorie,
-und der Bot bleibt stehen, statt die Spur zu verlassen. Das ist aus der
-Konfiguration abgeleitet und nicht auf dem Bot beobachtet.
+Dort fährt im Normalfall der PID, nicht Nav2. Die Spurwände liegen auf den
+Linienmitten, 22 cm auseinander: Für NavFn bleibt genau eine Zellreihe in der Mitte,
+MPPI passt gerade knapp hindurch. Neben einem Hindernis ist dort kein Platz; der Bot
+bleibt stehen, statt die Spur zu verlassen.
 
 ---
 
@@ -239,7 +249,7 @@ Konfiguration abgeleitet und nicht auf dem Bot beobachtet.
 | `MEMORY_RESOLUTION` / `MEMORY_RADIUS` | 0.01 m / 2.0 m |
 | `line_confirm_frames` / `free_confirm_frames` | 3 / 10 |
 | `SHADOW_RADIUS` / `SHADOW_MARGIN` | 0.03 m / 0.05 m |
-| `line_margin` | 0.04 m |
+| `line_margin` | 0.0 m |
 | `TRACE_STEP` / `TRACE_MAX_TURN_DEG` / `TRACE_MAX_GAP` | 0.03 m / 35° / 0.09 m |
 | `TRACE_PARALLEL_DEG` | 60° |
 
@@ -266,8 +276,9 @@ Raster im odom-Frame (`MEMORY_RESOLUTION`, = `resolution` der Costmaps):
   `free_confirm_frames` (frei) Bilder hintereinander das Gegenteil sagen. Linien
   erscheinen nach ~3 Bildern, verschwinden nach ~10. Einzelne Fehldetektionen
   kommen so nicht hinein. *Woher:* gewählt.
-- Zellen außerhalb von `MEMORY_RADIUS` werden vergessen. Beim Tunnel-Eintritt
-  wird das ganze Gedächtnis verworfen (keine Kameradaten im Tunnel).
+- Zellen außerhalb von `MEMORY_RADIUS` bleiben gemerkt, werden aber nicht gesendet.
+  Geleert wird das Gedächtnis beim Tunnel-Eintritt (keine Kameradaten im Tunnel) und
+  mit Taste L im Not-Aus.
 - Gesendet wird jedes Mal das ganze Gedächtnis auf `/detect/lane_obstacles`;
   `switch_control` nutzt es zusätzlich für den Linienfilter.
 
@@ -398,6 +409,8 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
 | `time_steps` | nav2_params | 90 |
 | `vx_max` | nav2_params | 0.22 m/s |
 | `prune_distance` | nav2_params | 1.7 m |
+| `angular_dist_threshold` (RotationShim) | nav2_params | 0.785 rad |
+| `forward_sampling_distance` / `simulate_ahead_time` (RotationShim) | nav2_params | 0.3 m / 1.0 s |
 | `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m (Abstand des Planziels) |
 | `CENTER_PATH_MAX_AGE_S` | `nav2_goal_publisher.py` | 1.0 s |
 
@@ -430,6 +443,11 @@ Bedingungen:
   `time_steps` nachziehen.
 - **`prune_distance`:** Wie weit voraus MPPI den Pfad berücksichtigt. *Woher:*
   gewählt, durch die Kartengröße begrenzt.
+- **RotationShim:** Weicht der Pfad 0,3 m voraus um mehr als 45° von der Fahrtrichtung
+  ab, dreht er den Bot auf der Stelle, danach fährt MPPI. Die Drehung prüft er 1 s
+  voraus mit dem Umriss; würde sie kollidieren, bricht das Ziel ab („RotationShimController
+  detected collision ahead“). *Woher:*
+  gewählt, weil MPPI reine Drehungen kaum würfelt.
 - **Ziel im Obstacle-Modus:** ein Punkt `goal_distance` (1,0 m) voraus auf der
   Spurmitte (Abschnitt 4), über ihr Ende (~0,6 m) hinaus in ihrer Richtung
   verlängert, solange sie jünger ist als `CENTER_PATH_MAX_AGE_S` (Empfangszeit,
@@ -499,8 +517,9 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
 | `publish_frequency` | local_costmap | 5.0 Hz | nicht dokumentiert |
 | `update_frequency` | global_costmap | 2.0 Hz | nicht dokumentiert |
 | `publish_frequency` | global_costmap | 1.0 Hz | nicht dokumentiert |
-| `required_movement_radius` | progress_checker | 0.1 m | nicht dokumentiert |
-| `movement_time_allowance` | progress_checker | 3.0 s | gewählt |
+| `required_movement_radius` | progress_checker | 0.1 m (Tunnel 0.05 m) | gewählt |
+| `movement_time_allowance` | progress_checker | 3.0 s (Tunnel 6.0 s) | gewählt |
+| `FollowPath.vx_max` | im Tunnel | 0.10 m/s | gewählt |
 | `xy_goal_tolerance` | goal_checker | 0.15 m | nicht dokumentiert |
 | `yaw_goal_tolerance` | goal_checker | 3.15 rad | gewählt |
 
@@ -513,8 +532,10 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
   Karte direkt.
 - **`movement_time_allowance` / `required_movement_radius`:** Bewegt sich der
   Bot 3 s lang nicht um mindestens 0,1 m, bricht der Regler das Ziel ab, und
-  `nav2_goal_publisher` setzt ein neues. *Was kaputtging:* Mit 10 s drückte
-  MPPI am Hindernis zehn Sekunden dagegen.
+  `nav2_goal_publisher` setzt ein neues. Im Tunnel stellt `tunnel_explorer_node` per
+  `SetParameters` auf 0,05 m in 6 s und `vx_max` 0,10 m/s um (`TUNNEL_CONTROLLER`),
+  beim Verlassen zurück. *Was kaputtgeht:* zu lang, und MPPI drückt lange gegen ein
+  Hindernis; zu kurz im Tunnel, und jedes Kriechen zwischen engen Wänden bricht ab.
 - **`xy_goal_tolerance`:** Ab dieser Entfernung gilt das Ziel als erreicht, und
   das nächste wird gesetzt. Damit endet jedes Segment bei ~0,15 m.
 - **`yaw_goal_tolerance` 3.15:** Größer als π, also wird jede Endausrichtung
@@ -534,8 +555,8 @@ Die Distanzen sind dort andere, die Regeln für die Schwellen gelten genauso.
 | `/plan` | was `planner_server` zuletzt gerechnet hat |
 | `/nav2/view` (in `rqt_image_view`) | Draufsicht von `nav2_view`: Costmap, Bot, aktiver Pfad, Eingangssperre, LiDAR und Statuszeile mit dem letzten Abbruchgrund. Ohne RViz. Unkomprimiert, weil rqt_image_view das Topic teils als Image, teils als CompressedImage abonniert und mit `/compressed` abbricht |
 
-**Der Test, mit dem wir den Fehler gefunden haben:** Eine Wand vor den LiDAR
-halten und schauen, ob sie überhaupt in `/local_costmap/costmap` auftaucht.
+**Test, wenn Hindernisse fehlen:** Eine Wand vor den LiDAR halten und schauen, ob sie
+überhaupt in `/local_costmap/costmap` auftaucht.
 - **Sie taucht auf, die Spurlinien aber nicht** (außerhalb des Tunnels): Der Fehler
   liegt in der Spurkette (`detect_lane` → `/detect/lane_mask` →
   `lane_costmap_node` → `/detect/lane_obstacles`). Prüfen, ob

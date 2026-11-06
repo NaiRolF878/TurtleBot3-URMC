@@ -3,30 +3,18 @@
 # wenn beim Start eines Launchers "mitloggen" bejaht wird.
 # Direkt aufrufbar ist es trotzdem: bash scripts/tb/status_log.sh
 #
-# Loggt alle 10s den Status der wichtigsten Follow_Lane-Topics/Nodes nach logs/.
-# Zweck: Wenn Claude gerade im Bot-WLAN nicht erreichbar ist, laeuft das Logging
-# trotzdem weiter -- die Datei kann man spaeter einfach reinposten.
+# Loggt alle 10 s den Status der wichtigsten Follow_Lane-Topics und Nodes nach logs/.
 #
-# Gemessen wird mit "ros2 topic echo --qos-reliability best_effort" statt "ros2 topic hz":
-# echo liefert eine Nachrichten-ANZAHL pro Zeitfenster. hz braucht mehrere Nachrichten,
-# um ueberhaupt eine Rate zu bilden, und bleibt bei sehr langsamen Topics (< 1 Nachricht
-# pro Fenster) stumm -- ununterscheidbar von "gar keine Daten". Die Anzahl unterscheidet
-# genau das: 0 = nichts, 1 = kommt an, aber sehr langsam.
+# "ros2 topic echo" statt "hz": die Anzahl je Fenster unterscheidet 0 (nichts) von 1 (sehr
+# langsam), hz bleibt in beiden Faellen stumm.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/tb-status-$(date +%Y%m%d-%H%M%S).log"
 
-# ACHTUNG: /camera/image_raw gehoert hier bewusst NICHT rein.
-# "ros2 topic echo" legt einen echten DDS-Subscriber an -- das Rohbild
-# (800x600x3 = 1.44 MB/Frame, bei 30 fps ~345 Mbit/s) wuerde dadurch alle 10 s
-# fuer 3 s ueber das WLAN gezogen. Der Pi schafft real 30-80 Mbit/s, das Netz
-# ist damit um Faktor 5-10 ueberbucht und der komprimierte Stream, auf dem
-# Follow_Lane arbeitet, verhungert. --no-arr unterdrueckt nur die AUSGABE,
-# nicht den Transport. Genau so hat sich dieses Logging-Skript in der Sitzung
-# vom 12.08.2026 selbst das Problem gebaut, das es messen sollte.
-# Ob die Kamera roh liefert, gehoert lokal auf den Bot gemessen: botcheck.
+# Nicht /camera/image_raw: echo abonniert wirklich (~345 Mbit/s), das ueberlastet das WLAN.
+# Ob die Kamera roh liefert, misst botcheck auf dem Bot.
 TOPICS=(
     /camera/image_raw/compressed
     /lokal/raw_image
@@ -46,16 +34,11 @@ echo "[log] Schreibe nach: $LOG_FILE"
 
 trap 'exit 0' INT TERM
 
-# Wer uns gestartet hat (launch.sh). Signale allein reichen nicht: stirbt der
-# Starter hart (kill -9) oder haengt sein Trap hinter einem Vordergrund-Kommando,
-# liefe der Logger sonst als Waise weiter. Deshalb pro Runde nachsehen, ob es ihn
-# noch gibt. PPID 1 = direkt gestartet, dann gibt es nichts zu ueberwachen.
+# Jede Runde pruefen, ob der Starter (launch.sh) noch lebt, sonst laeuft der Logger als Waise
+# weiter. PPID 1 = direkt gestartet.
 PARENT_PID=$PPID
 
-# IP-Reassemblierung: NUR als Differenz pro Intervall auswerten. Die Werte in
-# /proc/net/snmp sind seit dem Booten kumuliert -- eine hohe Summe sagt nichts
-# darueber, ob es GERADE klemmt, und vermischt laengst behobene Phasen mit dem
-# aktuellen Zustand.
+# IP-Reassemblierung als Differenz je Intervall: /proc/net/snmp zaehlt seit dem Booten.
 read_reasm() {
     grep -E "^Ip:" -A1 /proc/net/snmp | awk '
         NR==1{for(i=1;i<=NF;i++)h[i]=$i}

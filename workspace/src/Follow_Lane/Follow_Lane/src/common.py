@@ -19,7 +19,8 @@ from rclpy.signals import SignalHandlerOptions
 SPIN_TIMEOUT_S = 0.1
 # Kostenwert der OccupancyGrid-Skala: ab hier plant NavFn nicht mehr (253 -> 99).
 COSTMAP_BLOCKED = 99
-# robot_radius 0.09 + footprint_padding 0.01 + eine Zelle (2,5 cm) der global_costmap.
+# Groesser als robot_radius + footprint_padding der global_costmap (0,11 m): so weit reicht
+# der Sperrsaum der Wand, an der der Bot steht.
 PATH_CHECK_SKIP_M = 0.125
 
 
@@ -37,10 +38,8 @@ class ControlType(Enum):
 class SignType(Enum):
     """Erkanntes Schild auf /detect/sign (std_msgs/UInt8), unabhaengig von ControlType.
 
-    Welcher Modus aus einem Schild folgt, entscheidet switch_control. Weitere
-    Schilder hier eintragen, sobald bekannt ist, wie sie aussehen. Tunnel = 6, damit
-    der Testbefehl "ros2 topic pub /detect/sign std_msgs/msg/UInt8 '{data: 6}'"
-    gueltig bleibt.
+    Welcher Modus aus einem Schild folgt, entscheidet switch_control. Tunnel = 6, damit
+    der Testbefehl "ros2 topic pub /detect/sign std_msgs/msg/UInt8 '{data: 6}'" gilt.
     """
     Tunnel = 6
 

@@ -17,11 +17,10 @@ from Follow_Lane.src.common import (
     ControlType, SignType, frange, read_params, require_params, run_node)
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
-# control_driving haelt an, wenn er laenger als mode_timeout nichts hoert.
+# control_driving haelt an, wenn er laenger als MODE_TIMEOUT nichts hoert.
 MODE_PUBLISH_PERIOD_S = 0.5
-# So viele Bilder in Folge muessen beide Spurlinien fehlen, bis die Kamera ausgeht. Zaehlt
-# Bilder statt Zeit: mit 0,2 s reichte ein einziges langsames Bild, und TunnelEntry endete
-# 0,6 s nach dem Button (2026-11-05). Ein Bild mit Linie setzt den Zaehler zurueck.
+# So viele Bilder in Folge muessen beide Spurlinien fehlen, bis die Kamera ausgeht. Bilder
+# statt Zeit: ein einzelnes langsames Bild darf nicht reichen. Ein Bild mit Linie setzt zurueck.
 LINES_LOST_FRAMES = 5
 # Kommt so lange (s) gar kein Bild (detect_lane steht), gilt die Spur ebenfalls als zu Ende.
 LINES_NO_IMAGE_S = 1.0
@@ -38,10 +37,9 @@ class switch_control(Node):
     Sekundentakt zwischen PID und Ausweichmanoever.
 
     -> TunnelEntry per Schild (/detect/sign = SignType.Tunnel, Quelle "auto") oder
-    Button im Debugbild (/control/tunnel_request True, Quelle "manuell"). Der Button
-    ist noetig, weil jede Challenge einzeln laeuft und es vor Ort sonst keinen
-    Ausloeser gibt. Der Bot steht dabei vor dem Tunnel und faehrt mit Kamera auf die
-    Oeffnung zu; die Einfahrt ist laut Reglement noch erlaubt.
+    Button im Debugbild (/control/tunnel_request True, Quelle "manuell"), um die
+    Challenge einzeln zu fahren. Der Bot faehrt mit Kamera auf die Oeffnung zu; vor dem
+    Tunnel ist die Kamera erlaubt.
 
     TunnelEntry -> Tunnel, bevor der Bot drin ist: beide Spurlinien enden kurz vor dem
     Bot, denn sie reichen nur bis zur Oeffnung. Ab dann keine Kamera mehr. Durch die Tuer
