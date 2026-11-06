@@ -11,7 +11,8 @@ from Follow_Lane.src.common import COSTMAP_BLOCKED
 
 # Umriss wie local_costmap.footprint in nav2_params.yaml (base_footprint).
 FOOTPRINT = np.array([[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089],
-                      [-0.101, 0.069], [-0.101, -0.069], [-0.033, -0.089], [0.033, -0.089]])
+                      [-0.079, 0.069], [-0.092, 0.05], [-0.101, 0.028], [-0.101, -0.028],
+                      [-0.092, -0.05], [-0.079, -0.069], [-0.033, -0.089], [0.033, -0.089]])
 BOT_LENGTH = 0.138
 BOT_WIDTH = 0.178
 LETHAL_COST = 100

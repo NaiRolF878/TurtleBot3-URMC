@@ -238,9 +238,10 @@ local_costmap:
       width: 4
       height: 4
       resolution: 0.01
-      # Burger relativ zur Radachse: Rumpf 3,7 cm vor bis 10,1 cm hinter der Achse,
-      # +/-6,9 cm breit; Raeder +/-8,9 cm.
-      footprint: "[[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089], [-0.101, 0.069], [-0.101, -0.069], [-0.033, -0.089], [0.033, -0.089]]"
+      # Burger relativ zur Radachse (ROBOTIS: 138 x 178 mm, ganz im Kreis r = 105 mm um die
+      # Achse): Rumpf 3,7 cm vor bis 10,1 cm hinter der Achse, hinten auf den Kreis
+      # abgerundet; Raeder +/-8,9 cm.
+      footprint: "[[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089], [-0.079, 0.069], [-0.092, 0.05], [-0.101, 0.028], [-0.101, -0.028], [-0.092, -0.05], [-0.079, -0.069], [-0.033, -0.089], [0.033, -0.089]]"
       always_send_full_costmap: true
       plugins: ["obstacle_layer", "lane_layer", "entrance_layer", "inflation_layer"]
 
@@ -301,8 +302,7 @@ local_costmap:
           raytrace_min_range: 0.0
 
       # Kostengefaelle um alle Hindernisse, keine harte Grenze. MPPI prueft den Umriss nur,
-      # wo die Mitte Kosten hat; das deckt die Heckecken erst ab inflation_radius 0,137
-      # (Umkreis mit footprint_padding).
+      # wo die Mitte Kosten hat: inflation_radius >= Umkreis mit footprint_padding (0,119).
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 20.0
