@@ -88,9 +88,8 @@ class nav2_goal_publisher(Node):
         super().__init__('nav2_goal_publisher')
 
         # --- Parameter ---
-        # Vor Ort einstellen, Werte nur in Lane_Costmap.yaml. Abstand des Planziels vom Bot (m):
-        # muss hinter dem Hindernis liegen, sonst endet der Weg davor; MPPI schaut ~1 m voraus
-        # (nav2_params.yaml).
+        # Werte nur in Lane_Costmap.yaml. Abstand des Planziels vom Bot (m): muss hinter dem
+        # Hindernis liegen, sonst endet der Weg davor; MPPI schaut ~1 m voraus (nav2_params.yaml).
         self.declare_parameter('goal_distance', Parameter.Type.DOUBLE, frange(0.2, 5.0))
         # Ein Planweg mit einem Punkt mehr als so weit (m) hinter der Radachse wird verworfen:
         # NavFn kennt keine Fahrtrichtung und fuehrt sonst hinter dem Bot aussen um die

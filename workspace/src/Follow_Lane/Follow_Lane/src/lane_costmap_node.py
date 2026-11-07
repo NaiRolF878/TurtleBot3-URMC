@@ -363,9 +363,9 @@ class lane_costmap_node(Node):
         super().__init__('lane_costmap_node')
 
         # --- Parameter ---
-        # Vor Ort einstellen, Werte nur in Lane_Costmap.yaml. Bilder in Folge, bis eine Zelle zur
-        # Linie bzw. wieder frei wird. free groesser als line: ein Hindernis oder der eigene
-        # Schatten kann eine Linie kurz verdecken, ohne dass die LiDAR-Schattenpruefung greift.
+        # Werte nur in Lane_Costmap.yaml. Bilder in Folge, bis eine Zelle zur Linie bzw. wieder
+        # frei wird. free groesser als line: ein Hindernis oder der eigene Schatten kann eine
+        # Linie kurz verdecken, ohne dass die LiDAR-Schattenpruefung greift.
         self.declare_parameter('line_confirm_frames', Parameter.Type.INTEGER, irange(1, 100))
         self.declare_parameter('free_confirm_frames', Parameter.Type.INTEGER, irange(1, 500))
         # Pixel bis so weit (m) um die Linienmitte werden Wand; 0: nur Pixel direkt auf der
