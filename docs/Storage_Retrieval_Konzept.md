@@ -285,8 +285,10 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 
 1. **Boden** (`storage_zone_node`): `/detect/zone_debug/compressed` vor einer leeren Zone;
    `floor_l_max` so, dass der Teppich nicht rot getoent wird, ein Gegenstand in der Zone schon.
-2. **Kontakt** (switch_control): Bot mit dem Magneten an den Metallstreifen stellen und den
-   Abstand aus `/detect/pallet` als `contact_distance` eintragen.
+2. **Kontakt** (`contact_distance`): Bot mit dem Magneten an den Metallstreifen stellen und den
+   Abstand im Debugbild `/detect/zone_debug/compressed` ablesen (Radachse bis Vorderkante der
+   Stuetze am Boden). Das Debugbild zeigt ihn auch ohne laufenden Ablauf; ein ueberstehender
+   Streifen und kleine Kalibrierfehler stecken so mit im Wert.
 3. **Magnet** (`pallet_node`): `/detect/pallet_debug/compressed` ansehen, `magnet_x` und
    `magnet_top` auf den Magneten im Bild setzen. `grip_min` (switch_control) zwischen die
    Korrelation mit haengender und mit liegen gebliebener Palette legen.
@@ -297,7 +299,10 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 5. **Zonenlinien** (`storage_zone_node`): `/detect/zone_debug/compressed` beim Vorbeifahren;
    `side_near_m` so, dass die gestrichelte Linie gerade nicht mehr im Streifen liegt;
    `solid_min_m` und `dash_gap_max_m` nach Strichlaenge und Luecke der Strichelung.
-6. **Bot**: `pallet_center_offset` (Radachse bis Palettenmitte am Magneten) messen.
+6. **Ablegen** (`pallet_center_offset`): Palette haengt am Magneten; Abstand in Fahrtrichtung
+   von der Radachse bis zur Mitte des Rahmens messen. Der Bot haelt beim Ablegen so weit vor
+   der Zonenmitte, damit die Palettenmitte auf ihr liegt (Reglement: Ablage in der Zonenmitte).
+   Die Zonenmitte kommt aus den Zonenlinien, nicht aus der Messung der Palette.
 7. **Zielzone**: `ros2 param set /switch_control target_zone <1-3>` vor dem Start.
 
 ## Offene Punkte

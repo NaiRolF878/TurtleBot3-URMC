@@ -25,11 +25,10 @@
     fallback_step: 0.35
     # Nach so viel Strecke (m) endet die Erkundung.
     explore_max_distance: 2.5
-    # Kontakt: Abstand Radachse -> Palettenvorderkante (m), den /detect/pallet zeigt, wenn der
-    # Magnet am Metallstreifen anliegt. Am Bot messen.
+    # Radachse -> Vorderkante der Stuetze (m), wenn der Magnet am Streifen anliegt.
     contact_distance: 0.10
     # Palette haengt am Magneten ab dieser Korrelation (/detect/pallet_grip, 0..1).
     grip_min: 0.8
-    # Radachse -> Palettenmitte, wenn sie am Magneten haengt (m): am Bot messen.
+    # Radachse -> Palettenmitte (m), wenn sie am Magneten haengt.
     pallet_center_offset: 0.09
     carry_max_vel: 0.05

@@ -55,8 +55,8 @@ ist Schatten hinter Hindernissen. Draussen ist der Bot, wenn er die Huelle ganz 
 hat. Das alles kommt ohne Masse der Enclosure aus.
 
 **Storage (Palette, Stop/Dock/Maneuver).** Nur Kamera und Odometrie: Erkundung entlang
-der Spur, Schilder lesen, Palette per Kamera andocken und greifen, per odom in die
-Zielzone. Eigenes Konzept: `Storage_Retrieval_Konzept.md`.
+der Spur mit Zonenmodell, leere Zonen erkennen, rechtwinklig an die Palette andocken und
+greifen, per odom in die Zielzone. Eigenes Konzept: `Storage_Retrieval_Konzept.md`.
 
 ## Detaildoku
 

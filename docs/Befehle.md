@@ -103,8 +103,10 @@ Zeiten in Dateinamen sind UTC (2 h hinter deutscher Sommerzeit).
 | `/lokal/bev` | **Vogelperspektive**, 5–60 cm vor der Radachse, ±40 cm, 1,25 mm/px (640x440) |
 | `/detect/lane` | Spurfehler für den Regler |
 | `/control/mode` | Fahrmodus von `switch_control` (1 Lane, 2 Obstacle, 3 Stop, 7 TunnelEntry, 6 Tunnel, 8 Dock, 9 Maneuver) |
-| `/control/storage_state`, `/control/storage_info` | Storage: Ablaufschritt und Klartext (Zonen, Ziel, Fehlergrund) |
-| `/detect/pallet_debug/compressed`, `/detect/storage_sign_debug/compressed`, `/detect/zone_debug/compressed` | Storage: Debugbilder zum Einstellen von Magnetlage, Farben und Linien |
+| `/control/storage_state`, `/control/storage_info` | Storage: Ablaufschritt und Klartext (Zonen, Ziel, Rueckmeldungen, Fehlergrund) |
+| `/detect/pallet`, `/detect/pallet_grip` | Storage: Fuellung der Zone und Vorderkante der Palette; Korrelation beim Griff |
+| `/detect/zone_debug/compressed` | Storage: Zonenlinien, Zonenmodell, Boden, Vorderkante der Palette mit Rahmen und Abstand |
+| `/detect/pallet_debug/compressed`, `/detect/storage_sign_debug/compressed` | Storage: Magnetlage und Griff; Schilder |
 | `/nav2/cmd_vel` | Fahrbefehle von Nav2 (`controller_server`) an `control_driving` |
 | `/control/cmd_vel` | Fahrbefehle von `control_driving` an den Not-Aus |
 | `/control/clear_maps` | Taste L: `lane_costmap_node` leert Spurgedächtnis und Costmaps |
