@@ -68,7 +68,7 @@ greifen, per odom in die Zielzone. Eigenes Konzept: `Storage_Retrieval_Konzept.m
 | `Kalibrierung_Checkliste.md` | Kamera, BEV und Live-Test Schritt fuer Schritt |
 | `Storage_Retrieval_Konzept.md` | Storage-Aufgabe: Ablauf, Zustaende, Topics, Entscheidungen |
 | `Befehle.md` | Start, Not-Aus, Topics, Werkzeuge |
-| `challenges.md` | Ueberblick ueber die Wettbewerbsaufgaben |
+| `challenges.md` (auf `main`) | Ueberblick ueber die Wettbewerbsaufgaben |
 
 ## Start
 
