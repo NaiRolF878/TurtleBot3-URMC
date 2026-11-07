@@ -65,8 +65,7 @@ class StorageState(Enum):
 class SignType(Enum):
     """Erkanntes Schild auf /detect/sign (std_msgs/UInt8), unabhaengig von ControlType.
 
-    Welcher Modus aus einem Schild folgt, entscheidet switch_control. Tunnel = 6, damit
-    der Testbefehl "ros2 topic pub /detect/sign std_msgs/msg/UInt8 '{data: 6}'" gilt.
+    Welcher Modus aus einem Schild folgt, entscheidet switch_control.
     """
     Tunnel = 6
 
