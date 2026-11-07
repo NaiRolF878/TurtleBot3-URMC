@@ -60,7 +60,7 @@ hat. Das alles kommt ohne Masse der Enclosure aus.
 | `Obstacle_Tunnel_Offene_Punkte.md` | Testbeobachtungen und offene Punkte |
 | `Kalibrierung_Checkliste.md` | Kamera, BEV und Live-Test Schritt fuer Schritt |
 | `Befehle.md` | Start, Not-Aus, Topics, Werkzeuge |
-| `challenges.md` | Ueberblick ueber die Wettbewerbsaufgaben |
+| `challenges.md` (auf `main`) | Ueberblick ueber die Wettbewerbsaufgaben |
 
 ## Start
 
