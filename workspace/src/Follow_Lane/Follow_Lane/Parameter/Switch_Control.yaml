@@ -1,6 +1,6 @@
 /switch_control:
   ros__parameters:
-    # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop. Storage.yaml setzt Stop.
+    # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop.
     initial_mode: Lane
 
     # --- Eintritt Lane -> Obstacle ---

@@ -5,10 +5,8 @@ Aus:  /detect/storage_sign (StorageSign, source "vorlage"), nur im Zustand SCHIL
       /detect/storage_sign_debug/compressed (nur mit Zuschauer)
 
 Vorlagen: TEMPLATE_DIR/digit_<n>.png. Fehlt eine, wird die Ziffer mit einer
-OpenCV-Schrift gezeichnet. Vor Ort aufnehmen: Bot vor das Schild stellen, Zustand
-SCHILD_LESEN (oder Parameter always_on), dann
-    ros2 param set /storage_sign_node capture_digit 2
-speichert die Ziffer des groessten Schilds als Vorlage fuer "2".
+OpenCV-Schrift gezeichnet. capture_digit n speichert die Ziffer des groessten Schilds im
+naechsten Bild als Vorlage fuer n.
 """
 import array
 import os

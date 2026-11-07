@@ -3,7 +3,6 @@
 
 /switch_control:
   ros__parameters:
-    # Ohne Button faehrt nichts; nach Abbruch zurueck auf Stop.
     initial_mode: Stop
 
 /storage_zone_node:
@@ -22,13 +21,13 @@
     # Strichelung: durchgehende Linie ab solid_min_m, Strichluecke bis dash_gap_max_m.
     solid_min_m: 0.08
     dash_gap_max_m: 0.06
-    # Boden (schwarzer Teppich): Helligkeit L hoechstens; heller und nicht weiss = Palette.
+    # Boden: Helligkeit L hoechstens.
     floor_l_max: 80
 
 /storage_sign_node:
   ros__parameters:
     enabled: true
-    # auch ausserhalb SCHILD_LESEN, zum Einstellen
+    # auch ausserhalb SCHILD_LESEN
     always_on: false
     # Blau in LAB nach CLAHE.
     lab_l_blue_l: 10
@@ -39,18 +38,17 @@
     lab_b_blue_h: 105
     # Ziffer: L mindestens.
     white_l_min: 170
-    # Vorlage aufnehmen: ros2 param set /storage_sign_node capture_digit <1-3>
+    # Ziffer, deren Vorlage aus dem naechsten Bild aufgenommen wird; 0 = keine.
     capture_digit: 0
 
 /storage_sign_model_node:
   ros__parameters:
     enabled: true
-    # leer = aus, bis Gewichte trainiert sind
+    # leer = aus
     model_path: ''
 
 /pallet_node:
   ros__parameters:
-    # Lage des Magneten im entzerrten Bild (Anteil von Breite bzw. Hoehe), im Debugbild
-    # /detect/pallet_debug ablesen.
+    # Lage des Magneten im entzerrten Bild (Anteil von Breite bzw. Hoehe).
     magnet_x: 0.5
     magnet_top: 0.85

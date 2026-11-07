@@ -32,11 +32,10 @@ ATTACH_STATES = (StorageState.GRIFF_PRUEFEN, StorageState.HERAUSFAHREN, StorageS
 
 class pallet_node(Node):
     """Die Kamera sieht den Magneten; seine Lage im Bild steht in magnet_x und magnet_top
-    (Anteil der Bildbreite bzw. -hoehe, im Debugbild ablesen). Beim Greifen wird der
-    Ausschnitt darueber zur Vorlage. Haengt die Palette am Magneten, bewegt sie sich mit dem
-    Bot und der Ausschnitt bleibt gleich (Korrelation nahe 1). Bleibt sie liegen, wird sie
-    beim Zuruecksetzen kleiner und die Korrelation faellt ab. Ob das reicht, entscheidet
-    switch_control.
+    (Anteil der Bildbreite bzw. -hoehe). Beim Greifen wird der Ausschnitt darueber zur
+    Vorlage. Haengt die Palette am Magneten, bewegt sie sich mit dem Bot und der Ausschnitt
+    bleibt gleich (Korrelation nahe 1). Bleibt sie liegen, wird sie beim Zuruecksetzen kleiner
+    und die Korrelation faellt ab. Ob das reicht, entscheidet switch_control.
     """
 
     def __init__(self):
