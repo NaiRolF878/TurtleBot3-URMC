@@ -29,7 +29,7 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='felix.faass@web.de',
-    description='TODO: Package description',
+    description='URMRC 2026: Spurfolge, Hindernis, Tunnel und Storage',
     license='Apache-2.0',
     extras_require={
         'test': [

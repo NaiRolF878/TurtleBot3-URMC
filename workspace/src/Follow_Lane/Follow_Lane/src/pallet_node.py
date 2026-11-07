@@ -11,13 +11,22 @@ import numpy as np
 
 from cv_bridge import CvBridge
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
 from follow_lane_msg.msg import PalletDetection
 from Follow_Lane.src.common import (
-    StorageState, frange, irange, read_params, run_node, storage_state_from_msg)
+    StorageState, frange, irange, read_params, require_params, run_node, storage_state_from_msg)
 
+CLAHE_CLIP_LIMIT = 2.0
+CLAHE_TILE_GRID_SIZE = 8
+# Gesucht wird ab diesem Anteil der Bildhoehe bis zum Magneten.
+ROI_TOP = 0.3
+# Form: Flaeche (px), Breite/Hoehe mindestens, Breite hoechstens (Anteil der Bildbreite).
+MIN_AREA_PX = 200
+MIN_ASPECT = 2.0
+MAX_WIDTH = 0.7
 # Hier ist keine Palette im Bild oder sie wird nicht gebraucht.
 IDLE_STATES = (StorageState.IDLE, StorageState.ERKUNDEN, StorageState.ZUR_ZONE_DREHEN,
                StorageState.ZURUECKDREHEN, StorageState.FERTIG, StorageState.FEHLER)
@@ -26,12 +35,11 @@ IDLE_STATES = (StorageState.IDLE, StorageState.ERKUNDEN, StorageState.ZUR_ZONE_D
 class pallet_node(Node):
     """Die Kamera sieht den Magneten: seine Lage im Bild steht in magnet_x und
     magnet_top (Anteil der Bildbreite bzw. -hoehe, vor Ort im Debugbild ablesen).
-    Gesucht wird nur oberhalb des Magneten ab roi_top.
+    Gesucht wird nur oberhalb des Magneten ab ROI_TOP.
 
     Die Palette hat keine Markierung. Erkannt wird sie an ihrer Farbe (LAB-Bereich
-    lab_*_pallet_*, vor Ort messen) und Form: flach und breit (Front 10 x 2 cm,
-    Seitenverhaeltnis ueber min_aspect), nicht bis an den Bildrand (lange Linien) und
-    nicht breiter als max_width. Von mehreren gilt die unterste, also die naechste.
+    lab_*_pallet_*) und Form: flach und breit, nicht bis an den Bildrand (lange Linien)
+    und nicht breiter als MAX_WIDTH. Von mehreren gilt die unterste, also die naechste.
     """
 
     def __init__(self):
@@ -39,27 +47,19 @@ class pallet_node(Node):
 
         # --- Parameter ---
         byte = irange(0, 255)
-        # Startwerte: grauer Metallstreifen, mittelhell und fast ohne Farbe. Weiss
-        # (L >= 200) und der dunkle Boden fallen heraus. Vor Ort messen.
-        self.declare_parameter('lab_l_pallet_l', 70, byte)
-        self.declare_parameter('lab_l_pallet_h', 195, byte)
-        self.declare_parameter('lab_a_pallet_l', 115, byte)
-        self.declare_parameter('lab_a_pallet_h', 140, byte)
-        self.declare_parameter('lab_b_pallet_l', 110, byte)
-        self.declare_parameter('lab_b_pallet_h', 150, byte)
-        self.declare_parameter('clahe_clip_limit', 2.0, frange(0.1, 40.0))
-        self.declare_parameter('clahe_tile_grid_size', 8, irange(1, 64))
-        self.declare_parameter('magnet_x', 0.5, frange(0.0, 1.0))
-        self.declare_parameter('magnet_top', 0.85, frange(0.0, 1.0))
-        self.declare_parameter('roi_top', 0.3, frange(0.0, 1.0))
-        self.declare_parameter('min_area_px', 200, irange(1, 100000))
-        self.declare_parameter('min_aspect', 2.0, frange(0.5, 20.0))
-        self.declare_parameter('max_width', 0.7, frange(0.05, 1.0))
         self._param_names = [
             'lab_l_pallet_l', 'lab_l_pallet_h', 'lab_a_pallet_l', 'lab_a_pallet_h',
-            'lab_b_pallet_l', 'lab_b_pallet_h', 'clahe_clip_limit', 'clahe_tile_grid_size',
-            'magnet_x', 'magnet_top', 'roi_top', 'min_area_px', 'min_aspect', 'max_width',
+            'lab_b_pallet_l', 'lab_b_pallet_h', 'magnet_x', 'magnet_top',
         ]
+        self.declare_parameter('lab_l_pallet_l', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_l_pallet_h', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_a_pallet_l', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_a_pallet_h', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_b_pallet_l', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_b_pallet_h', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('magnet_x', Parameter.Type.DOUBLE, frange(0.0, 1.0))
+        self.declare_parameter('magnet_top', Parameter.Type.DOUBLE, frange(0.0, 1.0))
+        require_params(self, self._param_names)
         read_params(self, self._param_names)
 
         # --- Subscriber ---
@@ -99,11 +99,11 @@ class pallet_node(Node):
         h, w = image.shape[:2]
         magnet_u = self.magnet_x * w
         magnet_v = int(self.magnet_top * h)
-        top = min(int(self.roi_top * h), magnet_v)
+        top = min(int(ROI_TOP * h), magnet_v)
 
         l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2LAB))
-        tile = max(1, int(self.clahe_tile_grid_size))
-        clahe = cv2.createCLAHE(clipLimit=float(self.clahe_clip_limit), tileGridSize=(tile, tile))
+        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT,
+                                tileGridSize=(CLAHE_TILE_GRID_SIZE, CLAHE_TILE_GRID_SIZE))
         lab = cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
         mask = cv2.inRange(lab,
             (self.lab_l_pallet_l, self.lab_a_pallet_l, self.lab_b_pallet_l),
@@ -116,10 +116,10 @@ class pallet_node(Node):
         best = None
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
-            if cv2.contourArea(contour) < self.min_area_px:
+            if cv2.contourArea(contour) < MIN_AREA_PX:
                 continue
             x, y, bw, bh = cv2.boundingRect(contour)
-            if bw < self.min_aspect * bh or bw > self.max_width * w:
+            if bw < MIN_ASPECT * bh or bw > MAX_WIDTH * w:
                 continue
             if x <= 0 or x + bw >= w:
                 continue

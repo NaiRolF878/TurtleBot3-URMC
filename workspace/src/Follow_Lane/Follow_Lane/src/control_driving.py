@@ -60,6 +60,20 @@ MODE_SWITCH_HOLD = 0.3
 STOP_REPEAT = 10
 STOP_REPEAT_PERIOD_S = 0.05
 
+# Maneuver: darunter bewegt sich der Burger nicht sicher (m/s, rad/s).
+MANEUVER_MIN_VEL = 0.02
+MANEUVER_MIN_ANG = 0.3
+# Fertig, wenn so nah am Ziel; Zwischenpunkte eines Pfads gelten ab MANEUVER_WAYPOINT_TOL als
+# erreicht, ohne dort zu halten.
+MANEUVER_DIST_TOL = 0.01
+MANEUVER_YAW_TOL_DEG = 2.0
+MANEUVER_WAYPOINT_TOL = 0.03
+# Liegt der naechste Pfadpunkt weiter als das neben der Fahrtrichtung, erst auf der Stelle drehen.
+MANEUVER_ROTATE_FIRST_DEG = 30.0
+# Dock: ab DOCK_SLOW_GAP_PX abbremsen bis auf DOCK_MIN_FACTOR von dock_vel.
+DOCK_SLOW_GAP_PX = 80.0
+DOCK_MIN_FACTOR = 0.3
+
 
 def clamp(x, limit):
     return max(-limit, min(limit, x))
@@ -95,37 +109,20 @@ class control_driving(Node):
         self.declare_parameter('MAX_VEL',            Parameter.Type.DOUBLE, frange(0.0, 10.0))
         self.declare_parameter('speed_curve_factor', Parameter.Type.DOUBLE, frange(0.0, 5.0))
         self.declare_parameter('min_speed_factor',   Parameter.Type.DOUBLE, frange(0.0, 10.0))
-        # Maneuver: Geschwindigkeit proportional zum Rest (k_lin, k_ang), begrenzt
-        # nach oben und unten; unter min_* bewegt sich der Burger nicht sicher.
+        # Maneuver: Geschwindigkeit proportional zum Rest (k_lin, k_ang), nach oben begrenzt.
         self.declare_parameter('maneuver_max_vel',   Parameter.Type.DOUBLE, frange(0.01, 0.22))
-        self.declare_parameter('maneuver_min_vel',   Parameter.Type.DOUBLE, frange(0.0, 0.1))
         self.declare_parameter('maneuver_max_ang',   Parameter.Type.DOUBLE, frange(0.1, 2.8))
-        self.declare_parameter('maneuver_min_ang',   Parameter.Type.DOUBLE, frange(0.0, 1.0))
         self.declare_parameter('maneuver_k_lin',     Parameter.Type.DOUBLE, frange(0.1, 10.0))
         self.declare_parameter('maneuver_k_ang',     Parameter.Type.DOUBLE, frange(0.1, 10.0))
-        # Fertig, wenn so nah am Ziel (m bzw. Grad). Zwischenpunkte eines Pfads gelten
-        # ab maneuver_waypoint_tol als erreicht, ohne dort zu halten.
-        self.declare_parameter('maneuver_dist_tol',  Parameter.Type.DOUBLE, frange(0.002, 0.1))
-        self.declare_parameter('maneuver_yaw_tol_deg', Parameter.Type.DOUBLE, frange(0.2, 20.0))
-        self.declare_parameter('maneuver_waypoint_tol', Parameter.Type.DOUBLE, frange(0.005, 0.3))
-        # Liegt der naechste Pfadpunkt weiter als das neben der Fahrtrichtung, erst
-        # auf der Stelle drehen.
-        self.declare_parameter('maneuver_rotate_first_deg', Parameter.Type.DOUBLE, frange(5.0, 90.0))
-        # Dock: Geschwindigkeit, ab dock_slow_gap_px abbremsen bis auf dock_min_factor.
         self.declare_parameter('dock_vel',           Parameter.Type.DOUBLE, frange(0.005, 0.1))
-        self.declare_parameter('dock_min_factor',    Parameter.Type.DOUBLE, frange(0.05, 1.0))
-        self.declare_parameter('dock_slow_gap_px',   Parameter.Type.DOUBLE, frange(1.0, 500.0))
         self.declare_parameter('dock_contact_gap_px', Parameter.Type.DOUBLE, frange(-50.0, 50.0))
         self.declare_parameter('dock_k_ang',         Parameter.Type.DOUBLE, frange(0.0, 10.0))
         # Seitlicher Versatz (Anteil der halben Bildbreite), ab dem nur gedreht wird.
         self.declare_parameter('dock_align_tol',     Parameter.Type.DOUBLE, frange(0.0, 1.0))
         self._param_names = [
             'kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor',
-            'maneuver_max_vel', 'maneuver_min_vel', 'maneuver_max_ang', 'maneuver_min_ang',
-            'maneuver_k_lin', 'maneuver_k_ang', 'maneuver_dist_tol', 'maneuver_yaw_tol_deg',
-            'maneuver_waypoint_tol', 'maneuver_rotate_first_deg',
-            'dock_vel', 'dock_min_factor', 'dock_slow_gap_px', 'dock_contact_gap_px',
-            'dock_k_ang', 'dock_align_tol',
+            'maneuver_max_vel', 'maneuver_max_ang', 'maneuver_k_lin', 'maneuver_k_ang',
+            'dock_vel', 'dock_contact_gap_px', 'dock_k_ang', 'dock_align_tol',
         ]
         require_params(self, self._param_names)
         read_params(self, self._param_names)
@@ -309,10 +306,10 @@ class control_driving(Node):
             return twist
         turn = clamp(self.dock_k_ang * msg.lateral, self.maneuver_max_ang)
         if abs(msg.lateral) > self.dock_align_tol:
-            # Auf der Stelle zur Palette drehen; unter maneuver_min_ang dreht er nicht.
-            twist.angular.z = float(math.copysign(max(abs(turn), self.maneuver_min_ang), turn))
+            # Auf der Stelle zur Palette drehen; unter MANEUVER_MIN_ANG dreht er nicht.
+            twist.angular.z = float(math.copysign(max(abs(turn), MANEUVER_MIN_ANG), turn))
             return twist
-        factor = max(self.dock_min_factor, min(1.0, msg.gap_px / self.dock_slow_gap_px))
+        factor = max(DOCK_MIN_FACTOR, min(1.0, msg.gap_px / DOCK_SLOW_GAP_PX))
         twist.linear.x = float(self.dock_vel * factor)
         twist.angular.z = float(turn)
         return twist
@@ -352,13 +349,13 @@ class control_driving(Node):
         return m.max_vel if m.max_vel > 0.0 else self.maneuver_max_vel
 
     def _turn_rate(self, error):
-        """Drehrate fuer einen Winkelfehler (rad), mindestens maneuver_min_ang."""
+        """Drehrate fuer einen Winkelfehler (rad), mindestens MANEUVER_MIN_ANG."""
         w = clamp(self.maneuver_k_ang * error, self.maneuver_max_ang)
-        return math.copysign(max(abs(w), self.maneuver_min_ang), error)
+        return math.copysign(max(abs(w), MANEUVER_MIN_ANG), error)
 
     def _rotate(self, pose, target_yaw):
         error = wrap_angle(target_yaw - pose[2])
-        if abs(error) <= math.radians(self.maneuver_yaw_tol_deg):
+        if abs(error) <= math.radians(MANEUVER_YAW_TOL_DEG):
             return Twist(), True
         twist = Twist()
         twist.angular.z = float(self._turn_rate(error))
@@ -369,9 +366,9 @@ class control_driving(Node):
         along = (pose[0] - sx) * math.cos(syaw) + (pose[1] - sy) * math.sin(syaw)
         remaining = m.distance - along
         # Auch ueber das Ziel hinaus (Vorzeichen gewechselt) ist fertig.
-        if abs(remaining) <= self.maneuver_dist_tol or remaining * m.distance < 0.0:
+        if abs(remaining) <= MANEUVER_DIST_TOL or remaining * m.distance < 0.0:
             return Twist(), True
-        speed = min(self._max_vel(m), max(self.maneuver_min_vel, self.maneuver_k_lin * abs(remaining)))
+        speed = min(self._max_vel(m), max(MANEUVER_MIN_VEL, self.maneuver_k_lin * abs(remaining)))
         twist = Twist()
         twist.linear.x = float(math.copysign(speed, remaining))
         # Richtung vom Start halten
@@ -389,27 +386,27 @@ class control_driving(Node):
         # Zwischenpunkte ueberspringen, sobald sie nah genug sind.
         while self._waypoint < len(points) - 1 and math.hypot(
                 points[self._waypoint][0] - x, points[self._waypoint][1] - y) \
-                < self.maneuver_waypoint_tol:
+                < MANEUVER_WAYPOINT_TOL:
             self._waypoint += 1
 
         gx, gy = points[self._waypoint]
         dist = math.hypot(gx - x, gy - y)
         bearing = wrap_angle(math.atan2(gy - y, gx - x) - travel_yaw)
         last = self._waypoint == len(points) - 1
-        if last and (dist <= self.maneuver_dist_tol
-                     or (abs(bearing) > math.pi / 2 and dist < 3 * self.maneuver_dist_tol)):
+        if last and (dist <= MANEUVER_DIST_TOL
+                     or (abs(bearing) > math.pi / 2 and dist < 3 * MANEUVER_DIST_TOL)):
             # erreicht oder knapp vorbei (Ziel liegt schon hinter der Fahrtrichtung)
             return Twist(), True
 
         twist = Twist()
-        if abs(bearing) > math.radians(self.maneuver_rotate_first_deg):
+        if abs(bearing) > math.radians(MANEUVER_ROTATE_FIRST_DEG):
             twist.angular.z = float(self._turn_rate(bearing))
             return twist, False
 
         # Restweg bis zum Ende, damit an Zwischenpunkten nicht gebremst wird.
         rest = dist + sum(math.dist(points[i], points[i + 1])
                           for i in range(self._waypoint, len(points) - 1))
-        speed = min(self._max_vel(m), max(self.maneuver_min_vel, self.maneuver_k_lin * rest))
+        speed = min(self._max_vel(m), max(MANEUVER_MIN_VEL, self.maneuver_k_lin * rest))
         speed *= math.cos(bearing)
         twist.linear.x = float(-speed if m.reverse else speed)
         twist.angular.z = float(clamp(self.maneuver_k_ang * bearing, self.maneuver_max_ang))

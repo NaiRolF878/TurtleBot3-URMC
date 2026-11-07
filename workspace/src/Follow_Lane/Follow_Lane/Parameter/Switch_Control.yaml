@@ -13,3 +13,27 @@
     # --- Austritt Obstacle -> Lane ---
     # Im Bereich vorn, seitlich und schraeg hinten (270 Grad) nichts naeher als das (m).
     obstacle_clear_distance: 0.40
+
+    # --- Storage (storage_sequence.py) ---
+    # Zielzone sagt die Jury an.
+    target_zone: 2
+    # Ziffern der Zonen in Fahrtrichtung; leer = Schilder entscheiden.
+    zone_order: '1,2,3'
+    # Gilt nur, wenn in keiner Zone eine Palette gesehen wurde.
+    pallet_zone: 1
+    # Ohne Zonenmodell: so weit (m) hinter der letzten Querlinie zur Seite drehen; 0 = aus.
+    fallback_step: 0.35
+    # Nach so viel Strecke (m) endet die Erkundung.
+    explore_max_distance: 2.5
+    # Andocken (Pixel aus pallet_node): Kontakt ab contact_gap_px, gleich halten mit
+    # dock_contact_gap_px in Control_driving_PID_Wide.yaml. Unter dock_check_gap_px und
+    # Versatz ueber dock_lateral_tol: neu ansetzen.
+    contact_gap_px: 3.0
+    dock_check_gap_px: 30.0
+    dock_lateral_tol: 0.15
+    # Griff geprueft bzw. Palette beim Tragen verloren (Luecke in Pixeln).
+    grip_ok_gap_px: 10.0
+    pallet_lost_gap_px: 25.0
+    # Radachse -> Palettenmitte, wenn sie am Magneten haengt (m): am Bot messen.
+    pallet_center_offset: 0.09
+    carry_max_vel: 0.05

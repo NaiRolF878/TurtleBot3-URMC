@@ -4,7 +4,7 @@ Ein:  /lokal/raw_image (entzerrt), /control/storage_state
 Aus:  /detect/storage_sign (StorageSign, source "vorlage"), nur im Zustand SCHILD_LESEN,
       /detect/storage_sign_debug/compressed (nur mit Zuschauer)
 
-Vorlagen: <template_dir>/digit_<n>.png. Fehlt eine, wird die Ziffer mit einer
+Vorlagen: TEMPLATE_DIR/digit_<n>.png. Fehlt eine, wird die Ziffer mit einer
 OpenCV-Schrift gezeichnet. Vor Ort aufnehmen: Bot vor das Schild stellen, Zustand
 SCHILD_LESEN (oder Parameter always_on), dann
     ros2 param set /storage_sign_node capture_digit 2
@@ -17,7 +17,6 @@ import cv2
 import numpy as np
 
 from cv_bridge import CvBridge
-from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import CompressedImage, Image
@@ -25,9 +24,22 @@ from std_msgs.msg import String
 
 from follow_lane_msg.msg import StorageSign
 from Follow_Lane.src.common import (
-    StorageState, frange, irange, read_params, run_node, storage_state_from_msg)
+    StorageState, irange, read_params, require_params, run_node, storage_state_from_msg)
 
 DIGITS = (1, 2, 3)
+TEMPLATE_DIR = '~/.ros/urmc_storage_templates'
+CLAHE_CLIP_LIMIT = 2.0
+CLAHE_TILE_GRID_SIZE = 8
+# Weiss innen: A und B hoechstens so weit von 128 (farblos).
+WHITE_AB_TOL = 20
+# Schildform: Flaeche (px), Achsenverhaeltnis der Ellipse, Fuellgrad, weisser Anteil.
+MIN_AREA_PX = 150
+MIN_AXIS_RATIO = 0.5
+MIN_FILL_RATIO = 0.75
+MIN_WHITE_RATIO = 0.05
+# Vorlagenvergleich: beste Korrelation und Abstand zur zweitbesten.
+MIN_SCORE = 0.5
+MIN_MARGIN = 0.1
 # Normierte Groesse einer Ziffer (Breite, Hoehe) fuer den Vergleich.
 TEMPLATE_SIZE = (24, 36)
 
@@ -56,11 +68,9 @@ def synthetic_digit(digit):
 
 
 class storage_sign_node(Node):
-    """Blau-Maske (LAB nach CLAHE, Startwerte von detect_lane, gemessen am blauen
-    Klemmbrettrand), dann je Flaeche: rund genug (Ellipse passt, Achsenverhaeltnis ueber
-    min_axis_ratio; die Schranke ist ein Balken und faellt hier weg) und genug weiss
-    innen. Die weisse Ziffer wird normiert und mit jeder Vorlage korreliert; die beste
-    zaehlt, wenn sie ueber min_score liegt und min_margin vor der zweitbesten.
+    """Blau-Maske (LAB nach CLAHE), dann je Flaeche: rund genug (Ellipse passt; die
+    Schranke ist ein Balken und faellt weg) und genug weiss innen. Die weisse Ziffer wird
+    normiert und mit jeder Vorlage korreliert; die beste zaehlt, wenn sie eindeutig ist.
     """
 
     def __init__(self):
@@ -68,34 +78,21 @@ class storage_sign_node(Node):
 
         # --- Parameter ---
         byte = irange(0, 255)
-        self.declare_parameter('enabled', True)
-        self.declare_parameter('always_on', False)   # auch ausserhalb SCHILD_LESEN, zum Einstellen
-        self.declare_parameter('lab_l_blue_l', 10, byte)
-        self.declare_parameter('lab_l_blue_h', 255, byte)
-        self.declare_parameter('lab_a_blue_l', 135, byte)
-        self.declare_parameter('lab_a_blue_h', 200, byte)
-        self.declare_parameter('lab_b_blue_l', 0, byte)
-        self.declare_parameter('lab_b_blue_h', 105, byte)
-        # Weiss innen: hell und wenig Farbe (A, B nahe 128).
-        self.declare_parameter('white_l_min', 170, byte)
-        self.declare_parameter('white_ab_tol', 20, byte)
-        self.declare_parameter('clahe_clip_limit', 2.0, frange(0.1, 40.0))
-        self.declare_parameter('clahe_tile_grid_size', 8, irange(1, 64))
-        self.declare_parameter('min_area_px', 150, irange(1, 100000))
-        self.declare_parameter('min_axis_ratio', 0.5, frange(0.0, 1.0))
-        self.declare_parameter('min_fill_ratio', 0.75, frange(0.0, 1.0))
-        self.declare_parameter('min_white_ratio', 0.05, frange(0.0, 1.0))
-        self.declare_parameter('min_score', 0.5, frange(-1.0, 1.0))
-        self.declare_parameter('min_margin', 0.1, frange(0.0, 2.0))
-        self.declare_parameter('template_dir', '~/.ros/urmc_storage_templates')
-        self.declare_parameter('capture_digit', 0, irange(0, 3))
         self._param_names = [
             'enabled', 'always_on', 'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l',
-            'lab_a_blue_h', 'lab_b_blue_l', 'lab_b_blue_h', 'white_l_min', 'white_ab_tol',
-            'clahe_clip_limit', 'clahe_tile_grid_size', 'min_area_px', 'min_axis_ratio',
-            'min_fill_ratio', 'min_white_ratio', 'min_score', 'min_margin', 'template_dir',
-            'capture_digit',
+            'lab_a_blue_h', 'lab_b_blue_l', 'lab_b_blue_h', 'white_l_min', 'capture_digit',
         ]
+        self.declare_parameter('enabled', Parameter.Type.BOOL)
+        self.declare_parameter('always_on', Parameter.Type.BOOL)
+        self.declare_parameter('lab_l_blue_l', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_l_blue_h', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_a_blue_l', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_a_blue_h', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_b_blue_l', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('lab_b_blue_h', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('white_l_min', Parameter.Type.INTEGER, byte)
+        self.declare_parameter('capture_digit', Parameter.Type.INTEGER, irange(0, 3))
+        require_params(self, self._param_names)
         read_params(self, self._param_names)
 
         # --- Subscriber ---
@@ -112,7 +109,6 @@ class storage_sign_node(Node):
         self.bridge = CvBridge()
         self.state = StorageState.IDLE
         self.templates = self.load_templates()
-        self.add_on_set_parameters_callback(self.cb_params)
 
         self.get_logger().info('Started storage_sign_node.')
 
@@ -120,13 +116,6 @@ class storage_sign_node(Node):
 
     def cb_state(self, msg):
         self.state = storage_state_from_msg(msg)
-
-    def cb_params(self, params):
-        for p in params:
-            if p.name == 'template_dir':
-                self.template_dir = p.value
-                self.templates = self.load_templates()
-        return SetParametersResult(successful=True)
 
     def cb_image(self, img):
         read_params(self, self._param_names)
@@ -149,26 +138,25 @@ class storage_sign_node(Node):
             (self.lab_l_blue_l, self.lab_a_blue_l, self.lab_b_blue_l),
             (self.lab_l_blue_h, self.lab_a_blue_h, self.lab_b_blue_h))
         blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        tol = int(self.white_ab_tol)
-        white = cv2.inRange(lab, (int(self.white_l_min), 128 - tol, 128 - tol),
-                            (255, 128 + tol, 128 + tol))
+        white = cv2.inRange(lab, (int(self.white_l_min), 128 - WHITE_AB_TOL, 128 - WHITE_AB_TOL),
+                            (255, 128 + WHITE_AB_TOL, 128 + WHITE_AB_TOL))
 
         best = None
         contours, _ = cv2.findContours(blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < self.min_area_px or len(contour) < 5:
+            if area < MIN_AREA_PX or len(contour) < 5:
                 continue
             (cx, cy), (a1, a2), _ = cv2.fitEllipse(contour)
             major, minor = max(a1, a2), min(a1, a2)
-            if major <= 0 or minor / major < self.min_axis_ratio:
+            if major <= 0 or minor / major < MIN_AXIS_RATIO:
                 continue
-            if area / (np.pi * major * minor / 4.0) < self.min_fill_ratio:
+            if area / (np.pi * major * minor / 4.0) < MIN_FILL_RATIO:
                 continue
             inside = np.zeros(blue.shape, np.uint8)
             cv2.drawContours(inside, [contour], -1, 255, -1)
             digit_mask = cv2.bitwise_and(white, inside)
-            if np.count_nonzero(digit_mask) / area < self.min_white_ratio:
+            if np.count_nonzero(digit_mask) / area < MIN_WHITE_RATIO:
                 continue
             if best is None or area > best[0]:
                 best = (area, contour, cx, digit_mask)
@@ -204,18 +192,18 @@ class storage_sign_node(Node):
              for d, tmpl in self.templates.items()), reverse=True)
         score, digit = scores[0]
         margin = score - scores[1][0] if len(scores) > 1 else score
-        if score < self.min_score or margin < self.min_margin:
+        if score < MIN_SCORE or margin < MIN_MARGIN:
             return 0, score
         return digit, score
 
     def lab_clahe(self, image):
         l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2LAB))
-        tile = max(1, int(self.clahe_tile_grid_size))
-        clahe = cv2.createCLAHE(clipLimit=float(self.clahe_clip_limit), tileGridSize=(tile, tile))
+        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT,
+                                tileGridSize=(CLAHE_TILE_GRID_SIZE, CLAHE_TILE_GRID_SIZE))
         return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
 
     def template_path(self, digit):
-        return os.path.join(os.path.expanduser(self.template_dir), f'digit_{digit}.png')
+        return os.path.join(os.path.expanduser(TEMPLATE_DIR), f'digit_{digit}.png')
 
     def load_templates(self):
         templates = {}

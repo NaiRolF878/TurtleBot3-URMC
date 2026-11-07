@@ -205,6 +205,13 @@ def bev_pixels_to_ground(bev, us, vs):
     return bev['x_max'] - (vs + 0.5) * bev['res'], bev['y_half'] - (us + 0.5) * bev['res']
 
 
+def ground_to_bev_pixels(bev, xs, ys):
+    """Gegenstueck zu bev_pixels_to_ground: Boden (base_footprint) -> (u, v) als float."""
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    return (bev['y_half'] - ys) / bev['res'] - 0.5, (bev['x_max'] - xs) / bev['res'] - 0.5
+
+
 def stop_on_signals():
     """threading.Event, das SIGINT und SIGTERM setzen.
 

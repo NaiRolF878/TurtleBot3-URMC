@@ -5,17 +5,22 @@ Aus:  /detect/storage_sign (StorageSign, source "modell"), nur im Zustand SCHILD
 
 Noch ohne Gewichte: ist model_path leer oder fehlt ultralytics, meldet der Node das
 einmal und sendet nichts; switch_control stimmt dann nur mit storage_sign_node ab.
-Erwartet ein YOLO-Modell (ultralytics), dessen Klassennamen in class_digits stehen,
-in der Reihenfolge der Ziffern 1, 2, 3.
+Erwartet ein YOLO-Modell (ultralytics) mit den Klassennamen aus CLASS_DIGITS.
 """
 from cv_bridge import CvBridge
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 from follow_lane_msg.msg import StorageSign
 from Follow_Lane.src.common import (
-    StorageState, frange, irange, read_params, run_node, storage_state_from_msg)
+    StorageState, read_params, require_params, run_node, storage_state_from_msg)
+
+# Klassenname -> Ziffer
+CLASS_DIGITS = {'1': 1, '2': 2, '3': 3}
+CONF_THRESHOLD = 0.6
+IMAGE_SIZE = 320
 
 
 class storage_sign_model_node(Node):
@@ -24,12 +29,10 @@ class storage_sign_model_node(Node):
         super().__init__('storage_sign_model_node')
 
         # --- Parameter ---
-        self.declare_parameter('enabled', True)
-        self.declare_parameter('model_path', '')
-        self.declare_parameter('class_digits', ['1', '2', '3'])
-        self.declare_parameter('conf_threshold', 0.6, frange(0.0, 1.0))
-        self.declare_parameter('image_size', 320, irange(32, 1280))
-        self._param_names = ['enabled', 'conf_threshold', 'image_size']
+        self.declare_parameter('enabled', Parameter.Type.BOOL)
+        self.declare_parameter('model_path', Parameter.Type.STRING)
+        self._param_names = ['enabled', 'model_path']
+        require_params(self, self._param_names)
         read_params(self, self._param_names)
 
         # --- Subscriber ---
@@ -67,7 +70,7 @@ class storage_sign_model_node(Node):
     # --- Hilfsmethoden ---
 
     def load_model(self):
-        path = self.get_parameter('model_path').value
+        path = self.model_path
         if not path:
             self.get_logger().warn('model_path leer -- Modell aus.')
             return None
@@ -84,21 +87,19 @@ class storage_sign_model_node(Node):
 
     def find_sign(self, img):
         image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
-        result = self.model.predict(source=image, imgsz=int(self.image_size), verbose=False)[0]
+        result = self.model.predict(source=image, imgsz=IMAGE_SIZE, verbose=False)[0]
         if result.boxes is None or len(result.boxes) == 0:
             return
-        digits = {name: i + 1
-                  for i, name in enumerate(self.get_parameter('class_digits').value)}
         # Nur die sicherste Erkennung; je Bild eine Stimme wie bei storage_sign_node.
         best = max(result.boxes, key=lambda b: float(b.conf[0]))
         conf = float(best.conf[0])
         name = result.names[int(best.cls[0])]
-        if conf < self.conf_threshold or name not in digits:
+        if conf < CONF_THRESHOLD or name not in CLASS_DIGITS:
             return
         x0, _, x1, _ = (float(v) for v in best.xyxy[0])
         msg = StorageSign()
         msg.header = img.header
-        msg.digit = digits[name]
+        msg.digit = CLASS_DIGITS[name]
         msg.confidence = conf
         msg.image_x = float((x0 + x1) / image.shape[1] - 1.0)
         msg.source = 'modell'
