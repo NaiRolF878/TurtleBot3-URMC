@@ -25,15 +25,11 @@
     fallback_step: 0.35
     # Nach so viel Strecke (m) endet die Erkundung.
     explore_max_distance: 2.5
-    # Andocken (Pixel aus pallet_node): Kontakt ab contact_gap_px, gleich halten mit
-    # dock_contact_gap_px in Control_driving_PID_Wide.yaml. Unter dock_check_gap_px und
-    # Versatz ueber dock_lateral_tol: neu ansetzen.
-    contact_gap_px: 3.0
-    dock_check_gap_px: 30.0
-    dock_lateral_tol: 0.15
-    # Griff geprueft bzw. Palette beim Tragen verloren (Luecke in Pixeln).
-    grip_ok_gap_px: 10.0
-    pallet_lost_gap_px: 25.0
+    # Kontakt: Abstand Radachse -> Palettenvorderkante (m), den /detect/pallet zeigt, wenn der
+    # Magnet am Metallstreifen anliegt. Am Bot messen.
+    contact_distance: 0.10
+    # Palette haengt am Magneten ab dieser Korrelation (/detect/pallet_grip, 0..1).
+    grip_min: 0.8
     # Radachse -> Palettenmitte, wenn sie am Magneten haengt (m): am Bot messen.
     pallet_center_offset: 0.09
     carry_max_vel: 0.05

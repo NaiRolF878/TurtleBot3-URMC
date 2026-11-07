@@ -1,6 +1,4 @@
 MAX_VEL: 0.15
-dock_align_tol: 0.08
-dock_contact_gap_px: 3.0
 dock_k_ang: 1.5
 dock_vel: 0.03
 kd: 1.7

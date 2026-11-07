@@ -7,7 +7,7 @@ docs/Storage_Retrieval_Konzept.md.
 Ein:  /control/storage_request (Bool, Button), /detect/zone_boundaries,
       /detect/zone_dash_start, /detect/zone_dash_end und /detect/zone_cross_lines
       (PoseArray, odom), /detect/storage_sign (StorageSign), /detect/pallet
-      (PalletDetection), /control/maneuver_status (UInt32), TF
+      (PalletDetection), /detect/pallet_grip (Float32), /control/maneuver_status (UInt32), TF
 Aus:  /control/storage_state (String, Name aus StorageState), /control/storage_info
       (String, Klartext fuer debug_view), /control/storage_zones (StorageZones, Anzeige
       in storage_zone_node), /control/maneuver (Maneuver), /lokal/magnet_control (Bool)
@@ -20,7 +20,7 @@ import rclpy
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import Bool, String, UInt32
+from std_msgs.msg import Bool, Float32, String, UInt32
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from follow_lane_msg.msg import Maneuver, PalletDetection, StorageSign, StorageZones
@@ -35,15 +35,16 @@ ROBOT_FRAME = 'base_footprint'
 TICK_PERIOD_S = 0.1
 STATE_PUBLISH_PERIOD_S = 0.5
 # Zustaende, die eine Folge von Grundbewegungen abfahren und dann weiterschalten.
-MANEUVER_STATES = (S.ZUR_ZONE_DREHEN, S.ZURUECKDREHEN, S.ZUR_PALETTENZONE, S.GRIFF_PRUEFEN,
-                   S.NEU_ANSETZEN, S.HERAUSFAHREN, S.TRANSPORT, S.ABLAGE_ANFAHREN, S.VERLASSEN)
+MANEUVER_STATES = (S.ZUR_ZONE_DREHEN, S.ZURUECKDREHEN, S.ZUR_PALETTENZONE, S.AUSRICHTEN,
+                   S.GRIFF_PRUEFEN, S.NEU_ANSETZEN, S.HERAUSFAHREN, S.TRANSPORT,
+                   S.ABLAGE_ANFAHREN, S.VERLASSEN)
 # Mit Palette am Magneten: verschwindet sie aus dem Bild, ist sie verloren.
 CARRY_STATES = (S.HERAUSFAHREN, S.TRANSPORT, S.ABLAGE_ANFAHREN)
 INACTIVE_STATES = (S.IDLE, S.FERTIG, S.FEHLER)
 # Zwei Querlinien naeher als das (m) zaehlen bei der Zonentiefe als eine.
 CROSS_LINE_MERGE_M = 0.03
 CROSS_LINE_MAX_M = 1.0
-# So alt (s) darf die letzte Palettenerkennung beim Griff-Pruefen hoechstens sein.
+# So alt (s) darf die letzte Griffmeldung beim Griff-Pruefen hoechstens sein.
 PALLET_FRESH_S = 0.5
 MAGNET_TOPIC = '/lokal/magnet_control'
 
@@ -68,10 +69,21 @@ SIGN_READ_S = 1.5
 SIGN_READ_TIMEOUT_S = 4.0
 SIGN_MIN_VOTES = 3
 SIGN_MIN_SHARE = 0.6
-# Anteil der Bilder mit Palette, ab dem die Zone belegt ist.
+# Ein Bild zeigt eine Palette, wenn so viel der Zonenflaeche weder Boden noch Linie ist;
+# die Zone ist belegt, wenn das fuer PALLET_MIN_RATIO der Bilder gilt.
+FILL_MIN = 0.10
 PALLET_MIN_RATIO = 0.5
-# Halt vor der Palettenzone (Wertung: Bot positioniert).
+# Halt vor der Palettenzone (Wertung: Bot positioniert); dabei mindestens so viele
+# Messungen der Palettenvorderkante.
 POSITION_HOLD_S = 1.0
+MIN_FRONT_FRAMES = 3
+# Vor-Andock-Pose: so weit (m) vor dem Kontaktpunkt, rechtwinklig zur Vorderkante.
+PREDOCK_M = 0.10
+# Ab so nah (m) vor dem Kontakt muss der Bot rechtwinklig und mittig stehen, sonst neu
+# ansetzen. Seitlich: der Magnet bleibt auf dem 15 cm breiten Metallstreifen.
+DOCK_CHECK_M = 0.03
+DOCK_YAW_TOL_DEG = 5.0
+DOCK_LATERAL_TOL_M = 0.04
 CONTACT_FRAMES = 3
 DOCK_TIMEOUT_S = 20.0
 MAX_ATTEMPTS = 3
@@ -120,8 +132,13 @@ class StorageSequence:
     und Zonentiefe und dreht zurueck. Ohne Modell dreht er fallback_step hinter der letzten
     Grenze zur Seite und liest nur das Schild.
 
-    Danach: per odom vor die Palettenzone, halten (Wertung), andocken, greifen, Griff durch
-    Zuruecksetzen pruefen, an der Spur entlang vor die Zielzone, bis zur Zonenmitte,
+    Belegt ist eine Zone, wenn genug Bilder genug Flaeche zeigen, die weder Boden noch Linie
+    ist (fill von storage_zone_node).
+
+    Danach: per odom vor die Palettenzone, halten (Wertung) und dabei die Vorderkante der
+    Palette vermessen, rechtwinklig PREDOCK_M davor fahren, gerade andocken bis
+    contact_distance, greifen, Griff pruefen (nach dem Zuruecksetzen Korrelation von
+    pallet_node ab grip_min), an der Spur entlang vor die Zielzone, bis zur Zonenmitte,
     ablegen, rueckwaerts zurueck auf die Spur.
 
     Ziffer einer Zone: zone_order (Ziffern in Fahrtrichtung) nach ihrem Platz im Modell,
@@ -139,17 +156,13 @@ class StorageSequence:
         p('zone_order', Parameter.Type.STRING)
         p('fallback_step', Parameter.Type.DOUBLE, frange(0.0, 3.0))
         p('explore_max_distance', Parameter.Type.DOUBLE, frange(0.2, 10.0))
-        p('contact_gap_px', Parameter.Type.DOUBLE, frange(-50.0, 50.0))
-        p('dock_check_gap_px', Parameter.Type.DOUBLE, frange(0.0, 500.0))
-        p('dock_lateral_tol', Parameter.Type.DOUBLE, frange(0.0, 1.0))
-        p('grip_ok_gap_px', Parameter.Type.DOUBLE, frange(-50.0, 200.0))
-        p('pallet_lost_gap_px', Parameter.Type.DOUBLE, frange(0.0, 500.0))
+        p('contact_distance', Parameter.Type.DOUBLE, frange(0.03, 0.4))
+        p('grip_min', Parameter.Type.DOUBLE, frange(0.0, 1.0))
         p('pallet_center_offset', Parameter.Type.DOUBLE, frange(0.0, 0.3))
         p('carry_max_vel', Parameter.Type.DOUBLE, frange(0.01, 0.22))
         self._param_names = [
             'target_zone', 'pallet_zone', 'zone_order', 'fallback_step', 'explore_max_distance',
-            'contact_gap_px', 'dock_check_gap_px', 'dock_lateral_tol', 'grip_ok_gap_px',
-            'pallet_lost_gap_px', 'pallet_center_offset', 'carry_max_vel',
+            'contact_distance', 'grip_min', 'pallet_center_offset', 'carry_max_vel',
         ]
         require_params(node, self._param_names)
         self._read_params()
@@ -162,6 +175,7 @@ class StorageSequence:
         node.create_subscription(PoseArray, '/detect/zone_cross_lines', self.cb_cross_lines, 5)
         node.create_subscription(StorageSign, '/detect/storage_sign', self.cb_sign, 10)
         node.create_subscription(PalletDetection, '/detect/pallet', self.cb_pallet, 1)
+        node.create_subscription(Float32, '/detect/pallet_grip', self.cb_grip, 1)
         node.create_subscription(UInt32, '/control/maneuver_status', self.cb_maneuver_status, 1)
 
         # --- Publisher ---
@@ -242,17 +256,19 @@ class StorageSequence:
             self._sign_votes[msg.digit] += 1
 
     def cb_pallet(self, msg):
-        now = time.monotonic()
-        self._pallet = msg
-        self._pallet_time = now
-
-        if self.state == S.SCHILD_LESEN and self._reading():
+        if self.state == S.SCHILD_LESEN and self._reading() and msg.fill >= 0.0:
             self._pallet_frames += 1
-            self._pallet_found += int(msg.found)
+            self._pallet_found += int(msg.fill >= FILL_MIN)
+        elif self.state == S.POSITIONIERT and msg.found:
+            self._fronts.append((msg.distance, msg.lateral, msg.yaw))
         elif self.state == S.ANDOCKEN:
             self._check_dock(msg)
-        elif self.state in CARRY_STATES and msg.found and msg.gap_px <= self.pallet_lost_gap_px:
-            self._pallet_ok_time = now
+
+    def cb_grip(self, msg):
+        self._attached = msg.data >= self.grip_min
+        self._attached_time = time.monotonic()
+        if self.state in CARRY_STATES and self._attached:
+            self._pallet_ok_time = self._attached_time
 
     def cb_maneuver_status(self, msg):
         if self.state not in MANEUVER_STATES or not self._queue:
@@ -277,7 +293,7 @@ class StorageSequence:
         elif self.state == S.SCHILD_LESEN:
             self._tick_read(elapsed)
         elif self.state == S.POSITIONIERT and elapsed >= POSITION_HOLD_S:
-            self._enter(S.ANDOCKEN)
+            self._plan_dock()
         elif self.state == S.ANDOCKEN:
             if elapsed >= DOCK_TIMEOUT_S:
                 self._retry('Andocken dauert zu lange')
@@ -359,6 +375,11 @@ class StorageSequence:
         elif state == S.ZUR_PALETTENZONE:
             z = self._pallet_zone
             self._queue = [self._path_to(z.track_xy), self._rotate(z.yaw_in)]
+        elif state == S.POSITIONIERT:
+            self._fronts = []
+        elif state == S.AUSRICHTEN:
+            x, y, yaw = self._dock_pose
+            self._queue = [self._path_to((x, y)), self._rotate(yaw)]
         elif state == S.ANDOCKEN:
             mode = ControlType.Dock
             self._contact = 0
@@ -414,6 +435,8 @@ class StorageSequence:
                 self._enter(S.ERKUNDEN)
         elif self.state == S.ZUR_PALETTENZONE:
             self._enter(S.POSITIONIERT)
+        elif self.state == S.AUSRICHTEN:
+            self._enter(S.ANDOCKEN)
         elif self.state == S.GRIFF_PRUEFEN:
             self._check_grip()
         elif self.state == S.NEU_ANSETZEN:
@@ -664,24 +687,46 @@ class StorageSequence:
 
     # --- Andocken und Tragen ---
 
+    def _plan_dock(self):
+        """Vor-Andock-Pose aus den Messungen beim Halt: PREDOCK_M vor dem Kontaktpunkt,
+        Blick rechtwinklig auf die Vorderkante."""
+        robot = self._robot_pose()
+        if len(self._fronts) < MIN_FRONT_FRAMES or robot is None:
+            self._retry('Palette beim Positionieren nicht gefunden')
+            return
+        dist, lat, yaw = (sorted(v)[len(v) // 2] for v in zip(*self._fronts))
+        c, s = math.cos(robot[2]), math.sin(robot[2])
+        px, py = robot[0] + dist * c - lat * s, robot[1] + dist * s + lat * c
+        heading = robot[2] + yaw
+        back = self.contact_distance + PREDOCK_M
+        self._dock_pose = (px - back * math.cos(heading), py - back * math.sin(heading), heading)
+        self.node.get_logger().info(
+            f'Palette vermessen: {dist:.3f} m voraus, seitlich {lat:+.3f} m, '
+            f'Winkel {math.degrees(yaw):+.1f} Grad.')
+        self._enter(S.AUSRICHTEN)
+
     def _check_dock(self, msg):
         if not msg.found:
             self._contact = 0
             return
         self._pallet_seen_time = time.monotonic()
-        if msg.gap_px <= self.contact_gap_px:
+        if msg.distance > self.contact_distance + DOCK_CHECK_M:
+            self._contact = 0
+            return
+        if abs(msg.yaw) > math.radians(DOCK_YAW_TOL_DEG) or abs(msg.lateral) > DOCK_LATERAL_TOL_M:
+            self._retry(f'Nicht rechtwinklig vor der Palette (Winkel '
+                        f'{math.degrees(msg.yaw):+.1f} Grad, seitlich {msg.lateral:+.3f} m)')
+            return
+        if msg.distance <= self.contact_distance:
             self._contact += 1
             if self._contact >= CONTACT_FRAMES:
                 self._enter(S.GREIFEN)
-            return
-        self._contact = 0
-        if msg.gap_px <= self.dock_check_gap_px and abs(msg.lateral) > self.dock_lateral_tol:
-            self._retry(f'Seitlicher Versatz {msg.lateral:+.2f} kurz vor der Palette')
+        else:
+            self._contact = 0
 
     def _check_grip(self):
-        msg = self._pallet
-        fresh = msg is not None and time.monotonic() - self._pallet_time <= PALLET_FRESH_S
-        if fresh and msg.found and msg.gap_px <= self.grip_ok_gap_px:
+        fresh = time.monotonic() - self._attached_time <= PALLET_FRESH_S
+        if fresh and self._attached:
             self._report('Palette erfolgreich aufgenommen')
             self._enter(S.HERAUSFAHREN)
         else:
@@ -762,8 +807,10 @@ class StorageSequence:
         self._attempts = 0
         self._contact = 0
         self._contact_xy = None
-        self._pallet = None
-        self._pallet_time = 0.0
+        self._fronts = []
+        self._dock_pose = None
+        self._attached = False
+        self._attached_time = 0.0
         self._pallet_seen_time = 0.0
         self._pallet_ok_time = 0.0
         self._sign_votes = Counter()

@@ -1,7 +1,7 @@
-"""Palette der Storage-Aufgabe im Kamerabild, gemessen gegen den Magneten.
+"""Haelt der Magnet die Palette? Bildvergleich direkt ueber dem Magneten.
 
 Ein:  /lokal/raw_image (entzerrt), /control/storage_state
-Aus:  /detect/pallet (PalletDetection, jedes verarbeitete Bild, auch ohne Fund),
+Aus:  /detect/pallet_grip (Float32, Korrelation mit der Vorlage), nur in ATTACH_STATES,
       /detect/pallet_debug/compressed (nur mit Zuschauer)
 """
 import array
@@ -13,52 +13,39 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 
-from follow_lane_msg.msg import PalletDetection
 from Follow_Lane.src.common import (
-    StorageState, frange, irange, read_params, require_params, run_node, storage_state_from_msg)
+    StorageState, frange, read_params, require_params, run_node, storage_state_from_msg)
 
-CLAHE_CLIP_LIMIT = 2.0
-CLAHE_TILE_GRID_SIZE = 8
-# Gesucht wird ab diesem Anteil der Bildhoehe bis zum Magneten.
-ROI_TOP = 0.3
-# Form: Flaeche (px), Breite/Hoehe mindestens, Breite hoechstens (Anteil der Bildbreite).
-MIN_AREA_PX = 200
-MIN_ASPECT = 2.0
-MAX_WIDTH = 0.7
-# Hier ist keine Palette im Bild oder sie wird nicht gebraucht.
-IDLE_STATES = (StorageState.IDLE, StorageState.ERKUNDEN, StorageState.ZUR_ZONE_DREHEN,
-               StorageState.ZURUECKDREHEN, StorageState.FERTIG, StorageState.FEHLER)
+# Bildausschnitt ueber dem Magneten (Anteil von Bildbreite bzw. -hoehe).
+ROI_WIDTH = 0.3
+ROI_HEIGHT = 0.25
+# So weit (px) darf sich der Ausschnitt verschieben, ohne dass der Vergleich leidet.
+SEARCH_PAD_PX = 12
+BLUR_KERNEL = 5
+# Magnet an: dieses Bild wird zur Vorlage. Danach wird verglichen.
+REF_STATE = StorageState.GREIFEN
+ATTACH_STATES = (StorageState.GRIFF_PRUEFEN, StorageState.HERAUSFAHREN, StorageState.TRANSPORT,
+                 StorageState.ABLAGE_ANFAHREN)
 
 
 class pallet_node(Node):
-    """Die Kamera sieht den Magneten: seine Lage im Bild steht in magnet_x und
-    magnet_top (Anteil der Bildbreite bzw. -hoehe, vor Ort im Debugbild ablesen).
-    Gesucht wird nur oberhalb des Magneten ab ROI_TOP.
-
-    Die Palette hat keine Markierung. Erkannt wird sie an ihrer Farbe (LAB-Bereich
-    lab_*_pallet_*) und Form: flach und breit, nicht bis an den Bildrand (lange Linien)
-    und nicht breiter als MAX_WIDTH. Von mehreren gilt die unterste, also die naechste.
+    """Die Kamera sieht den Magneten; seine Lage im Bild steht in magnet_x und magnet_top
+    (Anteil der Bildbreite bzw. -hoehe, im Debugbild ablesen). Beim Greifen wird der
+    Ausschnitt darueber zur Vorlage. Haengt die Palette am Magneten, bewegt sie sich mit dem
+    Bot und der Ausschnitt bleibt gleich (Korrelation nahe 1). Bleibt sie liegen, wird sie
+    beim Zuruecksetzen kleiner und die Korrelation faellt ab. Ob das reicht, entscheidet
+    switch_control.
     """
 
     def __init__(self):
         super().__init__('pallet_node')
 
         # --- Parameter ---
-        byte = irange(0, 255)
-        self._param_names = [
-            'lab_l_pallet_l', 'lab_l_pallet_h', 'lab_a_pallet_l', 'lab_a_pallet_h',
-            'lab_b_pallet_l', 'lab_b_pallet_h', 'magnet_x', 'magnet_top',
-        ]
-        self.declare_parameter('lab_l_pallet_l', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_l_pallet_h', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_a_pallet_l', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_a_pallet_h', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_b_pallet_l', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_b_pallet_h', Parameter.Type.INTEGER, byte)
         self.declare_parameter('magnet_x', Parameter.Type.DOUBLE, frange(0.0, 1.0))
         self.declare_parameter('magnet_top', Parameter.Type.DOUBLE, frange(0.0, 1.0))
+        self._param_names = ['magnet_x', 'magnet_top']
         require_params(self, self._param_names)
         read_params(self, self._param_names)
 
@@ -68,12 +55,13 @@ class pallet_node(Node):
         self.sub_image = self.create_subscription(Image, '/lokal/raw_image', self.cb_image, 1)
 
         # --- Publisher ---
-        self.pub_pallet = self.create_publisher(PalletDetection, '/detect/pallet', 1)
+        self.pub_grip = self.create_publisher(Float32, '/detect/pallet_grip', 1)
         self.pub_debug = self.create_publisher(CompressedImage, '/detect/pallet_debug/compressed', 1)
 
         # --- Zustand ---
         self.bridge = CvBridge()
         self.state = StorageState.IDLE
+        self.reference = None
 
         self.get_logger().info('Started pallet_node.')
 
@@ -81,78 +69,59 @@ class pallet_node(Node):
 
     def cb_state(self, msg):
         self.state = storage_state_from_msg(msg)
+        if self.state not in ATTACH_STATES and self.state != REF_STATE:
+            self.reference = None
 
     def cb_image(self, img):
-        # Mit Zuschauer auch im Leerlauf, damit sich magnet_* und die Farben einstellen lassen.
-        if self.state in IDLE_STATES and self.pub_debug.get_subscription_count() == 0:
+        active = self.state == REF_STATE or self.state in ATTACH_STATES
+        if not active and self.pub_debug.get_subscription_count() == 0:
             return
         read_params(self, self._param_names)
         try:
-            self.find_pallet(img)
+            self.check(img)
         except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
-            self.get_logger().error(f'Palettenerkennung fehlgeschlagen: {e}')
+            self.get_logger().error(f'Griffpruefung fehlgeschlagen: {e}')
 
     # --- Hilfsmethoden ---
 
-    def find_pallet(self, img):
+    def check(self, img):
         image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
-        h, w = image.shape[:2]
-        magnet_u = self.magnet_x * w
-        magnet_v = int(self.magnet_top * h)
-        top = min(int(ROI_TOP * h), magnet_v)
+        gray = cv2.GaussianBlur(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
+                                (BLUR_KERNEL, BLUR_KERNEL), 0)
+        x0, y0, x1, y1 = self.roi(gray.shape)
+        score = None
+        if self.state == REF_STATE:
+            self.reference = gray[y0:y1, x0:x1].copy()
+        elif self.reference is not None:
+            h, w = gray.shape
+            search = gray[max(0, y0 - SEARCH_PAD_PX):min(h, y1 + SEARCH_PAD_PX),
+                          max(0, x0 - SEARCH_PAD_PX):min(w, x1 + SEARCH_PAD_PX)]
+            result = cv2.matchTemplate(search, self.reference, cv2.TM_CCOEFF_NORMED)
+            score = float(np.nan_to_num(result.max(), nan=-1.0))
+            if self.state in ATTACH_STATES:
+                self.pub_grip.publish(Float32(data=score))
+        self.publish_debug(image, (x0, y0, x1, y1), score)
 
-        l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2LAB))
-        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT,
-                                tileGridSize=(CLAHE_TILE_GRID_SIZE, CLAHE_TILE_GRID_SIZE))
-        lab = cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
-        mask = cv2.inRange(lab,
-            (self.lab_l_pallet_l, self.lab_a_pallet_l, self.lab_b_pallet_l),
-            (self.lab_l_pallet_h, self.lab_a_pallet_h, self.lab_b_pallet_h))
-        mask[:top] = 0
-        mask[magnet_v:] = 0
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    def roi(self, shape):
+        h, w = shape[:2]
+        cx, bottom = self.magnet_x * w, self.magnet_top * h
+        x0 = int(max(0, cx - ROI_WIDTH * w / 2.0))
+        x1 = int(min(w, cx + ROI_WIDTH * w / 2.0))
+        y0 = int(max(0, bottom - ROI_HEIGHT * h))
+        return x0, y0, x1, int(bottom)
 
-        best = None
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for contour in contours:
-            if cv2.contourArea(contour) < MIN_AREA_PX:
-                continue
-            x, y, bw, bh = cv2.boundingRect(contour)
-            if bw < MIN_ASPECT * bh or bw > MAX_WIDTH * w:
-                continue
-            if x <= 0 or x + bw >= w:
-                continue
-            if best is None or y + bh > best[1] + best[3]:
-                best = (x, y, bw, bh)
-
-        msg = PalletDetection()
-        msg.header = img.header
-        if best is not None:
-            x, y, bw, bh = best
-            msg.found = True
-            msg.lateral = float((magnet_u - (x + bw / 2.0)) / (w / 2.0))
-            msg.gap_px = float(magnet_v - (y + bh))
-            msg.width_px = float(bw)
-        self.pub_pallet.publish(msg)
-        self.publish_debug(image, mask, best, magnet_u, magnet_v, top, msg)
-
-    def publish_debug(self, image, mask, best, magnet_u, magnet_v, top, msg):
+    def publish_debug(self, image, box, score):
         if self.pub_debug.get_subscription_count() == 0:
             return
         view = image.copy()
-        view[mask > 0] = (0.5 * view[mask > 0] + (0, 0, 127)).astype(np.uint8)
+        x0, y0, x1, y1 = box
+        cv2.rectangle(view, (x0, y0), (x1, y1), (0, 255, 255), 2)
         w = view.shape[1]
-        cv2.line(view, (0, top), (w - 1, top), (255, 200, 0), 1)
-        cv2.line(view, (0, magnet_v), (w - 1, magnet_v), (0, 255, 255), 2)
-        cv2.line(view, (int(magnet_u), magnet_v), (int(magnet_u), view.shape[0] - 1),
-                 (0, 255, 255), 2)
-        if best is not None:
-            x, y, bw, bh = best
-            cv2.rectangle(view, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
-            text = f'seitlich {msg.lateral:+.2f}  Luecke {msg.gap_px:.0f} px'
+        cv2.line(view, (0, y1), (w - 1, y1), (0, 255, 255), 1)
+        if score is None:
+            text = 'Vorlage' if self.state == REF_STATE else 'keine Vorlage'
         else:
-            text = 'keine Palette'
+            text = f'Korrelation {score:.2f}'
         cv2.putText(view, f'{self.state.name}: {text}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                     0.8, (0, 255, 0), 2, cv2.LINE_AA)
         ok, encoded = cv2.imencode('.jpg', view)

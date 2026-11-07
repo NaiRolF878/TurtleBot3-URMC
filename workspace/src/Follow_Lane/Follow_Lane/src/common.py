@@ -47,8 +47,8 @@ class StorageState(Enum):
     SCHILD_LESEN = 3         # stehen, Schild, Palette und Zonentiefe abstimmen
     ZURUECKDREHEN = 4        # zurueck in Fahrtrichtung der Spur
     ZUR_PALETTENZONE = 5     # auf der Spur vor die Palettenzone, zur Zone drehen
-    POSITIONIERT = 6         # anhalten vor der Palettenzone (Wertung)
-    ANDOCKEN = 7             # im Bild bis an den Metallstreifen
+    POSITIONIERT = 6         # anhalten vor der Palettenzone (Wertung), Palette vermessen
+    ANDOCKEN = 7             # rechtwinklig und gerade bis an die Palette
     GREIFEN = 8              # Magnet an, warten
     GRIFF_PRUEFEN = 9        # kurz zuruecksetzen, kommt die Palette mit?
     NEU_ANSETZEN = 10        # zurueck auf die Spur, erneut ausrichten
@@ -59,6 +59,7 @@ class StorageState(Enum):
     VERLASSEN = 15           # rueckwaerts auf die Spur
     FERTIG = 16
     FEHLER = 17
+    AUSRICHTEN = 18          # rechtwinklig vor die Palette (Vor-Andock-Pose)
 
 
 class SignType(Enum):

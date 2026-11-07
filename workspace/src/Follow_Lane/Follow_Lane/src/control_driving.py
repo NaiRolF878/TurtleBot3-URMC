@@ -70,9 +70,8 @@ MANEUVER_YAW_TOL_DEG = 2.0
 MANEUVER_WAYPOINT_TOL = 0.03
 # Liegt der naechste Pfadpunkt weiter als das neben der Fahrtrichtung, erst auf der Stelle drehen.
 MANEUVER_ROTATE_FIRST_DEG = 30.0
-# Dock: ab DOCK_SLOW_GAP_PX abbremsen bis auf DOCK_MIN_FACTOR von dock_vel.
-DOCK_SLOW_GAP_PX = 80.0
-DOCK_MIN_FACTOR = 0.3
+# Dock: liegt die Palettenmitte weiter als das neben der Fahrtrichtung, nur drehen.
+DOCK_TURN_ONLY_RAD = 0.15
 
 
 def clamp(x, limit):
@@ -93,9 +92,9 @@ class control_driving(Node):
     Node die id auf /control/maneuver_status und sendet Null, bis eine neue kommt.
     Ein Moduswechsel verwirft die laufende Bewegung.
 
-    Dock: dreht auf der Stelle, solange die Palette seitlich mehr als dock_align_tol
-    neben dem Magneten liegt, sonst faehrt er langsam vor und lenkt nach. Ab
-    dock_contact_gap_px steht er; ob gegriffen wird, entscheidet switch_control.
+    Dock: faehrt mit dock_vel auf die Mitte der Palettenvorderkante zu und lenkt nach
+    (/detect/pallet); liegt sie mehr als DOCK_TURN_ONLY_RAD daneben, dreht er nur. Den
+    Kontakt erkennt switch_control und schaltet auf Stop.
     """
 
     def __init__(self):
@@ -115,14 +114,11 @@ class control_driving(Node):
         self.declare_parameter('maneuver_k_lin',     Parameter.Type.DOUBLE, frange(0.1, 10.0))
         self.declare_parameter('maneuver_k_ang',     Parameter.Type.DOUBLE, frange(0.1, 10.0))
         self.declare_parameter('dock_vel',           Parameter.Type.DOUBLE, frange(0.005, 0.1))
-        self.declare_parameter('dock_contact_gap_px', Parameter.Type.DOUBLE, frange(-50.0, 50.0))
         self.declare_parameter('dock_k_ang',         Parameter.Type.DOUBLE, frange(0.0, 10.0))
-        # Seitlicher Versatz (Anteil der halben Bildbreite), ab dem nur gedreht wird.
-        self.declare_parameter('dock_align_tol',     Parameter.Type.DOUBLE, frange(0.0, 1.0))
         self._param_names = [
             'kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor',
             'maneuver_max_vel', 'maneuver_max_ang', 'maneuver_k_lin', 'maneuver_k_ang',
-            'dock_vel', 'dock_contact_gap_px', 'dock_k_ang', 'dock_align_tol',
+            'dock_vel', 'dock_k_ang',
         ]
         require_params(self, self._param_names)
         read_params(self, self._param_names)
@@ -302,15 +298,15 @@ class control_driving(Node):
 
     def _dock(self, msg):
         twist = Twist()
-        if not msg.found or msg.gap_px <= self.dock_contact_gap_px:
+        if not msg.found:
             return twist
-        turn = clamp(self.dock_k_ang * msg.lateral, self.maneuver_max_ang)
-        if abs(msg.lateral) > self.dock_align_tol:
-            # Auf der Stelle zur Palette drehen; unter MANEUVER_MIN_ANG dreht er nicht.
+        bearing = math.atan2(msg.lateral, max(msg.distance, 0.01))
+        turn = clamp(self.dock_k_ang * bearing, self.maneuver_max_ang)
+        if abs(bearing) > DOCK_TURN_ONLY_RAD:
+            # Unter MANEUVER_MIN_ANG dreht er nicht.
             twist.angular.z = float(math.copysign(max(abs(turn), MANEUVER_MIN_ANG), turn))
             return twist
-        factor = max(DOCK_MIN_FACTOR, min(1.0, msg.gap_px / DOCK_SLOW_GAP_PX))
-        twist.linear.x = float(self.dock_vel * factor)
+        twist.linear.x = float(self.dock_vel)
         twist.angular.z = float(turn)
         return twist
 

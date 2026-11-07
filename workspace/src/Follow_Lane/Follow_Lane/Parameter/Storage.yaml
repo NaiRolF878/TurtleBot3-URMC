@@ -22,6 +22,8 @@
     # Strichelung: durchgehende Linie ab solid_min_m, Strichluecke bis dash_gap_max_m.
     solid_min_m: 0.08
     dash_gap_max_m: 0.06
+    # Boden (schwarzer Teppich): Helligkeit L hoechstens; heller und nicht weiss = Palette.
+    floor_l_max: 80
 
 /storage_sign_node:
   ros__parameters:
@@ -52,10 +54,3 @@
     # /detect/pallet_debug ablesen.
     magnet_x: 0.5
     magnet_top: 0.85
-    # Farbe der Palette in LAB nach CLAHE.
-    lab_l_pallet_l: 70
-    lab_l_pallet_h: 195
-    lab_a_pallet_l: 115
-    lab_a_pallet_h: 140
-    lab_b_pallet_l: 110
-    lab_b_pallet_h: 150

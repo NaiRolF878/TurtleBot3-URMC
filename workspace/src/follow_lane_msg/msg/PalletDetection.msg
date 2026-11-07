@@ -1,15 +1,14 @@
+# Zone und Palette in der Vogelperspektive (storage_zone_node), base_footprint zum Bildzeitpunkt.
 std_msgs/Header header
 
-# Palette im entzerrten Kamerabild gefunden. Alle anderen Felder gelten nur dann.
+# Anteil der Zonenflaeche, die weder dunkler Boden noch weisse Linie ist (0..1); -1 = nicht gemessen.
+float32 fill
+
+# Vorderkante der Palette (Bodenkante der Stuetze) gefunden. Die Felder darunter gelten nur dann.
 bool found
-
-# Seitlicher Versatz Palettenmitte gegen Magnetmitte, geteilt durch die halbe
-# Bildbreite: > 0 = Palette links vom Magneten (REP 103), etwa -1..1.
+# Radachse -> Vorderkante in Fahrtrichtung (m).
+float32 distance
+# Mitte der Vorderkante, links positiv (m).
 float32 lateral
-
-# Senkrechter Abstand in Pixeln von der Unterkante der Palette bis zur Oberkante des
-# Magneten; <= 0 = beruehrt oder ueberlappt.
-float32 gap_px
-
-# Breite der Palette im Bild (px).
-float32 width_px
+# So weit muesste der Bot drehen, um rechtwinklig zur Vorderkante zu stehen, links positiv (rad).
+float32 yaw
