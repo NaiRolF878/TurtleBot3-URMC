@@ -7,26 +7,14 @@
 
 /storage_zone_node:
   ros__parameters:
-    # Weiss in LAB nach CLAHE.
-    lab_l_white_l: 200
-    lab_l_white_h: 255
-    lab_a_white_l: 112
-    lab_a_white_h: 140
-    lab_b_white_l: 110
-    lab_b_white_h: 145
-    # Querlinien ab diesem Abstand (m) von der Bot-Mitte, rechts der Strichelung.
+    # Weiss, CLAHE: von detect_lane (Follow_Lane_ROI_LAB.yaml). Boden: lernt der Node selbst.
+    # Querlinien ab diesem Abstand (m) von der Bot-Mitte, rechts der gestrichelten Spurlinie.
     side_near_m: 0.14
     # Querlinie: hoechstens so viel Grad von der Querrichtung.
     max_angle_deg: 15.0
-    # Strichelung: durchgehende Linie ab solid_min_m, Strichluecke bis dash_gap_max_m.
-    solid_min_m: 0.08
-    dash_gap_max_m: 0.06
-    # Boden: Helligkeit L hoechstens.
-    floor_l_max: 80
 
 /storage_sign_node:
   ros__parameters:
-    enabled: true
     # auch ausserhalb SCHILD_LESEN
     always_on: false
     # Blau in LAB nach CLAHE.
@@ -36,19 +24,5 @@
     lab_a_blue_h: 200
     lab_b_blue_l: 0
     lab_b_blue_h: 105
-    # Ziffer: L mindestens.
-    white_l_min: 170
     # Ziffer, deren Vorlage aus dem naechsten Bild aufgenommen wird; 0 = keine.
     capture_digit: 0
-
-/storage_sign_model_node:
-  ros__parameters:
-    enabled: true
-    # leer = aus
-    model_path: ''
-
-/pallet_node:
-  ros__parameters:
-    # Lage des Magneten im entzerrten Bild (Anteil von Breite bzw. Hoehe).
-    magnet_x: 0.5
-    magnet_top: 0.85

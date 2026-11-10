@@ -1,6 +1,7 @@
 """Gemeinsame Bausteine der Follow_Lane-Nodes.
 
-Fahrmodi (ControlType), Storage-Zustaende (StorageState), Parameter-Helfer,
+Fahrmodi (ControlType), Storage-Zustaende (StorageState), Parameter-Helfer (auch
+Parameter eines anderen Nodes live mitlesen: SharedParams), CLAHE,
 Geometrie (Gierwinkel, BEV-Pixel -> Meter) und der einheitliche Ablauf von main():
 starten, spinnen, bei SIGINT/SIGTERM shut_down().
 """
@@ -9,10 +10,14 @@ import signal
 import threading
 from enum import Enum
 
+import cv2
 import numpy as np
 import rclpy
-from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
+from rcl_interfaces.msg import (
+    FloatingPointRange, IntegerRange, ParameterDescriptor, ParameterEvent)
+from rcl_interfaces.srv import GetParameters
 from rclpy.exceptions import ParameterUninitializedException
+from rclpy.parameter import parameter_value_to_python
 from rclpy.signals import SignalHandlerOptions
 
 # Wartezeit von spin_once; so schnell reagiert ein Node auf Strg+C.
@@ -22,6 +27,17 @@ COSTMAP_BLOCKED = 99
 # Groesser als robot_radius + footprint_padding der global_costmap (0,11 m): so weit reicht
 # der Sperrsaum der Wand, an der der Bot steht.
 PATH_CHECK_SKIP_M = 0.125
+# Eigener Bot vorn im Bild (Magnet, Halter), wie er in der BEV erscheint: bis SELF_MASK_X_M vor
+# der Radachse und +-SELF_MASK_Y_M nie Linie oder Palette (detect_lane, storage_zone_node). In der
+# BEV wirkt der Magnet weiter vorn, als er ist (er sitzt 7,5 cm hoch, die BEV gilt fuer den Boden).
+SELF_MASK_X_M = 0.11
+SELF_MASK_Y_M = 0.05
+# Magnet (gemessen): Radachse bis Magnetende 7,5 cm, Magnetmitte 7,5 cm ueber dem Boden.
+MAGNET_FRONT_M = 0.075
+MAGNET_HEIGHT_M = 0.075
+# Breite des Burger ueber die Raeder (m), wie der Footprint in nav2_params.yaml; gemeinsam
+# fuer Tunnel (Durchfahrt) und Storage (kleinste moegliche Zone).
+BOT_WIDTH = 0.178
 
 
 class ControlType(Enum):
@@ -33,7 +49,7 @@ class ControlType(Enum):
     Align = 5           # noch ohne Ausloeser
     Tunnel = 6          # im Tunnel: Kamera verboten (Reglement)
     TunnelEntry = 7     # Einfahrt bis kurz vor die Oeffnung, Kamera noch erlaubt
-    Dock = 8            # Storage: Feinanfahrt an die Palette im Kamerabild
+    # 8 war Dock (Storage-Feinanfahrt im Kamerabild), ersetzt durch Maneuver geradeaus
     Maneuver = 9        # Storage: Grundbewegung in odom (/control/maneuver)
 
 
@@ -110,6 +126,89 @@ def require_params(node, names):
             f'Ohne Wert: {", ".join(missing)} -- YAML nicht geladen oder unvollstaendig. '
             f'{node.get_name()} startet nicht.')
         raise SystemExit(1)
+
+
+# Farben gibt es nur einmal: detect_lane haelt sie (Follow_Lane_ROI_LAB.yaml, rqt), andere
+# Nodes lesen sie mit SharedParams mit.
+COLOR_SOURCE = 'detect_lane'
+WHITE_PARAMS = ['lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
+                'lab_b_white_l', 'lab_b_white_h']
+CLAHE_PARAMS = ['clahe_clip_limit', 'clahe_tile_grid_size']
+
+
+class SharedParams:
+    """Parameter eines anderen Nodes live mitlesen: einmal per get_parameters holen (bis es
+    klappt, alle RETRY_S), danach jede Aenderung aus /parameter_events uebernehmen. So gibt
+    es jeden Wert nur an einer Stelle; was in rqt beim Quell-Node eingestellt wird, gilt
+    sofort auch hier. Werte: shared.values[name]; erst verwenden, wenn shared.ready."""
+
+    RETRY_S = 1.0
+
+    def __init__(self, node, source, names):
+        self.node = node
+        self.source = source.strip('/')
+        self.names = list(names)
+        self.values = {}
+        self._future = None
+        self._client = node.create_client(GetParameters, f'/{self.source}/get_parameters')
+        node.create_subscription(ParameterEvent, '/parameter_events', self._on_event, 10)
+        self._timer = node.create_timer(self.RETRY_S, self._request)
+        self._request()
+
+    @property
+    def ready(self):
+        return all(n in self.values for n in self.names)
+
+    def __getitem__(self, name):
+        return self.values[name]
+
+    def _request(self):
+        if self.ready:
+            self._timer.cancel()
+            return
+        if self._future is not None and not self._future.done():
+            return
+        if not self._client.service_is_ready():
+            self.node.get_logger().warn(f'Warte auf die Parameter von /{self.source} ...',
+                                        throttle_duration_sec=5.0)
+            return
+        self._future = self._client.call_async(GetParameters.Request(names=self.names))
+        self._future.add_done_callback(self._on_response)
+
+    def _on_response(self, future):
+        for name, value in zip(self.names, future.result().values):
+            value = parameter_value_to_python(value)
+            if value is not None:
+                self.values[name] = value
+        if self.ready:
+            self.node.get_logger().info(f'Parameter von /{self.source} uebernommen: '
+                                        + ', '.join(f'{n}={self.values[n]}' for n in self.names))
+
+    def _on_event(self, event):
+        if event.node.strip('/') != self.source:
+            return
+        was_ready = self.ready
+        for p in list(event.new_parameters) + list(event.changed_parameters):
+            if p.name in self.names:
+                self.values[p.name] = parameter_value_to_python(p.value)
+                if was_ready:   # beim Start des Quell-Nodes kommen alle einzeln -- nicht melden
+                    self.node.get_logger().info(f'{p.name}={self.values[p.name]} von /{self.source}')
+        if not was_ready and self.ready:
+            self.node.get_logger().info(f'Parameter von /{self.source} uebernommen.')
+
+
+def lab_clahe(image, clip_limit, tile_grid_size):
+    """BGR -> LAB, CLAHE auf dem L-Kanal (gleicht ueber- und unterbelichtete Bereiche an)."""
+    l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2LAB))
+    tile = max(1, int(tile_grid_size))
+    clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=(tile, tile))
+    return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
+
+
+def white_in(lab, shared):
+    """Weiss-Maske aus einem LAB-Bild mit den gemeinsamen Weiss-Werten (SharedParams)."""
+    return cv2.inRange(lab, tuple(int(shared[n]) for n in WHITE_PARAMS[0::2]),
+                       tuple(int(shared[n]) for n in WHITE_PARAMS[1::2]))
 
 
 def control_mode_from_msg(node, msg):

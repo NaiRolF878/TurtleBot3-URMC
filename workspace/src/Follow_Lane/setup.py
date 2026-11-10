@@ -51,7 +51,6 @@ setup(
             'notaus               = Follow_Lane.src.notaus:main',
             'odom_filter          = Follow_Lane.src.odom_filter:main',
             'pallet_node          = Follow_Lane.src.pallet_node:main',
-            'storage_sign_model_node = Follow_Lane.src.storage_sign_model_node:main',
             'storage_sign_node    = Follow_Lane.src.storage_sign_node:main',
             'storage_zone_node    = Follow_Lane.src.storage_zone_node:main',
             'switch_control       = Follow_Lane.src.switch_control:main',

@@ -54,6 +54,35 @@ def ground_homography(K, height, pitch_deg, roll_deg, dx=0.0, dy=0.0, yaw_deg=0.
     return K @ np.column_stack([R[:, 0], R[:, 1], t])
 
 
+def load_camera(param_dir, calibration, extrinsics, balance, size=None):
+    """(K des entzerrten Rohbilds, Extrinsik-dict) aus den Kalibrierdateien, wie
+    ingress_node_nav2 rechnet. size = (w, h); None = Groesse der Intrinsik-Datei."""
+    with open(os.path.join(param_dir, 'camera_info', calibration)) as f:
+        cal = yaml.safe_load(f)
+    with open(os.path.join(param_dir, 'camera_info', extrinsics)) as f:
+        ext = yaml.safe_load(f)
+    w, h = size if size is not None else (cal['image_width'], cal['image_height'])
+    K = np.array(cal['camera_matrix']['data'], np.float64).reshape(3, 3)
+    K[0] *= w / cal['image_width']
+    K[1] *= h / cal['image_height']
+    if cal.get('distortion_model', 'plumb_bob') in ('equidistant', 'fisheye'):
+        D = np.array(cal['distortion_coefficients']['data'], np.float64).reshape(4, 1)
+        K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+            K, D, (w, h), np.eye(3), balance=balance)
+    return K, ext
+
+
+def project_points(K, ext, points):
+    """Punkte (N, 3) im Bodensystem (X vor ab Radachse, Y links, Z hoch, m) -> Pixel (N, 2) im
+    entzerrten Rohbild. Gleiche Rechnung wie ground_homography, nur mit Hoehe."""
+    R = rot_ground_to_cam(ext['camera_pitch_deg'], ext['camera_roll_deg'],
+                          ext.get('camera_yaw_deg', 0.0))
+    t = -R @ np.array([ext.get('forward_offset_m', 0.0), ext.get('lateral_offset_m', 0.0),
+                       ext['camera_height_m']])
+    p = K @ (R @ np.asarray(points, np.float64).T + t[:, None])
+    return (p[:2] / p[2]).T
+
+
 def build_bev_maps(spec, ext, K_raw, D, fisheye, K_und):
     """Remap-Tabellen BEV-Pixel -> Rohbild-Pixel.
 

@@ -77,7 +77,7 @@ class switch_control(Node):
     ausserhalb der Wand-Huelle ist. Beides jederzeit von Hand abbrechbar (False).
 
     Storage (Palette, Button im Debugbild auf /control/storage_request): den Ablauf
-    fuehrt StorageSequence, sie setzt die Modi Lane, Stop, Dock und Maneuver. Solange
+    fuehrt StorageSequence, sie setzt die Modi Lane, Stop und Maneuver. Solange
     sie laeuft, gibt es kein Obstacle (der LiDAR spielt dort keine Rolle; Schilder-
     pfosten oder Stuetzen loesten ihn sonst aus) und keinen Tunnel. Nach Abbruch gilt
     initial_mode: Lane fuer die Strecke, Stop fuer den Start mit storage.launch.py.

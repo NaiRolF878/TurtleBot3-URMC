@@ -57,7 +57,6 @@ MODE_COLOR = {
     ControlType.Stop:         (60, 60, 255),     # rot
     ControlType.Intersection: (200, 200, 200),
     ControlType.Align:        (200, 200, 200),
-    ControlType.Dock:         (255, 100, 200),   # violett
     ControlType.Maneuver:     (255, 150, 100),   # hellblau
 }
 
@@ -73,7 +72,6 @@ MODE_SOURCE = {
     ControlType.Obstacle: 'Nav2/MPPI',
     ControlType.TunnelEntry: 'PID',
     ControlType.Tunnel:   'Nav2/MPPI',
-    ControlType.Dock:     'Kamera',
     ControlType.Maneuver: 'odom',
 }
 

@@ -19,16 +19,8 @@
     target_zone: 2
     # Ziffern der Zonen in Fahrtrichtung; leer = Schilder entscheiden.
     zone_order: '1,2,3'
-    # Gilt nur, wenn in keiner Zone eine Palette gesehen wurde.
-    pallet_zone: 1
     # Ohne Zonenmodell: so weit (m) hinter der letzten Querlinie zur Seite drehen; 0 = aus.
     fallback_step: 0.35
     # Nach so viel Strecke (m) endet die Erkundung.
     explore_max_distance: 2.5
-    # Radachse -> Vorderkante der Stuetze (m), wenn der Magnet am Streifen anliegt.
-    contact_distance: 0.10
-    # Palette haengt am Magneten ab dieser Korrelation (/detect/pallet_grip, 0..1).
-    grip_min: 0.8
-    # Radachse -> Palettenmitte (m), wenn sie am Magneten haengt.
-    pallet_center_offset: 0.09
     carry_max_vel: 0.05

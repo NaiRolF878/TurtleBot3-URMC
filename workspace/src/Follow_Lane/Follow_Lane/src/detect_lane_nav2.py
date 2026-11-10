@@ -24,7 +24,8 @@ from std_msgs.msg import Bool, Float64, UInt8
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, irange, read_params, require_params, run_node)
+    SELF_MASK_X_M, SELF_MASK_Y_M, ControlType, control_mode_from_msg, frange, irange,
+    read_params, require_params, run_node)
 
 # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
 LANE_MASK_STRIDE = 2
@@ -37,8 +38,8 @@ LINE_MIN_AREA_CM2 = 3.0
 # Eigener Bot vorn im Bild (Magnet, Halter): bis SELF_MASK_X_CM vor der Radachse und
 # +-SELF_MASK_Y_CM in beiden Farbmasken schwarz. Der Magnet reicht laut Debugbild bis
 # ~10,5 cm vor die Achse und +-4,5 cm.
-SELF_MASK_X_CM = 11.0
-SELF_MASK_Y_CM = 5.0
+SELF_MASK_X_CM = SELF_MASK_X_M * 100.0
+SELF_MASK_Y_CM = SELF_MASK_Y_M * 100.0
 # Linien-Tracking: hoechstens so weit (cm) darf sich eine Linie von Bild zu Bild bewegen.
 LINE_MAX_JUMP_CM = 5.0
 # So lange (s) wird die letzte Position einer verlorenen Linie gehalten.

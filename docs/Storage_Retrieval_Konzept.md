@@ -69,8 +69,8 @@ Das Konzept kommt ohne feste Streckenwerte aus:
 1. **Start** mit `scripts/tb/launchers/storage.sh`, Fahrfreigabe per Leertaste, dann Button
    STORAGE STARTEN im Debugbild. Bis dahin steht der Bot (Modus `Stop`). Er steht auf der Spur
    vor dem Lagerbereich, die Zonen liegen rechts (Figure 5).
-2. **Erkundung**: Spurfolge. `storage_zone_node` meldet Querlinien neben der Spur sowie Beginn
-   und Ende der Strichelung; switch_control buendelt sie entlang der Spur zum **Zonenmodell**
+2. **Erkundung**: Spurfolge. `storage_zone_node` meldet Querlinien neben der Spur;
+   switch_control buendelt sie entlang der Spur zum **Zonenmodell**
    (siehe unten). Erreicht der Bot die Mitte einer Zone, faehrt er genau dorthin, dreht zur
    Zone, liest Schild, Fuellung und Zonentiefe (vordere und hintere Querlinie), speichert die Pose
    und dreht zurueck. Belegt ist die Zone, wenn genug Bilder zwischen ihren Linien genug
@@ -78,22 +78,29 @@ Das Konzept kommt ohne feste Streckenwerte aus:
    Ohne Modell (weniger als zwei Linien) dreht er `fallback_step` hinter der letzten Querlinie
    zur Seite und liest nur das Schild; ohne lesbares Schild wird die Stelle verworfen.
    Die Erkundung endet, sobald Paletten- und Zielzone bekannt sind, nach drei Zonen oder nach
-   `explore_max_distance`. Ohne Palette: „keine Palette gefunden“, dann gilt `pallet_zone`.
+   `explore_max_distance`. Ohne gesehene Palette: „keine Palette gefunden“, Abbruch (nicht raten).
 3. **Zur Palettenzone** per Odometrie auf die gespeicherte Pose (vor- oder rueckwaerts), zur
    Zone drehen, 1 s anhalten (Positionierung, Wertung). Dabei die **Vorderkante der Palette**
-   vermessen: Abstand, seitliche Lage und Winkel (siehe unten).
-4. **Ausrichten** (`Maneuver`): auf die Vor-Andock-Pose 10 cm vor dem Kontaktpunkt fahren und
-   rechtwinklig zur Vorderkante drehen.
-5. **Andocken** (`Dock`): gerade auf die Mitte der Vorderkante zu, mit Lenkkorrektur. Ab 3 cm vor
-   dem Kontakt muss der Bot rechtwinklig (5 Grad) und mittig (4 cm) stehen, sonst setzt er neu
-   an. Kontakt bei `contact_distance`.
+   vermessen: Abstand und seitliche Lage (siehe unten). Den Winkel braucht es nicht: die Palette
+   liegt laut Reglement gerade, der Kurs in die Zone kommt aus den Zonenlinien bzw. der Spur.
+4. **Ausrichten** (`Maneuver`): ab 1,5 cm Versatz auf der Stelle parallel zur Spur drehen, um den
+   Versatz entlang der Spur vor- oder zurueckfahren, auf der Stelle zurueck zur Zone drehen;
+   sonst nur den Kurs in die Zone setzen. Quer zur Spur faehrt er nie rueckwaerts (sonst verliesse
+   er die Spur).
+5. **Andocken** (`Maneuver`, geradeaus mit gehaltenem Kurs): zuegig bis 10 cm vor den erwarteten
+   Kontakt, dann mit 3 cm/s, hoechstens 4 cm darueber hinaus (sonst neu ansetzen). Kontakt, sobald das Bild ueber dem Magneten stillsteht, obwohl der Bot vorfaehrt: der
+   Streifen ist buendig mit der Stuetze, der Magnet liegt an und schiebt die Palette auf der
+   Stuetze vor sich her (`pallet_node`, `/detect/pallet_still`). Kein Abstandswert; der Bot
+   muss nur (Odometrie) bis auf 5 cm an den erwarteten Kontakt heran sein. Neu ansetzen und
+   Herausfahren: gerade zurueck auf den Spurpunkt, von dem aus angedockt wurde.
 6. **Greifen**: Magnet an, warten, 3 cm zuruecksetzen. Bleibt das Bild ueber dem Magneten gleich
-   (Korrelation ab `grip_min`), haengt die Palette: „Palette erfolgreich aufgenommen“.
+   (Korrelation ab `GRIP_MIN` 0,8, Konstante), haengt die Palette: „Palette erfolgreich aufgenommen“.
 7. **Transport** („lege Palette in die Zone X“): rueckwaerts auf die gespeicherte Pose auf der
    Spur, zur Zielzone drehen, auf der Spur bis vor die Zielzone, zur Zone drehen. Fremde Zonen
    werden nie betreten, auch wenn eine dazwischen liegt.
-8. **Ablegen**: vor bis die Palettenmitte auf der Zonenmitte liegt (Zonentiefe aus der
-   Erkundung minus `pallet_center_offset`; ohne gemessene Tiefe so tief wie beim Aufnehmen),
+8. **Ablegen**: so tief in die Zielzone wie beim Aufnehmen in die Palettenzone (Spurpunkt bis
+   Kontakt; die Palette lag dort in der Zonenmitte), bei gemessenen Zonentiefen um deren
+   Unterschied verschoben. Palettenmasse braucht es dafuer nicht.
    Magnet aus, warten: „Palette abgelegt“. Die Ausrichtung der Palette entspricht der beim
    Aufnehmen, weil der Bot wieder frontal in die Zone schaut.
 9. **Verlassen**: rueckwaerts auf die Spur, anhalten.
@@ -103,7 +110,12 @@ Die Rueckmeldungen stehen im Log und im Debugbild (`/control/storage_info`).
 ### Palette in der Vogelperspektive
 
 `storage_zone_node` sucht zwischen den Seitenlinien der Zone (aus dem Zonenmodell) alles, was
-heller als `floor_l_max` und nicht weiss ist; die Farbe der Palette spielt keine Rolle.
+heller oder farbiger als der Boden und nicht weiss ist (dunkler zaehlt nicht: Schatten). Den
+Boden lernt er beim Erkunden selbst aus der Spurmitte vor dem Bot (Helligkeit und Farbe mit
+Streuung), es gibt keinen Schwellwert. Weiss und CLAHE kommen von `detect_lane`
+(`Follow_Lane_ROI_LAB.yaml`, live ueber `/parameter_events`), sie gibt es nur einmal; ebenso in
+`storage_sign_node` fuer die Ziffer. Der eigene Magnet (bis 11 cm vor der Achse, +-5 cm) zaehlt
+nie als Palette.
 
 - **Fuellung** (beim Lesen vor jeder Zone): Anteil davon zwischen Vorder- und Hinterkante der
   Zone. Ab 10 % zaehlt das Bild als belegt, ab der Haelfte der Bilder die Zone.
@@ -121,21 +133,28 @@ heller als `floor_l_max` und nicht weiss ist; die Farbe der Palette spielt keine
 `pallet_node` nimmt beim Greifen das Bild direkt ueber dem Magneten als Vorlage und vergleicht
 danach jedes Bild damit (`/detect/pallet_grip`, Korrelation). Haengt die Palette, bewegt sie sich
 mit dem Bot und das Bild bleibt gleich; bleibt sie liegen, wird sie beim Zuruecksetzen kleiner.
-Ob es reicht, entscheidet switch_control mit `grip_min`, auch waehrend des Tragens.
+Ob es reicht, entscheidet switch_control mit der Konstante `GRIP_MIN`, auch waehrend des Tragens.
+Die Lage des Magneten im Bild (`MAGNET_X`, `MAGNET_TOP`) ist Bot-Mechanik und fest eingetragen
+(gemessen 10.11.); neu nur nach einem Umbau von Kamera oder Magnet. Aus der Geometrie laesst sie
+sich nicht rechnen: Der Magnet sitzt 7,5 cm hoch, seine Lage vor der Achse kennt man nur aus der
+BEV, und dort erscheint er wegen der Hoehe viel weiter vorn.
 
 ### Zonenmodell
 
 - Linien L0..L3 im gleichen Abstand; Zone k liegt zwischen L(k-1) und L(k).
-- L0 ist der Beginn der Strichelung, sonst die erste Querlinie. Das Ende der Strichelung ist L3.
-- Breite und Lage der Linien kommen aus allen bestaetigten Treffern (je drei Bilder). Eine
-  fehlende Linie wird ergaenzt; Treffer vor oder hinter der Strichelung oder ausserhalb des
-  Rasters (Schatten, Kasten der Palette) zaehlen nicht. Ein Raster, das Linien dort ergaenzen
-  muesste, wo der Bot schon hingesehen hat, verliert gegen eines, das alle Treffer erklaert.
+- Nur aus den bestaetigten Querlinien (je drei Bilder), ohne Streckenmasse: Jede Querlinie darf
+  L0 sein, jede spaetere mit 1-3 Zonen dazwischen gibt die Breite vor. Es gewinnt das Raster,
+  das die meisten Linien erklaert. Dagegen zaehlen Linien innerhalb des Rasters, die nicht
+  passen (Schatten, Palette, Markierungen), und fehlende Linien, wo der Bot schon hingesehen
+  hat. Eine Zone ist mindestens so breit wie der Bot (`BOT_WIDTH`).
+- Keine Strichel-Erkennung mehr (bis 10.11.): Sie meldete bei langen Strichen weitere Anfaenge
+  und Enden mitten in der Strichelung, das Raster wurde zu schmal und jede Zone um eine
+  verschoben. Mit den Laeufen vom 10.11. getestet: alle Raster 0,27-0,30 m.
 - Die Ziffer einer Zone kommt aus `zone_order` nach ihrem Platz (Standard `1,2,3` in
   Fahrtrichtung). Das Schild dient nur zur Kontrolle; ein Widerspruch steht als Warnung im Log.
   Mit leerem `zone_order` entscheidet das Schild.
 - Gezeichnet im Debugbild `/detect/zone_debug/compressed`: gemessene Linien gruen, ergaenzte
-  orange, Ziffer je Zone; dazu der Strichel-Streifen mit Beginn (tuerkis) und Ende (lila). Mit
+  orange, Ziffer je Zone. Mit
   Zuschauer laeuft die Erkennung auch ohne Storage-Ablauf, damit sie sich einstellen laesst.
 
 ### Zustandsdiagramm
@@ -155,7 +174,7 @@ stateDiagram-v2
     state "ZUR_PALETTENZONE (Maneuver)" as ZUR_PALETTENZONE
     state "POSITIONIERT (Stop)" as POSITIONIERT
     state "AUSRICHTEN (Maneuver)" as AUSRICHTEN
-    state "ANDOCKEN (Dock)" as ANDOCKEN
+    state "ANDOCKEN (Maneuver)" as ANDOCKEN
     state "GREIFEN (Stop, Magnet an)" as GREIFEN
     state "GRIFF_PRUEFEN (Maneuver)" as GRIFF_PRUEFEN
     state "NEU_ANSETZEN (Maneuver, Magnet aus)" as NEU_ANSETZEN
@@ -176,9 +195,9 @@ stateDiagram-v2
     ZUR_PALETTENZONE --> POSITIONIERT : vor der Zone, zur Zone gedreht
     POSITIONIERT --> AUSRICHTEN : Haltezeit vorbei, Vorderkante vermessen
     POSITIONIERT --> NEU_ANSETZEN : keine Vorderkante gefunden
-    AUSRICHTEN --> ANDOCKEN : rechtwinklig vor der Palette
-    ANDOCKEN --> GREIFEN : Kontakt, rechtwinklig und mittig
-    ANDOCKEN --> NEU_ANSETZEN : schraeg oder versetzt kurz vor der Palette, Zeit, Palette weg
+    AUSRICHTEN --> ANDOCKEN : Versatz ausgeglichen, Kurs in die Zone
+    ANDOCKEN --> GREIFEN : Bild ueber dem Magneten steht still (Kontakt)
+    ANDOCKEN --> NEU_ANSETZEN : kein Kontakt bis 4 cm hinter dem erwarteten, Zeit
     GREIFEN --> GRIFF_PRUEFEN : Wartezeit vorbei
     GRIFF_PRUEFEN --> HERAUSFAHREN : Palette kommt mit
     GRIFF_PRUEFEN --> NEU_ANSETZEN : Bild ueber dem Magneten aendert sich
@@ -206,11 +225,10 @@ Nicht eingezeichnet:
 
 | Node / Modul | neu/geaendert | Ein | Aus | Aufgabe |
 |--------------|---------------|-----|-----|---------|
-| `switch_control` + `storage_sequence.py` | geaendert / neu | `/control/storage_request`, `/detect/zone_boundaries`, `/detect/zone_dash_start`, `/detect/zone_dash_end`, `/detect/zone_cross_lines`, `/detect/storage_sign`, `/detect/pallet`, `/detect/pallet_grip`, `/control/maneuver_status`, TF | `/control/mode`, `/control/storage_state`, `/control/storage_info`, `/control/storage_zones`, `/control/maneuver`, `/lokal/magnet_control` | Einziger Entscheider: Unterzustand, Zonenmodell und Zonenposen in `odom`, Abstimmung ueber Schilder und Palette, Ziele fuer `Maneuver`, Magnet an/aus, Rueckmeldungen. Kein Obstacle und kein Tunnel waehrend Storage |
-| `control_driving` | geaendert | `/control/mode`, `/detect/lane`, `/nav2/cmd_vel`, `/detect/pallet`, `/control/maneuver`, TF | `/control/cmd_vel`, `/control/maneuver_status` | Einzige Quelle fuer Fahrbefehle, neu: Regler fuer `Dock` und `Maneuver` |
-| `storage_zone_node` | neu | `/lokal/bev`, `/control/storage_state`, `/control/storage_zones`, TF | `/detect/zone_boundaries`, `/detect/zone_dash_start`, `/detect/zone_dash_end`, `/detect/zone_cross_lines`, `/detect/pallet` | Weisse Querlinien per HoughLinesP: neben der Spur (ERKUNDEN) bzw. vor dem Bot (SCHILD_LESEN); Beginn und Ende der Strichelung; Fuellung der Zone und Vorderkante der Palette; zeichnet Zonenmodell und Palette ins Debugbild |
+| `switch_control` + `storage_sequence.py` | geaendert / neu | `/control/storage_request`, `/detect/zone_boundaries`, `/detect/zone_cross_lines`, `/detect/storage_sign`, `/detect/pallet`, `/detect/pallet_grip`, `/control/maneuver_status`, TF | `/control/mode`, `/control/storage_state`, `/control/storage_info`, `/control/storage_zones`, `/control/maneuver`, `/lokal/magnet_control` | Einziger Entscheider: Unterzustand, Zonenmodell und Zonenposen in `odom`, Abstimmung ueber Schilder und Palette, Ziele fuer `Maneuver`, Magnet an/aus, Rueckmeldungen. Kein Obstacle und kein Tunnel waehrend Storage |
+| `control_driving` | geaendert | `/control/mode`, `/detect/lane`, `/nav2/cmd_vel`, `/control/maneuver`, TF | `/control/cmd_vel`, `/control/maneuver_status` | Einzige Quelle fuer Fahrbefehle, neu: Regler fuer `Maneuver` (auch Andocken; frueher eigener Modus `Dock` mit Kamera-Lenkung, entfernt) |
+| `storage_zone_node` | neu | `/lokal/bev`, `/control/storage_state`, `/control/storage_zones`, TF | `/detect/zone_boundaries`, `/detect/zone_cross_lines`, `/detect/pallet` | Weisse Querlinien per HoughLinesP: neben der Spur (ERKUNDEN) bzw. vor dem Bot (SCHILD_LESEN); Fuellung der Zone und Vorderkante der Palette; zeichnet Zonenmodell und Palette ins Debugbild |
 | `storage_sign_node` | neu | `/lokal/raw_image`, `/control/storage_state` | `/detect/storage_sign` | Blau-Maske (LAB), Ellipse und weisser Inhalt pruefen, Ziffer mit Vorlagen korrelieren |
-| `storage_sign_model_node` | neu (Geruest) | `/lokal/raw_image`, `/control/storage_state` | `/detect/storage_sign` | YOLO (ultralytics), sobald `model_path` gesetzt ist |
 | `pallet_node` | neu | `/lokal/raw_image`, `/control/storage_state` | `/detect/pallet_grip` | Griff pruefen: Bild ueber dem Magneten gegen die Vorlage vom Greifen |
 | `magnet_controll` | registriert | `/lokal/magnet_control` | `/lokal/magnet_status` | GPIO 17, laeuft **auf dem Bot** (`ros2 run Follow_Lane magnet_controll`) |
 | `debug_view` | geaendert | wie bisher, dazu `/control/storage_state`, `/control/storage_info` | `/control/storage_request` | Button STORAGE STARTEN/ABBRECHEN, Zustand, Zonen, Fehlergrund |
@@ -223,20 +241,19 @@ Die Detektoren arbeiten nur in den Zustaenden, die sie brauchen. `pallet_node` u
 Quelle), `PalletDetection` (Fuellung der Zone; Vorderkante: Abstand, seitlich, Winkel), `Maneuver`
 (id, ROTATE/STRAIGHT/PATH, Zielwinkel, Strecke, Pfad, rueckwaerts, Hoechstgeschwindigkeit),
 `StorageZones` (Zonenmodell fuer die Anzeige: Linien, gemessen/ergaenzt, Ziffern).
-Zonenlinien und Strichel-Enden laufen als `geometry_msgs/PoseArray` in `odom`.
+Zonenlinien laufen als `geometry_msgs/PoseArray` in `odom`.
 
 **Neue Fahrarten** in `common.py`:
 
 | `ControlType` | Fahrbefehl (control_driving) |
 |---------------|------------------------------|
-| `Dock` (8) | Auf `/detect/pallet`: mit `dock_vel` auf die Mitte der Vorderkante zu, Lenkkorrektur mit `dock_k_ang`; liegt sie mehr als 0,15 rad daneben, nur drehen. Den Kontakt erkennt switch_control |
 | `Maneuver` (9) | Grundbewegung aus `/control/maneuver` in `odom`: auf Winkel drehen, Strecke fahren, Punkte anfahren (vor- oder rueckwaerts). Meldet die id auf `/control/maneuver_status` |
 | `Lane`, `Stop` (vorhanden) | Spurfolge bei der Erkundung, Nullbefehl beim Lesen, Greifen und Ablegen |
 
-`Dock` und `Maneuver` laufen wie die Nav2-Befehle durch die Radgrenze (`MAX_WHEEL_VEL`).
+`Maneuver` laeuft wie die Nav2-Befehle durch die Radgrenze (`MAX_WHEEL_VEL`).
 
 ```
-storage_sign_node / storage_sign_model_node --/detect/storage_sign------------.
+storage_sign_node -------------------------/detect/storage_sign------------.
 storage_zone_node --/detect/zone_boundaries, _dash_start/_end, _cross_lines,-+
                     /detect/pallet                                            |
 pallet_node --/detect/pallet_grip---------------------------------------------+--> switch_control
@@ -262,16 +279,16 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 | Thema | Entscheidung | Begruendung |
 |-------|--------------|-------------|
 | Sensoren | Nur Kamera und Odometrie, kein LiDAR | Palette, Stuetze und Schilder liegen unter der LiDAR-Ebene |
-| Zustaende | `ControlType` je Fahrart (`Dock`, `Maneuver`, dazu `Lane`, `Stop`); der Ablaufschritt ist ein Unterzustand nur in switch_control (Modul `storage_sequence.py`) | control_driving bleibt bei „Modus -> Regler“, nur zwei neue Werte, der Ablauf liegt an einer Stelle (Architekturregel) |
+| Zustaende | `ControlType` je Fahrart (`Maneuver`, dazu `Lane`, `Stop`); der Ablaufschritt ist ein Unterzustand nur in switch_control (Modul `storage_sequence.py`) | control_driving bleibt bei „Modus -> Regler“, nur zwei neue Werte, der Ablauf liegt an einer Stelle (Architekturregel) |
 | Magnet | schaltet switch_control | An/aus ist eine Entscheidung, kein Fahrbefehl |
 | Start | Button STORAGE STARTEN (sendet `/control/storage_request`) | Start per ROS-Befehl von Hand ist erlaubt; gleiches Muster wie beim Tunnel |
 | Lagebild | Erst Erkundung, Posen in `odom` speichern, danach Palette holen | Liefert die Erkennung (Bonus) und die Ziele fuer den Transport; unabhaengig von der Zonengroesse |
-| Zone erkennen | Zonenmodell aus Querlinien und Strichelung, Ziffer aus der Reihenfolge; Rueckfall ohne Modell: zur Seite drehen und Schild lesen | Keine festen Abstaende; eine uebersehene Linie verschiebt die Zaehlung nicht |
+| Zone erkennen | Zonenmodell aus Querlinien (gleichmaessigstes Raster), Ziffer aus der Reihenfolge; Rueckfall ohne Modell: zur Seite drehen und Schild lesen | Keine festen Abstaende; eine uebersehene Linie verschiebt die Zaehlung nicht |
 | Schilder | Blau-Maske (LAB) + Ellipse + Ziffern-Vorlagen; parallel ein trainiertes Modell | Aussehen bekannt; die Kreisform trennt das Schild von der blauen Schranke (Balken, auch beim Oeffnen) |
 | Zusammenfuehrung | Beide Detektoren stimmen ueber mehrere Bilder ab, waehrend der Bot steht; jeder per Parameter abschaltbar | Robust; faellt einer aus, arbeitet der andere weiter |
-| Manuelle Eingabe | `target_zone` (Jury), `zone_order` (Ziffern in Fahrtrichtung), `pallet_zone` (nur ohne gesehene Palette) | Die Jury bestimmt die Zielzone; die Palettenzone erkennt der Bot selbst (Wertung) |
+| Manuelle Eingabe | `target_zone` (Jury), `zone_order` (Ziffern in Fahrtrichtung) | Die Jury bestimmt die Zielzone; die Palettenzone erkennt der Bot selbst (Wertung) |
 | Zone leer? | Zwischen den Zonenlinien alles dunkel; sonst belegt | Palette hat keine Markierung; jede Farbe ist heller als der schwarze Boden |
-| Andocken | Vorderkante der Stuetze in der Vogelperspektive vermessen, rechtwinklig davor ausrichten (`Maneuver`), dann gerade andocken (`Dock`); schraeg oder versetzt kurz davor -> neu ansetzen | Der Magnet haelt nur rechtwinklig; die Palette steht beliebig; die Bodenkante ist in der Vogelperspektive metrisch; ein Differentialantrieb kann auf wenigen cm seitlich kaum korrigieren |
+| Andocken | Seitlichen Versatz der Stuetzenkante in der Vogelperspektive messen, entlang der Spur ausgleichen (drehen auf der Stelle, parallel zur Spur fahren), Kurs aus den Zonenlinien, dann nur vorwaerts geradeaus (`Maneuver`) bis das Bild ueber dem Magneten stillsteht | Die Palette liegt laut Reglement gerade; quer zur Spur rueckwaerts verliesse der Bot die Spur; kein Abstandswert noetig |
 | Griff pruefen | Kurz zuruecksetzen, Bild ueber dem Magneten mit der Vorlage vom Greifen vergleichen | Kein eigener Sensor, kein Motorstrom (`turtlebot3_node` liest ihn nicht aus) |
 | Entscheiden | Detektoren liefern nur Messwerte (Fuellung, Vorderkante, Korrelation); belegt, Kontakt und Griff entscheidet switch_control | Architekturregel: ein Entscheider |
 | Route | Rueckwaerts raus, zur Zielzone drehen, an der Spur entlang, zur Zielzone drehen | Fremde Zonen werden nie betreten |
@@ -283,34 +300,28 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 
 ## Vor Ort einstellen
 
-1. **Boden** (`storage_zone_node`): `/detect/zone_debug/compressed` vor einer leeren Zone;
-   `floor_l_max` so, dass der Teppich nicht rot getoent wird, ein Gegenstand in der Zone schon.
-2. **Kontakt** (`contact_distance`): Bot mit dem Magneten an den Metallstreifen stellen und den
-   Abstand im Debugbild `/detect/zone_debug/compressed` ablesen (Radachse bis Vorderkante der
-   Stuetze am Boden). Das Debugbild zeigt ihn auch ohne laufenden Ablauf; ein ueberstehender
-   Streifen und kleine Kalibrierfehler stecken so mit im Wert.
-3. **Magnet** (`pallet_node`): `/detect/pallet_debug/compressed` ansehen, `magnet_x` und
-   `magnet_top` auf den Magneten im Bild setzen. `grip_min` (switch_control) zwischen die
-   Korrelation mit haengender und mit liegen gebliebener Palette legen.
+1. **Boden und Weiss**: nichts eigenes. Der Boden wird beim Erkunden gelernt (Debugbild
+   `/detect/zone_debug/compressed`: „Boden L ..“, eine leere Zone darf nicht rot sein). Weiss
+   wird fuer die Spur in `detect_lane` eingestellt und gilt automatisch auch hier.
+2. **Kontakt**: nichts einzustellen (Bot-Geometrie: Magnetende 7,5 cm vor der Achse, Magnetmitte
+   7,5 cm hoch, in `common.py`).
+3. **Magnet** (`pallet_node`): nichts einzustellen. Nach einem Umbau von Kamera oder Magnet
+   in `/detect/pallet_debug/compressed` pruefen, ob das gelbe Rechteck direkt ueber dem Magneten
+   liegt, sonst `MAGNET_X`/`MAGNET_TOP` in `pallet_node.py` anpassen.
 4. **Schilder** (`storage_sign_node`): Bot vor jedes Schild stellen, `always_on: true`,
    `/detect/storage_sign_debug/compressed` ansehen, Blau-Werte pruefen, dann je Schild
    `ros2 param set /storage_sign_node capture_digit <1-3>`. Die Vorlagen liegen in
    `~/.ros/urmc_storage_templates` und gelten auch nach einem Neustart.
 5. **Zonenlinien** (`storage_zone_node`): `/detect/zone_debug/compressed` beim Vorbeifahren;
-   `side_near_m` so, dass die gestrichelte Linie gerade nicht mehr im Streifen liegt;
-   `solid_min_m` und `dash_gap_max_m` nach Strichlaenge und Luecke der Strichelung.
-6. **Ablegen** (`pallet_center_offset`): Palette haengt am Magneten; Abstand in Fahrtrichtung
-   von der Radachse bis zur Mitte des Rahmens messen. Der Bot haelt beim Ablegen so weit vor
-   der Zonenmitte, damit die Palettenmitte auf ihr liegt (Reglement: Ablage in der Zonenmitte).
-   Die Zonenmitte kommt aus den Zonenlinien, nicht aus der Messung der Palette.
-7. **Zielzone**: `ros2 param set /switch_control target_zone <1-3>` vor dem Start.
+   `side_near_m` so, dass die gestrichelte Linie gerade nicht mehr im Streifen liegt.
+6. **Zielzone**: `ros2 param set /switch_control target_zone <1-3>` vor dem Start.
 
 ## Offene Punkte
 
 - **Nachbau der Palette:** fehlt; ohne ihn lassen sich Andocken und Griff nicht pruefen.
 - **Orga:** Groesse der Schilder; Aussehen der Landmarken; ob „exit the storage area“ mehr
   verlangt als die Zone zu verlassen.
-- **Am Bot zu pruefen:** Magnetlage im Bild, Vorzeichen in `Dock`, Genauigkeit von `Maneuver`,
+- **Am Bot zu pruefen:** Magnetlage im Bild, Kontakt per Stillstand, Genauigkeit von `Maneuver`,
   Strichelung und Zonenmodell, ob die Vorderkante der Stuetze bis kurz vor dem Kontakt im
   Bild bleibt, ob der Streifen parallel zu ihr liegt.
 - **Magnet auf dem Bot:** `magnet_controll` braucht das Paket `Follow_Lane` auf dem Bot
@@ -328,7 +339,8 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
   nach `ZURUECKDREHEN` sofort wieder die richtigen Linien findet **[V]**, am Bot pruefen.
 - **Geschwindigkeiten mit Last:** `carry_max_vel` 0,05 m/s, am Bot festlegen.
 - **Odometrie:** Genauigkeit von Drehung und Strecke ueber ca. 1 m am Bot messen.
-- **Trainiertes Modell:** Daten, Training, Rechner (Bot oder PC), Laufzeit; dann `model_path`.
+- **Ziffern per YOLO:** Das Modell kennt noch keine Ziffern (Trainingsnotizen); der fruehere
+  `storage_sign_model_node` (leeres Geruest) ist entfernt, Ziffern liest `storage_sign_node`.
 
 ## Testplan
 
@@ -345,13 +357,12 @@ festen Massen haengt.
 3. **Einstellen** wie oben (Boden, Kontakt, Magnetlage, Vorlagen).
 4. **Schilder:** Erkennung bei verschiedenen Abstaenden, Winkeln und Licht; die blaue Schranke
    daneben darf nicht als Schild gelten.
-5. **Zonenlinien:** Werden Querlinien und Strichelung beim Fahren gefunden (Log
-   „Zonengrenze bestaetigt“, „Beginn/Ende der Strichelung bestaetigt“)? Stimmt das Zonenmodell
+5. **Zonenlinien:** Werden die Querlinien beim Fahren gefunden (Log „Zonengrenze bestaetigt“)? Stimmt das Zonenmodell
    im Debugbild, auch wenn eine Trennlinie abgeklebt ist?
 6. **Maneuver:** 90°-Drehungen, Strecken vor/zurueck und Punkte anfahren, mit und ohne Palette.
    Einzeln testbar: `/control/mode` und `/control/maneuver` von Hand senden, ohne switch_control.
-7. **Andocken und Griff pruefen:** Palette versetzt und schraeg (bis 20 Grad) in die Zone
-   stellen; der Bot muss rechtwinklig andocken. Fehlgriff (Magnet aus) muss NEU_ANSETZEN
+7. **Andocken und Griff pruefen:** Palette seitlich versetzt (gerade, Reglement) in die Zone
+   stellen; der Bot muss den Versatz entlang der Spur ausgleichen und gerade andocken. Fehlgriff (Magnet aus) muss NEU_ANSETZEN
    ausloesen.
 8. **Gesamtablauf** mit der Palette in jeder Zone und jeder Zielzone, auch mit einer Zone
    zwischen Start und Ziel; Abbrechen per Button, Fehlerfaelle.

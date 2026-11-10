@@ -1,11 +1,11 @@
 """Einzige Quelle fuer Fahrbefehle: waehlt je nach /control/mode den Regler.
 
 Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist),
-      /detect/pallet (PalletDetection), /control/maneuver (Maneuver), TF odom -> base_footprint
+      /control/maneuver (Maneuver), TF odom -> base_footprint
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel,
       /control/maneuver_status (UInt32, id der zuletzt beendeten Grundbewegung)
 Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel.
-Dock: Feinanfahrt auf die Palette im Kamerabild. Maneuver: Grundbewegung in odom.
+Maneuver: Grundbewegung in odom (auch das Andocken an die Palette, geradeaus).
 Alles ausser dem PID wird auf die Radgrenze skaliert, der PID begrenzt selbst.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 """
@@ -20,7 +20,7 @@ from std_msgs.msg import Float64, UInt8, UInt32
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
-from follow_lane_msg.msg import Maneuver, PalletDetection
+from follow_lane_msg.msg import Maneuver
 from Follow_Lane.src.common import (
     ControlType, control_mode_from_msg, frange, pose2d_from_transform, read_params,
     require_params, run_node, wrap_angle)
@@ -48,11 +48,10 @@ MAX_ANGULAR_VEL = 2.0
 MAX_WHEEL_VEL = 0.22
 WHEEL_SEPARATION = 0.160
 
-# Zeitgrenzen (s): LANE_CMD_TIMEOUT und DOCK_CMD_TIMEOUT umfassen mehrere Kamerabilder,
+# Zeitgrenzen (s): LANE_CMD_TIMEOUT umfasst mehrere Kamerabilder,
 # NAV2_CMD_TIMEOUT fuenf Perioden von controller_frequency (20 Hz), MODE_TIMEOUT drei
 # Perioden von switch_control (2 Hz).
 LANE_CMD_TIMEOUT = 0.3
-DOCK_CMD_TIMEOUT = 0.5
 NAV2_CMD_TIMEOUT = 0.25
 MODE_TIMEOUT = 1.5
 MODE_SWITCH_HOLD = 0.3
@@ -70,8 +69,6 @@ MANEUVER_YAW_TOL_DEG = 2.0
 MANEUVER_WAYPOINT_TOL = 0.03
 # Liegt der naechste Pfadpunkt weiter als das neben der Fahrtrichtung, erst auf der Stelle drehen.
 MANEUVER_ROTATE_FIRST_DEG = 30.0
-# Dock: liegt die Palettenmitte weiter als das neben der Fahrtrichtung, nur drehen.
-DOCK_TURN_ONLY_RAD = 0.15
 
 
 def clamp(x, limit):
@@ -92,9 +89,6 @@ class control_driving(Node):
     Node die id auf /control/maneuver_status und sendet Null, bis eine neue kommt.
     Ein Moduswechsel verwirft die laufende Bewegung.
 
-    Dock: faehrt mit dock_vel auf die Mitte der Palettenvorderkante zu und lenkt nach
-    (/detect/pallet); liegt sie mehr als DOCK_TURN_ONLY_RAD daneben, dreht er nur. Den
-    Kontakt erkennt switch_control und schaltet auf Stop.
     """
 
     def __init__(self):
@@ -113,12 +107,9 @@ class control_driving(Node):
         self.declare_parameter('maneuver_max_ang',   Parameter.Type.DOUBLE, frange(0.1, 2.8))
         self.declare_parameter('maneuver_k_lin',     Parameter.Type.DOUBLE, frange(0.1, 10.0))
         self.declare_parameter('maneuver_k_ang',     Parameter.Type.DOUBLE, frange(0.1, 10.0))
-        self.declare_parameter('dock_vel',           Parameter.Type.DOUBLE, frange(0.005, 0.1))
-        self.declare_parameter('dock_k_ang',         Parameter.Type.DOUBLE, frange(0.0, 10.0))
         self._param_names = [
             'kp', 'ki', 'kd', 'MAX_VEL', 'speed_curve_factor', 'min_speed_factor',
             'maneuver_max_vel', 'maneuver_max_ang', 'maneuver_k_lin', 'maneuver_k_ang',
-            'dock_vel', 'dock_k_ang',
         ]
         require_params(self, self._param_names)
         read_params(self, self._param_names)
@@ -130,8 +121,6 @@ class control_driving(Node):
             Float64, '/detect/lane', self.cb_lane_error, 1)
         self.sub_nav2_cmd_vel = self.create_subscription(
             Twist, '/nav2/cmd_vel', self.cb_nav2_cmd_vel, 1)
-        self.sub_pallet = self.create_subscription(
-            PalletDetection, '/detect/pallet', self.cb_pallet, 1)
         self.sub_maneuver = self.create_subscription(
             Maneuver, '/control/maneuver', self.cb_maneuver, 1)
 
@@ -150,7 +139,6 @@ class control_driving(Node):
         self._mode_time = None
         self._lane_time = None
         self._nav2_time = None
-        self._dock_time = None
         self._nav2_blocked_until = 0.0
         self._maneuver = None           # laufende Grundbewegung (Maneuver-Nachricht)
         self._maneuver_start = None     # (x, y, yaw) in odom beim Start
@@ -178,7 +166,6 @@ class control_driving(Node):
             return
         self._lane_time = None
         self._nav2_time = None
-        self._dock_time = None
         self._maneuver = None
         self._maneuver_start = None
         if new_mode in PID_MODES:
@@ -209,13 +196,6 @@ class control_driving(Node):
         self._nav2_time = now
         self.pub_cmd_vel.publish(self._limit_wheels(msg))
 
-    def cb_pallet(self, msg):
-        if not self._mode_is(ControlType.Dock):
-            return
-        read_params(self, self._param_names)
-        self._dock_time = time.monotonic()
-        self.pub_cmd_vel.publish(self._limit_wheels(self._dock(msg)))
-
     def cb_maneuver(self, msg):
         # Zyklisch wiederholt: nur eine neue id (oder die erste nach einem
         # Moduswechsel) startet die Bewegung, eine beendete nie erneut.
@@ -240,8 +220,6 @@ class control_driving(Node):
             fresh = self._fresh(self._lane_time, now, LANE_CMD_TIMEOUT)
         elif self._mode_is(*NAV2_MODES):
             fresh = self._fresh(self._nav2_time, now, NAV2_CMD_TIMEOUT)
-        elif self._mode_is(ControlType.Dock):
-            fresh = self._fresh(self._dock_time, now, DOCK_CMD_TIMEOUT)
         else:
             fresh = False
         if not fresh:
@@ -294,20 +272,6 @@ class control_driving(Node):
             scale = MAX_WHEEL_VEL / outer
             twist.linear.x *= scale
             twist.angular.z *= scale
-        return twist
-
-    def _dock(self, msg):
-        twist = Twist()
-        if not msg.found:
-            return twist
-        bearing = math.atan2(msg.lateral, max(msg.distance, 0.01))
-        turn = clamp(self.dock_k_ang * bearing, self.maneuver_max_ang)
-        if abs(bearing) > DOCK_TURN_ONLY_RAD:
-            # Unter MANEUVER_MIN_ANG dreht er nicht.
-            twist.angular.z = float(math.copysign(max(abs(turn), MANEUVER_MIN_ANG), turn))
-            return twist
-        twist.linear.x = float(self.dock_vel)
-        twist.angular.z = float(turn)
         return twist
 
     def _drive_maneuver(self):

@@ -1,23 +1,32 @@
-"""Haelt der Magnet die Palette? Bildvergleich direkt ueber dem Magneten.
+"""Kontakt und Griff: Bildvergleich direkt ueber dem Magneten.
 
 Ein:  /lokal/raw_image (entzerrt), /control/storage_state
-Aus:  /detect/pallet_grip (Float32, Korrelation mit der Vorlage), nur in ATTACH_STATES,
+Aus:  /detect/pallet_still (Float32, Korrelation mit dem Bild von vor STILL_LAG_S), nur beim
+      ANDOCKEN: steht das Bild still, obwohl der Bot vorfaehrt, liegt der Magnet an und
+      schiebt die Palette.
+      /detect/pallet_grip (Float32, Korrelation mit der Vorlage vom Greifen), nur in ATTACH_STATES,
       /detect/pallet_debug/compressed (nur mit Zuschauer)
 """
 import array
+import time
+from collections import deque
 
 import cv2
 import numpy as np
 
 from cv_bridge import CvBridge
 from rclpy.node import Node
-from rclpy.parameter import Parameter
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Float32, String
 
-from Follow_Lane.src.common import (
-    StorageState, frange, read_params, require_params, run_node, storage_state_from_msg)
+from Follow_Lane.src.common import StorageState, run_node, storage_state_from_msg
 
+# Lage des Magneten im entzerrten Bild (Anteil von Breite bzw. Hoehe: Mitte, Oberkante des
+# Halters). Bot-Mechanik, kein Aufbau vor Ort: gemessen 10.11.2026 im Kamerabild; nur neu, wenn
+# Kamera oder Magnet umgebaut werden. Aus der Geometrie (Magnetmitte 7,5 cm hoch) laesst es sich
+# nicht rechnen, die Lage vor der Achse ist nur aus der BEV bekannt und dort verzerrt.
+MAGNET_X = 0.49
+MAGNET_TOP = 0.72
 # Bildausschnitt ueber dem Magneten (Anteil von Bildbreite bzw. -hoehe).
 ROI_WIDTH = 0.3
 ROI_HEIGHT = 0.25
@@ -28,25 +37,27 @@ BLUR_KERNEL = 5
 REF_STATE = StorageState.GREIFEN
 ATTACH_STATES = (StorageState.GRIFF_PRUEFEN, StorageState.HERAUSFAHREN, StorageState.TRANSPORT,
                  StorageState.ABLAGE_ANFAHREN)
+# Andocken: mit dem Bild von vor so vielen Sekunden vergleichen (Andocken mit ~3 cm/s, also
+# ~1 cm: kommt die Palette naeher, aendert sich der Ausschnitt deutlich; schiebt der Bot sie
+# schon, nicht).
+STILL_STATE = StorageState.ANDOCKEN
+STILL_LAG_S = 0.3
 
 
 class pallet_node(Node):
-    """Die Kamera sieht den Magneten; seine Lage im Bild steht in magnet_x und magnet_top
-    (Anteil der Bildbreite bzw. -hoehe). Beim Greifen wird der Ausschnitt darueber zur
-    Vorlage. Haengt die Palette am Magneten, bewegt sie sich mit dem Bot und der Ausschnitt
+    """Die Kamera sieht den Magneten; seine Lage im Bild steht in MAGNET_X und MAGNET_TOP.
+
+    Kontakt (ANDOCKEN): der Metallstreifen ist buendig mit der Stuetze; liegt der Magnet an,
+    schiebt der Bot die Palette vor sich her, sie bewegt sich mit ihm und der Ausschnitt steht
+    still (/detect/pallet_still nahe 1). Vorher kommt sie naeher und er aendert sich.
+
+    Griff: beim Greifen wird der Ausschnitt zur Vorlage. Haengt die Palette am Magneten, bewegt sie sich mit dem Bot und der Ausschnitt
     bleibt gleich (Korrelation nahe 1). Bleibt sie liegen, wird sie beim Zuruecksetzen kleiner
     und die Korrelation faellt ab. Ob das reicht, entscheidet switch_control.
     """
 
     def __init__(self):
         super().__init__('pallet_node')
-
-        # --- Parameter ---
-        self.declare_parameter('magnet_x', Parameter.Type.DOUBLE, frange(0.0, 1.0))
-        self.declare_parameter('magnet_top', Parameter.Type.DOUBLE, frange(0.0, 1.0))
-        self._param_names = ['magnet_x', 'magnet_top']
-        require_params(self, self._param_names)
-        read_params(self, self._param_names)
 
         # --- Subscriber ---
         self.sub_state = self.create_subscription(
@@ -55,12 +66,14 @@ class pallet_node(Node):
 
         # --- Publisher ---
         self.pub_grip = self.create_publisher(Float32, '/detect/pallet_grip', 1)
+        self.pub_still = self.create_publisher(Float32, '/detect/pallet_still', 1)
         self.pub_debug = self.create_publisher(CompressedImage, '/detect/pallet_debug/compressed', 1)
 
         # --- Zustand ---
         self.bridge = CvBridge()
         self.state = StorageState.IDLE
         self.reference = None
+        self._recent = deque()      # (Zeit, Ausschnitt) beim Andocken
 
         self.get_logger().info('Started pallet_node.')
 
@@ -70,12 +83,13 @@ class pallet_node(Node):
         self.state = storage_state_from_msg(msg)
         if self.state not in ATTACH_STATES and self.state != REF_STATE:
             self.reference = None
+        if self.state != STILL_STATE:
+            self._recent.clear()
 
     def cb_image(self, img):
-        active = self.state == REF_STATE or self.state in ATTACH_STATES
+        active = self.state in (REF_STATE, STILL_STATE) or self.state in ATTACH_STATES
         if not active and self.pub_debug.get_subscription_count() == 0:
             return
-        read_params(self, self._param_names)
         try:
             self.check(img)
         except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
@@ -89,7 +103,11 @@ class pallet_node(Node):
                                 (BLUR_KERNEL, BLUR_KERNEL), 0)
         x0, y0, x1, y1 = self.roi(gray.shape)
         score = None
-        if self.state == REF_STATE:
+        if self.state == STILL_STATE:
+            score = self.stillness(gray[y0:y1, x0:x1])
+            if score is not None:
+                self.pub_still.publish(Float32(data=score))
+        elif self.state == REF_STATE:
             self.reference = gray[y0:y1, x0:x1].copy()
         elif self.reference is not None:
             h, w = gray.shape
@@ -101,9 +119,22 @@ class pallet_node(Node):
                 self.pub_grip.publish(Float32(data=score))
         self.publish_debug(image, (x0, y0, x1, y1), score)
 
+    def stillness(self, roi):
+        """Korrelation des Ausschnitts mit dem von vor STILL_LAG_S; None, solange keiner so alt ist."""
+        now = time.monotonic()
+        self._recent.append((now, roi.copy()))
+        old = None
+        while self._recent and now - self._recent[0][0] >= STILL_LAG_S:
+            old = self._recent.popleft()
+        if old is None:
+            return None
+        self._recent.appendleft(old)    # juengstes ausreichend altes Bild bleibt Bezug
+        result = cv2.matchTemplate(roi, old[1], cv2.TM_CCOEFF_NORMED)
+        return float(np.nan_to_num(result.max(), nan=-1.0))
+
     def roi(self, shape):
         h, w = shape[:2]
-        cx, bottom = self.magnet_x * w, self.magnet_top * h
+        cx, bottom = MAGNET_X * w, MAGNET_TOP * h
         x0 = int(max(0, cx - ROI_WIDTH * w / 2.0))
         x1 = int(min(w, cx + ROI_WIDTH * w / 2.0))
         y0 = int(max(0, bottom - ROI_HEIGHT * h))
@@ -119,6 +150,8 @@ class pallet_node(Node):
         cv2.line(view, (0, y1), (w - 1, y1), (0, 255, 255), 1)
         if score is None:
             text = 'Vorlage' if self.state == REF_STATE else 'keine Vorlage'
+        elif self.state == STILL_STATE:
+            text = f'Stillstand {score:.2f}'
         else:
             text = f'Korrelation {score:.2f}'
         cv2.putText(view, f'{self.state.name}: {text}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX,

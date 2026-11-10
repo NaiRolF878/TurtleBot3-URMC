@@ -4,8 +4,6 @@ Ein:  /lokal/bev, /control/storage_state, /control/storage_zones (Zonenmodell: A
       Seitengrenzen der Zone), TF odom <- base_footprint
 Aus:  /detect/zone_boundaries (PoseArray, odom): Querlinien neben der Spur, also die
       Grenzen der Zonen; nur im Zustand ERKUNDEN.
-      /detect/zone_dash_start, /detect/zone_dash_end (PoseArray, odom): Beginn und Ende
-      der gestrichelten Spurlinie vor den Zonen; nur im Zustand ERKUNDEN.
       /detect/zone_cross_lines (PoseArray, odom): Querlinien vor dem Bot, also Vorder-
       und Rueckkante der Zone, vor der er steht; nur im Zustand SCHILD_LESEN.
       /detect/pallet (PalletDetection, base_footprint): Fuellung der Zone (SCHILD_LESEN) und
@@ -15,6 +13,7 @@ Aus:  /detect/zone_boundaries (PoseArray, odom): Querlinien neben der Spur, also
 import array
 import math
 import os
+from collections import deque
 
 import cv2
 import numpy as np
@@ -34,15 +33,15 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 from follow_lane_msg.msg import PalletDetection, StorageZones
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    StorageState, bev_pixels_to_ground, frange, ground_to_bev_pixels, inverse_transform_points,
-    irange, pose2d_from_transform, read_params, require_params, run_node,
-    storage_state_from_msg, transform_points, yaw_from_quaternion)
+    CLAHE_PARAMS, COLOR_SOURCE, SELF_MASK_X_M, SELF_MASK_Y_M, WHITE_PARAMS, SharedParams,
+    StorageState, bev_pixels_to_ground,
+    frange, ground_to_bev_pixels, inverse_transform_points, lab_clahe, pose2d_from_transform,
+    read_params, require_params, run_node, storage_state_from_msg, transform_points, white_in,
+    yaw_from_quaternion)
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
 ERODE_KERNEL = 3
-CLAHE_CLIP_LIMIT = 2.0
-CLAHE_TILE_GRID_SIZE = 8
 # Reglement: Zonen rechts der Spur.
 ZONES_RIGHT = True
 # SCHILD_LESEN: Querlinien in +-CROSS_HALF_M um die Bildmitte.
@@ -51,14 +50,6 @@ CROSS_HALF_M = 0.08
 MIN_LINE_M = 0.05
 MAX_GAP_M = 0.03
 HOUGH_THRESHOLD = 30
-# Strichel-Streifen: Abstand von der Bot-Mitte (m), Spur 20 cm, Linie 2 cm.
-DASH_NEAR_M = 0.06
-DASH_FAR_M = 0.16
-DASH_MIN_GAPS = 2
-# Eine BEV-Zeile gilt als Linie, wenn im Strichel-Streifen so viele Pixel weiss sind.
-DASH_MIN_PX = 4
-# Kuerzere Luecken (m) sind Rauschen in der Maske, keine Strichluecke.
-DASH_NOISE_M = 0.005
 # Zonenmodell im Debugbild: Linien so lang (m) ab side_near_m, Ziffer so tief in der Zone.
 ZONE_DRAW_M = 0.25
 ZONE_LABEL_M = 0.12
@@ -85,6 +76,19 @@ FRONT_OUTLIER_M = 0.01
 FRONT_FIT_ROUNDS = 4
 # Metallstreifen (Orga): 15 cm breit; Rahmen im Debugbild.
 STRIP_WIDTH_M = 0.15
+# Eigener Bot vorn im Bild: SELF_MASK_*_M aus common (wie detect_lane) zaehlt nie als Palette,
+# sonst haelt die Kantensuche den Magneten fuer die Vorderkante (Lauf 10.11.: "Palette 0,07 m").
+# Boden lernen (ERKUNDEN): Fleck in der Spurmitte vor dem Bot, dort ist immer Boden. Je Bild
+# Median und Streuung (MAD) von Helligkeit L und Farbe (a, b); gemittelt ueber die letzten
+# FLOOR_FRAMES Bilder. Palette ist, was HELLER oder FARBIGER als der Boden ist: um mehr als
+# FLOOR_K Streuungen, mindestens FLOOR_MIN_DL bzw. FLOOR_MIN_DC. Dunkler zaehlt nicht (Schatten).
+FLOOR_X_M = (0.15, 0.30)
+FLOOR_HALF_Y_M = 0.05
+FLOOR_MIN_PX = 200
+FLOOR_FRAMES = 30
+FLOOR_K = 4.0
+FLOOR_MIN_DL = 20.0
+FLOOR_MIN_DC = 12.0
 
 
 class storage_zone_node(Node):
@@ -93,15 +97,14 @@ class storage_zone_node(Node):
     abweichen; Spurlinien und die Rueckkante der Zonen laufen laengs und fallen weg.
 
     ERKUNDEN: Streifen neben der Spur auf der Seite der Zonen (side_near_m bis zum
-    BEV-Rand). Jede Linie geht als Pose (Mitte, Richtung von der Spur weg) nach odom.
-    Dazu die Spurlinie auf dieser Seite (DASH_NEAR_M bis DASH_FAR_M): Zeile fuer Zeile
-    weiss oder nicht, nah nach fern. Durchgehend ueber solid_min_m und danach mindestens
-    DASH_MIN_GAPS Luecken bis dash_gap_max_m ist der Beginn der Strichelung, umgekehrt ihr
-    Ende.
+    BEV-Rand). Jede Linie geht als Pose (Mitte, Richtung von der Spur weg) nach odom; das
+    Zonenmodell daraus baut storage_sequence.
     SCHILD_LESEN: Streifen +-CROSS_HALF_M um die Bildmitte; der Bot schaut in die Zone.
 
-    Palette: Boden ist dunkel (L ueber floor_l_max nicht), Linien weiss; alles andere ist
-    Palette oder Stuetze, unabhaengig von ihrer Farbe. Gesucht wird zwischen den Seitenlinien
+    Weiss und CLAHE kommen von detect_lane (SharedParams), es gibt sie nur einmal.
+
+    Palette: alles, was heller oder farbiger ist als der Boden und keine weisse Linie. Den
+    Boden lernt der Node beim Erkunden selbst (FLOOR_*), es gibt keinen Schwellwert. Gesucht wird zwischen den Seitenlinien
     der Zone aus dem Zonenmodell. In SCHILD_LESEN zaehlt der Anteil solcher Pixel zwischen
     Vorder- und Hinterkante der Zone (fill). Die Vorderkante der Palette ist die naechste
     solche Stelle je Spalte; sie ist die Bodenkante der Stuetze und damit unverzerrt. Eine
@@ -115,25 +118,12 @@ class storage_zone_node(Node):
         super().__init__('storage_zone_node')
 
         # --- Parameter ---
-        byte = irange(0, 255)
-        self.declare_parameter('lab_l_white_l', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_l_white_h', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_a_white_l', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_a_white_h', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_b_white_l', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('lab_b_white_h', Parameter.Type.INTEGER, byte)
         self.declare_parameter('side_near_m', Parameter.Type.DOUBLE, frange(0.0, 0.4))
         self.declare_parameter('max_angle_deg', Parameter.Type.DOUBLE, frange(1.0, 89.0))
-        self.declare_parameter('solid_min_m', Parameter.Type.DOUBLE, frange(0.01, 0.5))
-        self.declare_parameter('dash_gap_max_m', Parameter.Type.DOUBLE, frange(0.005, 0.3))
-        self.declare_parameter('floor_l_max', Parameter.Type.INTEGER, byte)
-        self._param_names = [
-            'lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
-            'lab_b_white_l', 'lab_b_white_h', 'side_near_m', 'max_angle_deg', 'solid_min_m',
-            'dash_gap_max_m', 'floor_l_max',
-        ]
+        self._param_names = ['side_near_m', 'max_angle_deg']
         require_params(self, self._param_names)
         read_params(self, self._param_names)
+        self.colors = SharedParams(self, COLOR_SOURCE, WHITE_PARAMS + CLAHE_PARAMS)
 
         # --- Subscriber ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -145,8 +135,6 @@ class storage_zone_node(Node):
 
         # --- Publisher ---
         self.pub_boundaries = self.create_publisher(PoseArray, '/detect/zone_boundaries', 5)
-        self.pub_dash_start = self.create_publisher(PoseArray, '/detect/zone_dash_start', 5)
-        self.pub_dash_end = self.create_publisher(PoseArray, '/detect/zone_dash_end', 5)
         self.pub_cross_lines = self.create_publisher(PoseArray, '/detect/zone_cross_lines', 5)
         self.pub_pallet = self.create_publisher(PalletDetection, '/detect/pallet', 1)
         self.pub_debug = self.create_publisher(CompressedImage, '/detect/zone_debug/compressed', 1)
@@ -157,6 +145,7 @@ class storage_zone_node(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.state = StorageState.IDLE
         self.zones = None
+        self._floor = deque(maxlen=FLOOR_FRAMES)     # je Bild (L, a, b, MAD L, MAD Farbe)
         self.bev = bev_geometry.load_bev_spec(
             os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
 
@@ -176,6 +165,9 @@ class storage_zone_node(Node):
         viewer = self.pub_debug.get_subscription_count() > 0
         if not (lines_active or pallet_active or viewer):
             return
+        if not self.colors.ready:
+            self.get_logger().warn(f'Noch keine Farben von /{COLOR_SOURCE}.', throttle_duration_sec=5.0)
+            return
         read_params(self, self._param_names)
         try:
             self.process(img, lines_active, pallet_active, viewer)
@@ -189,6 +181,9 @@ class storage_zone_node(Node):
         w = image.shape[1]
         res = self.bev['res']
         mask = self.white_mask(image)
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        if self.state == StorageState.ERKUNDEN:
+            self.learn_floor(lab, mask)
 
         exploring = self.state != StorageState.SCHILD_LESEN
         if exploring:
@@ -216,22 +211,18 @@ class storage_zone_node(Node):
                 dx, dy = -dx, -dy
             lines.append(((float(np.mean(gx)), float(np.mean(gy))), (dx, dy)))
 
-        dash_cols = self.side_columns(DASH_NEAR_M, DASH_FAR_M)
-        starts, ends = self.find_dashes(mask, dash_cols) if exploring else ([], [])
-
-        need_pose = (lines_active and (lines or starts or ends)) or \
+        need_pose = (lines_active and lines) or \
             ((pallet_active or viewer) and self.zones is not None)
         pose = self.robot_pose(img.header.stamp) if need_pose else None
 
         pallet = None
         if pallet_active or viewer:
             cross_x = [m[0] for m, _ in lines if not exploring]
-            pallet = self.find_pallet(image, mask, cross_x, pose,
+            pallet = self.find_pallet(lab, mask, cross_x, pose,
                                       measure_fill=not exploring or viewer)
             if pallet_active:
                 self.publish_pallet(img.header.stamp, pallet)
-        self.publish_debug(image, mask, (u0, u1), dash_cols, segments, lines, starts, ends,
-                           pose, pallet)
+        self.publish_debug(image, mask, (u0, u1), segments, lines, pose, pallet)
         if not lines_active or pose is None:
             return
 
@@ -241,25 +232,21 @@ class storage_zone_node(Node):
             for (x, y), (_, (dx, dy)) in zip(mids, lines):
                 out.poses.append(self.make_pose(x, y, pose[2] + math.atan2(dy, dx)))
             (self.pub_boundaries if exploring else self.pub_cross_lines).publish(out)
-        y_dash = self.side_sign() * (DASH_NEAR_M + DASH_FAR_M) / 2.0
-        for xs, pub in ((starts, self.pub_dash_start), (ends, self.pub_dash_end)):
-            if xs:
-                out = self.pose_array(img.header.stamp)
-                for x, y in transform_points(pose, np.array([(x, y_dash) for x in xs])):
-                    out.poses.append(self.make_pose(x, y, pose[2]))
-                pub.publish(out)
 
-    def find_pallet(self, image, white, cross_x, pose, measure_fill):
+    def find_pallet(self, lab, white, cross_x, pose, measure_fill):
         """Dict: fill (-1 = nicht gemessen), front (distance, lateral, yaw) oder None, dazu
-        Region, Kantenpunkte und Maske fuer das Debugbild."""
+        Region, Kantenpunkte, Maske und Bodenmodell fuer das Debugbild. lab: BEV in LAB."""
         h, w = white.shape
-        lum = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)[:, :, 0]
         size = 2 * WHITE_DILATE_PX + 1
         near_white = cv2.dilate(white, np.ones((size, size), np.uint8))
-        obj = (lum > self.floor_l_max) & (near_white == 0)
+        floor = self.floor_model(lab, near_white)
+        L, a, b = (lab[:, :, i].astype(np.float32) for i in range(3))
+        obj = ((L - floor[0] > floor[3]) |
+               (np.hypot(a - floor[1], b - floor[2]) > floor[4])) & (near_white == 0)
 
         x_row = bev_pixels_to_ground(self.bev, 0, np.arange(h))[0]
         y_col = bev_pixels_to_ground(self.bev, np.arange(w), 0)[1]
+        obj &= ~((x_row < SELF_MASK_X_M)[:, None] & (np.abs(y_col) < SELF_MASK_Y_M)[None, :])
         left, right, width = self.zone_bounds(x_row, pose)
         inside = (y_col[None, :] <= (left - ZONE_MARGIN_M)[:, None]) & \
                  (y_col[None, :] >= (right + ZONE_MARGIN_M)[:, None])
@@ -290,7 +277,52 @@ class storage_zone_node(Node):
             if hit.size:
                 points.append((float(x_row[h - 1 - hit[0]]), float(y_col[u])))
         return {'fill': fill, 'front': self.fit_front(points), 'points': points,
-                'left': left, 'right': right, 'rows': (front, back), 'obj': obj}
+                'left': left, 'right': right, 'rows': (front, back), 'obj': obj, 'floor': floor}
+
+    def floor_patch(self, shape):
+        """Pixel-Ausschnitt (v0, v1, u0, u1) des Bodenflecks in der Spurmitte vor dem Bot."""
+        u, v = ground_to_bev_pixels(self.bev, [FLOOR_X_M[1], FLOOR_X_M[0]],
+                                    [FLOOR_HALF_Y_M, -FLOOR_HALF_Y_M])
+        v0, v1 = int(round(min(v))), int(round(max(v)))
+        u0, u1 = int(round(min(u))), int(round(max(u)))
+        return max(0, v0), min(shape[0], v1), max(0, u0), min(shape[1], u1)
+
+    @staticmethod
+    def floor_stats(lab, keep):
+        """(L, a, b, MAD L, MAD Farbabstand) der Pixel lab[keep], None bei zu wenigen."""
+        px = lab[keep].astype(np.float32)
+        if len(px) < FLOOR_MIN_PX:
+            return None
+        med = np.median(px, axis=0)
+        mad_l = float(np.median(np.abs(px[:, 0] - med[0])))
+        mad_c = float(np.median(np.hypot(px[:, 1] - med[1], px[:, 2] - med[2])))
+        return float(med[0]), float(med[1]), float(med[2]), mad_l, mad_c
+
+    def learn_floor(self, lab, white):
+        """Beim Erkunden: Boden aus der Spurmitte vor dem Bot (ohne weisse Linien)."""
+        v0, v1, u0, u1 = self.floor_patch(lab.shape)
+        keep = np.zeros(lab.shape[:2], bool)
+        keep[v0:v1, u0:u1] = white[v0:v1, u0:u1] == 0
+        stats = self.floor_stats(lab, keep)
+        if stats is not None:
+            self._floor.append(stats)
+
+    def floor_model(self, lab, near_white):
+        """(L, a, b, Schwelle L, Schwelle Farbe) des Bodens: gelernt beim Erkunden, sonst
+        (Node neu gestartet) aus dem dunkleren Teil dieses Bilds -- Boden ist meist die
+        groesste Flaeche."""
+        if self._floor:
+            L, a, b, mad_l, mad_c = np.median(np.array(self._floor), axis=0)
+        else:
+            self.get_logger().warn('Boden noch nicht gelernt (erst ERKUNDEN) -- schaetze ihn '
+                                   'aus diesem Bild.', throttle_duration_sec=10.0)
+            valid = (near_white == 0) & (lab.sum(axis=2) > 0)
+            keep = valid & (lab[:, :, 0] <= np.percentile(lab[:, :, 0][valid], 40)) \
+                if valid.any() else valid
+            stats = self.floor_stats(lab, keep) or (lab[:, :, 0].mean(), 128.0, 128.0, 10.0, 5.0)
+            L, a, b, mad_l, mad_c = stats
+        return (float(L), float(a), float(b), max(FLOOR_K * mad_l, FLOOR_MIN_DL),
+                max(FLOOR_K * mad_c, FLOOR_MIN_DC))
 
     @staticmethod
     def fit_front(points):
@@ -349,48 +381,6 @@ class storage_zone_node(Node):
             msg.distance, msg.lateral, msg.yaw = (float(v) for v in front)
         self.pub_pallet.publish(msg)
 
-    def find_dashes(self, mask, cols):
-        """X (m) aller Beginne und Enden der Strichelung im Bild."""
-        h = mask.shape[0]
-        res = self.bev['res']
-        white = np.count_nonzero(mask[:, cols[0]:cols[1]], axis=1) >= DASH_MIN_PX
-        white = white[::-1]                         # Index 0 = naechste Zeile
-        x_of = bev_pixels_to_ground(self.bev, 0, np.arange(h)[::-1])[0]
-
-        def runs(values):
-            cut = np.flatnonzero(np.diff(values.astype(np.int8))) + 1
-            first = np.concatenate(([0], cut))
-            last = np.concatenate((cut, [len(values)]))
-            return list(zip(values[first], first, last))
-
-        noise = max(1, int(round(DASH_NOISE_M / res)))
-        for val, a, b in runs(white):
-            if not val and b - a < noise and a > 0 and b < len(white):
-                white[a:b] = True
-
-        kinds = []                                  # (Art, X nah, X fern)
-        for val, a, b in runs(white):
-            length = (b - a) * res
-            if val:
-                kind = 'solid' if length >= self.solid_min_m else 'dash'
-            else:
-                kind = 'gap' if length <= self.dash_gap_max_m else 'none'
-            kinds.append((kind, float(x_of[a]), float(x_of[b - 1])))
-
-        def gaps_from(i, step):
-            n = 0
-            i += step
-            while 0 <= i < len(kinds) and kinds[i][0] in ('gap', 'dash'):
-                n += kinds[i][0] == 'gap'
-                i += step
-            return n
-
-        starts = [far for i, (k, _, far) in enumerate(kinds)
-                  if k == 'solid' and gaps_from(i, 1) >= DASH_MIN_GAPS]
-        ends = [near for i, (k, near, _) in enumerate(kinds)
-                if k == 'solid' and gaps_from(i, -1) >= DASH_MIN_GAPS]
-        return starts, ends
-
     def side_columns(self, near_m, far_m):
         """BEV-Spalten (u0, u1) fuer den Abstand near_m..far_m auf der Seite der Zonen."""
         y_near, y_far = self.side_sign() * near_m, self.side_sign() * far_m
@@ -416,13 +406,8 @@ class storage_zone_node(Node):
         return p
 
     def white_mask(self, image):
-        l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2LAB))
-        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT,
-                                tileGridSize=(CLAHE_TILE_GRID_SIZE, CLAHE_TILE_GRID_SIZE))
-        lab = cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
-        mask = cv2.inRange(lab,
-            (self.lab_l_white_l, self.lab_a_white_l, self.lab_b_white_l),
-            (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
+        c = self.colors
+        mask = white_in(lab_clahe(image, c['clahe_clip_limit'], c['clahe_tile_grid_size']), c)
         return cv2.erode(mask, np.ones((ERODE_KERNEL, ERODE_KERNEL), np.uint8))
 
     def robot_pose(self, stamp):
@@ -439,8 +424,7 @@ class storage_zone_node(Node):
         self.get_logger().warn('Keine Roboterpose zum Bildzeitpunkt.', throttle_duration_sec=5.0)
         return None
 
-    def publish_debug(self, image, mask, band, dash_cols, segments, lines, starts, ends, pose,
-                      pallet):
+    def publish_debug(self, image, mask, band, segments, lines, pose, pallet):
         if self.pub_debug.get_subscription_count() == 0:
             return
         view = image.copy()
@@ -450,19 +434,13 @@ class storage_zone_node(Node):
         view[mask > 0] = (255, 255, 255)
         bottom = view.shape[0] - 1
         cv2.rectangle(view, (band[0], 0), (band[1] - 1, bottom), (255, 200, 0), 2)
-        cv2.rectangle(view, (dash_cols[0], 0), (dash_cols[1] - 1, bottom), (200, 0, 200), 1)
         for x1, y1, x2, y2 in segments:
             cv2.line(view, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2, cv2.LINE_AA)
-        for xs, color in ((starts, (255, 255, 0)), (ends, (255, 0, 255))):
-            for x in xs:
-                v = int(round(ground_to_bev_pixels(self.bev, x, 0.0)[1]))
-                cv2.line(view, (dash_cols[0], v), (dash_cols[1], v), color, 3)
         if pose is not None:
             self.draw_zones(view, pose)
         if pallet is not None:
             self.draw_pallet(view, pallet)
-        cv2.putText(view, f'{self.state.name}: {len(lines)} Querlinien, '
-                    f'Strichel {len(starts)} Beginn / {len(ends)} Ende', (10, 30),
+        cv2.putText(view, f'{self.state.name}: {len(lines)} Querlinien', (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
         ok, encoded = cv2.imencode('.jpg', view)
         if not ok:
@@ -519,7 +497,8 @@ class storage_zone_node(Node):
             cv2.line(view, px(x, pallet['left'][0]), px(x, pallet['right'][0]), (0, 255, 255), 1)
         for x, y in pallet['points']:
             cv2.circle(view, px(x, y), 2, (255, 0, 255), -1)
-        text = f'fill {pallet["fill"]:.2f}' if pallet['fill'] >= 0 else ''
+        fl = pallet['floor']
+        text = f'Boden L {fl[0]:.0f}+{fl[3]:.0f}  ' + (f'fill {pallet["fill"]:.2f}' if pallet['fill'] >= 0 else '')
         if pallet['front'] is not None:
             dist, lat, yaw = pallet['front']
             # Kante in Richtung (-sin yaw, cos yaw); Rahmen: Streifenbreite, 3 cm zum Bot hin.

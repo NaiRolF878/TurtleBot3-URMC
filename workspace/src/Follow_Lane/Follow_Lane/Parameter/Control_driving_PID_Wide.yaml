@@ -1,6 +1,4 @@
 MAX_VEL: 0.15
-dock_k_ang: 1.5
-dock_vel: 0.03
 kd: 1.7
 ki: 0.15
 kp: 8.0

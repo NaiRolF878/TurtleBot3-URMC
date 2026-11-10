@@ -22,14 +22,11 @@ from std_msgs.msg import String
 
 from follow_lane_msg.msg import StorageSign
 from Follow_Lane.src.common import (
-    StorageState, irange, read_params, require_params, run_node, storage_state_from_msg)
+    CLAHE_PARAMS, COLOR_SOURCE, WHITE_PARAMS, SharedParams, StorageState, irange, lab_clahe,
+    read_params, require_params, run_node, storage_state_from_msg, white_in)
 
 DIGITS = (1, 2, 3)
 TEMPLATE_DIR = '~/.ros/urmc_storage_templates'
-CLAHE_CLIP_LIMIT = 2.0
-CLAHE_TILE_GRID_SIZE = 8
-# Weiss innen: A und B hoechstens so weit von 128 (farblos).
-WHITE_AB_TOL = 20
 # Schildform: Flaeche (px), Achsenverhaeltnis der Ellipse, Fuellgrad, weisser Anteil.
 MIN_AREA_PX = 150
 MIN_AXIS_RATIO = 0.5
@@ -77,10 +74,9 @@ class storage_sign_node(Node):
         # --- Parameter ---
         byte = irange(0, 255)
         self._param_names = [
-            'enabled', 'always_on', 'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l',
-            'lab_a_blue_h', 'lab_b_blue_l', 'lab_b_blue_h', 'white_l_min', 'capture_digit',
+            'always_on', 'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l',
+            'lab_a_blue_h', 'lab_b_blue_l', 'lab_b_blue_h', 'capture_digit',
         ]
-        self.declare_parameter('enabled', Parameter.Type.BOOL)
         self.declare_parameter('always_on', Parameter.Type.BOOL)
         self.declare_parameter('lab_l_blue_l', Parameter.Type.INTEGER, byte)
         self.declare_parameter('lab_l_blue_h', Parameter.Type.INTEGER, byte)
@@ -88,10 +84,11 @@ class storage_sign_node(Node):
         self.declare_parameter('lab_a_blue_h', Parameter.Type.INTEGER, byte)
         self.declare_parameter('lab_b_blue_l', Parameter.Type.INTEGER, byte)
         self.declare_parameter('lab_b_blue_h', Parameter.Type.INTEGER, byte)
-        self.declare_parameter('white_l_min', Parameter.Type.INTEGER, byte)
         self.declare_parameter('capture_digit', Parameter.Type.INTEGER, irange(0, 3))
         require_params(self, self._param_names)
         read_params(self, self._param_names)
+        # Weiss (Ziffer) und CLAHE wie bei den Spurlinien, von detect_lane.
+        self.colors = SharedParams(self, COLOR_SOURCE, WHITE_PARAMS + CLAHE_PARAMS)
 
         # --- Subscriber ---
         self.sub_state = self.create_subscription(
@@ -118,9 +115,10 @@ class storage_sign_node(Node):
     def cb_image(self, img):
         read_params(self, self._param_names)
         capture = int(self.capture_digit)
-        if not self.enabled:
-            return
         if self.state != StorageState.SCHILD_LESEN and not self.always_on and not capture:
+            return
+        if not self.colors.ready:
+            self.get_logger().warn(f'Noch keine Farben von /{COLOR_SOURCE}.', throttle_duration_sec=5.0)
             return
         try:
             self.find_sign(img, capture)
@@ -136,8 +134,7 @@ class storage_sign_node(Node):
             (self.lab_l_blue_l, self.lab_a_blue_l, self.lab_b_blue_l),
             (self.lab_l_blue_h, self.lab_a_blue_h, self.lab_b_blue_h))
         blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        white = cv2.inRange(lab, (int(self.white_l_min), 128 - WHITE_AB_TOL, 128 - WHITE_AB_TOL),
-                            (255, 128 + WHITE_AB_TOL, 128 + WHITE_AB_TOL))
+        white = white_in(lab, self.colors)
 
         best = None
         contours, _ = cv2.findContours(blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -195,10 +192,8 @@ class storage_sign_node(Node):
         return digit, score
 
     def lab_clahe(self, image):
-        l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2LAB))
-        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT,
-                                tileGridSize=(CLAHE_TILE_GRID_SIZE, CLAHE_TILE_GRID_SIZE))
-        return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
+        c = self.colors
+        return lab_clahe(image, c['clahe_clip_limit'], c['clahe_tile_grid_size'])
 
     def template_path(self, digit):
         return os.path.join(os.path.expanduser(TEMPLATE_DIR), f'digit_{digit}.png')

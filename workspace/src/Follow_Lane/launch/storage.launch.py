@@ -36,8 +36,6 @@ def generate_launch_description():
              parameters=[storage_params]),
         Node(package='Follow_Lane', executable='storage_sign_node', name='storage_sign_node',
              parameters=[storage_params]),
-        Node(package='Follow_Lane', executable='storage_sign_model_node',
-             name='storage_sign_model_node', parameters=[storage_params]),
         Node(package='Follow_Lane', executable='pallet_node', name='pallet_node',
              parameters=[storage_params]),
 

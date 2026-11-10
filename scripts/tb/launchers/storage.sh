@@ -1,7 +1,7 @@
 #!/bin/bash
 # Aufruf: keine Argumente
 # Startet die Storage-Aufgabe (Palette): Spurverfolgung plus storage_zone_node, storage_sign_node,
-# storage_sign_model_node, pallet_node (storage.launch.py) im Hintergrund und den NOT-AUS (notaus)
+# pallet_node (storage.launch.py) im Hintergrund und den NOT-AUS (notaus)
 # im Vordergrund dieses Terminals. Gestartet wird die Aufgabe mit dem Button STORAGE STARTEN im
 # Debugbild; vorher steht der Bot (Modus Stop). Der Magnet-Node laeuft auf dem Bot:
 #     ros2 run Follow_Lane magnet_controll
@@ -13,7 +13,7 @@
 # Laeuft schon eine Pipeline (z.B. in einem anderen Terminal)? Zwei gleichzeitig senden auf
 # dieselben Topics -- flackernde Debug-Bilder, und zwei Not-Aus-Knoten, von denen einer im STOPP
 # dauernd Null an den Bot schickt.
-PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|storage_zone_node|storage_sign_node|storage_sign_model_node|pallet_node)( |$)'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|storage_zone_node|storage_sign_node|pallet_node)( |$)'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Follow-Lane-Pipeline:"
     ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/Follow_Lane/##; s# --ros-args.*##'
