@@ -13,6 +13,15 @@ if [ ! -d "$BASE/$TREE/workspace/src/Follow_Lane" ]; then
 fi
 source "$SIM_DIR/scripts/sim/sim-env.sh"
 
+# Reste eines frueheren Laufs beenden: zwei odom_filter etwa stoppen sich gegenseitig die TF.
+PATTERN="$SIM_WS/install/|/opt/ros/humble/lib/nav2_|rqt_image_view"
+if pgrep -f "$PATTERN" >/dev/null; then
+    echo "Beende Reste eines frueheren Laufs ..."
+    pkill -INT -f "$PATTERN"
+    sleep 3
+    pkill -KILL -f "$PATTERN"
+fi
+
 # Die Quellen bleiben in den Worktrees (Links), gebaut wird in WSL. Anderer Worktree:
 # dessen Pakete neu bauen.
 mkdir -p "$SIM_WS/src"
@@ -50,6 +59,7 @@ cleanup() {
     done
     kill -TERM -- -"$LAUNCH_PID" 2>/dev/null
     wait "$LAUNCH_PID" 2>/dev/null
+    pkill -KILL -f "$PATTERN" 2>/dev/null
     echo "Simulation beendet. Log: $NODE_LOG"
 }
 trap cleanup EXIT

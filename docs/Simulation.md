@@ -64,6 +64,7 @@ Simulator beim Wechsel auf TunnelEntry einmal „Linien gesehen“ (`/detect/lin
 | `tunnel_gap` | Tunnel 1,0 x 1,0 m, Eingang unten, Ausgang rechts oben, Trennwand mit 22 cm Luecke |
 | `tunnel_wide` | wie `tunnel_gap`, Luecke 30 cm (Vergleich) |
 | `tunnel_wide_room` | wie `tunnel_wide`, dazu Waende um die Plattform (4 x 3 m) |
+| `tunnel_two_gaps` | Eingang links, Trennwand mit 22-cm-Luecke links und 30-cm-Luecke rechts |
 
 Der Bot startet mit der Radachse 10 cm vor dem Eingang: dort enden am echten Bot die
 Spurlinien, und er schaltet auf Tunnel. Ohne Waende um die Plattform liefert der LiDAR

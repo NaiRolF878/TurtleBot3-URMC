@@ -1,0 +1,18 @@
+# Tunnel 1,0 x 1,0 m (Innenmasse), Waende 2 cm dick und 25 cm hoch (ueber der LiDAR-Ebene).
+# Eingang unten links (Oeffnung 30 cm, Mitte x=-0,25), Ausgang rechts oben (30 cm). Die
+# Trennwand laesst links eine 22-cm- und rechts eine 30-cm-Luecke; NavFn waehlt zuerst die
+# nahe, enge. Der Bot steht mit der Radachse 10 cm vor dem Eingang.
+start: [-0.25, -0.10, 90.0]
+objects:
+  # Unten, links und rechts der Eingangsoeffnung (x -0,40 bis -0,10)
+  - {type: box, center: [-0.46, -0.01], size: [0.12, 0.02], height: 0.25}
+  - {type: box, center: [0.21, -0.01], size: [0.62, 0.02], height: 0.25}
+  # Oben
+  - {type: box, center: [0.0, 1.01], size: [1.04, 0.02], height: 0.25}
+  # Links
+  - {type: box, center: [-0.51, 0.5], size: [0.02, 1.0], height: 0.25}
+  # Rechts, unter und ueber der Ausgangsoeffnung (y 0,65 bis 0,95)
+  - {type: box, center: [0.51, 0.325], size: [0.02, 0.65], height: 0.25}
+  - {type: box, center: [0.51, 0.975], size: [0.02, 0.05], height: 0.25}
+  # Trennwand von x=-0,28 bis 0,20: links 22 cm, rechts 30 cm frei
+  - {type: box, center: [-0.04, 0.475], size: [0.48, 0.05], height: 0.25}
