@@ -19,19 +19,30 @@ source "$SCRIPT_DIR/bot.conf" || exit 1
 
 BOT_IP=$(bash "$SCRIPT_DIR/find-bot-ip.sh") || exit 1
 
-NOW=$(date -u +'%Y-%m-%d %H:%M:%S')
-echo "Setze Bot-Uhr auf $NOW UTC ..."
-
-# -t: sudo fragt sonst bei nicht-interaktivem ssh ins Leere und haengt.
-ssh -t "$BOT_USER@$BOT_IP" "sudo date -u -s '$NOW'" || exit 1
-
-echo ""
-echo "Gesetzt. Versatz zur Kontrolle:"
-ssh "$BOT_USER@$BOT_IP" "date -u +'%Y-%m-%d %H:%M:%S'" | while read -r botzeit; do
-    echo "  Bot:    $botzeit UTC"
-    echo "  Laptop: $(date -u +'%Y-%m-%d %H:%M:%S') UTC"
-done
-
+# Erst den Versatz ueber EINE offene Verbindung messen (Ping-Pong, schnellster Rundlauf),
+# dann die Bot-Uhr um genau diesen Wert verschieben (Ablesen und Setzen in EINEM Aufruf). Frueher wurde die Laptop-Zeit
+# sekundengenau abgelesen und erst nach dem SSH-Verbindungsaufbau gesetzt -> Bot 1-2 s zu
+# spaet (gemessen 2,17 s), YOLO verwarf danach jedes Bild als zu alt.
+offset() {
+    python3 - "$BOT_USER@$BOT_IP" <<'PY'
+import subprocess, sys, time
+p = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', sys.argv[1], 'while read l; do date +%s.%N; done'],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+best = None
+for _ in range(20):
+    t0 = time.time(); p.stdin.write('x\n'); p.stdin.flush(); b = float(p.stdout.readline()); t1 = time.time()
+    if best is None or t1 - t0 < best[0]:
+        best = (t1 - t0, b - (t0 + t1) / 2)
+p.stdin.close(); p.wait()
+print(f'{best[1]:.4f}')
+PY
+}
+OFF=$(offset) || { echo "Versatz nicht messbar (SSH ohne Passwort noetig)."; exit 1; }
+echo "Bot minus Laptop vorher: $OFF s -- korrigiere ..."
+ssh -o BatchMode=yes "$BOT_USER@$BOT_IP" \
+    "sudo -n python3 -c 'import time; time.clock_settime(time.CLOCK_REALTIME, time.clock_gettime(time.CLOCK_REALTIME) - ($OFF))'" \
+    || { echo "Setzen fehlgeschlagen (sudo ohne Passwort auf dem Bot noetig)."; exit 1; }
+echo "Bot minus Laptop nachher: $(offset) s"
 echo ""
 echo "WICHTIG: Jetzt auf dem Bot Bringup und Kamera neu starten,"
 echo "sonst laufen die Nodes mit der alten Zeitbasis weiter."

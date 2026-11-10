@@ -413,13 +413,13 @@ class debug_view(Node):
                 ('PID', 'pid', 'pid_hz', None), ('YOLO', 'yolo', 'yolo_hz', 'yolo_ms'),
                 ('Anzeige', view, view + '_hz', None)]
         font, scale = cv2.FONT_HERSHEY_SIMPLEX, 0.45
-        cols = [8, 70, 118, 160, 200, 268]          # Name, Alter, max, Hz, Luecke, Rechnen
+        cols = [8, 74, 154, 222, 262, 350]          # Name, Alter, max, Hz, Luecke, Rechnen
         line_h = 18
         h = line_h * (len(rows) + 1) + 10
         y0 = img.shape[0] - h - 4
-        box = img[y0:y0 + h, 4:4 + 330]
+        box = img[y0:y0 + h, 4:4 + 440]
         box[:] = (box * 0.35).astype(np.uint8)
-        head = ['ms', 'Alter', 'max', 'Hz', 'Luecke', 'Rechn.']
+        head = ['', 'Alter ms', 'max ms', 'Hz', 'Luecke ms', 'Rechnen ms']
         for x, text in zip(cols, head):
             cv2.putText(img, text, (4 + x, y0 + 15), font, scale, (200, 200, 200), 1, cv2.LINE_AA)
         clock_bad = False

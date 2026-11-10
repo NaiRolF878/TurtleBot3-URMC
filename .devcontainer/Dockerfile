@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     iproute2 \
     iputils-ping \
     nmap \
+    chrony \
     && rm -rf /var/lib/apt/lists/*
 
 # TurtleBot3-relevante ROS-Pakete (wie in der ROBOTIS Doku)
@@ -34,6 +35,8 @@ RUN apt-get update && apt-get install -y \
 RUN python3 -m pip install --no-cache-dir tensorrt==10.15.1.29
 # CUDA-Runtime fuer Python (GPU-Speicher/Kopien fuer TensorRT, Follow_Lane/src/yolo_trt.py).
 RUN python3 -m pip install --no-cache-dir cuda-python==13.0.3
+# Profiler fuer scripts/tb/measure-load.sh (Zeit je Funktion der laufenden Nodes)
+RUN python3 -m pip install --no-cache-dir py-spy==0.4.3
 
 ENV TURTLEBOT3_MODEL=burger
 ENV ROS_DOMAIN_ID=33
