@@ -154,7 +154,7 @@ Schickt das eigentliche Fahrkommando an Nav2. Im Obstacle-Modus setzt er ein Zie
 Nav2-Standardkomponente, nicht selbst geschrieben. Nimmt den Pfad entgegen und berechnet daraus in Echtzeit die tatsächlichen Fahrbefehle (auf `/nav2/cmd_vel`). Vor MPPI sitzt ein RotationShim: Weicht der Pfad mehr als 45° ab, dreht er den Bot auf der Stelle. MPPI prüft mit dem echten Umriss gegen die `local_costmap` und weicht lokal ab, wo der Pfad zu eng ist.
 
 ### `planner_server` (Nav2, NavFn) — der Bahnplaner (Obstacle und Tunnel)
-Nav2-Standardkomponente. Berechnet auf der `global_costmap` (LiDAR + Spurgedächtnis, im Tunnel LiDAR + Eingangssperre) einen Weg zu einem Zielpunkt: im Obstacle-Modus auf Anfrage von `nav2_goal_publisher` um die Hindernisse herum, im Tunnel auf Anfrage von `tunnel_explorer_node`. Immer **nur durch bereits bekanntes, freies Gebiet** (siehe Abschnitt 7). NavFn plant für einen Kreis (`robot_radius` 0,10 m plus Polster: Saum 0,108 m um jedes Hindernis), nicht für den echten Umriss. Lücken ab 0,21 m sind planbar.
+Nav2-Standardkomponente. Berechnet auf der `global_costmap` (LiDAR + Spurgedächtnis, im Tunnel LiDAR + Eingangssperre) einen Weg zu einem Zielpunkt: im Obstacle-Modus auf Anfrage von `nav2_goal_publisher` um die Hindernisse herum, im Tunnel auf Anfrage von `tunnel_explorer_node`. Immer **nur durch bereits bekanntes, freies Gebiet** (siehe Abschnitt 7). NavFn plant für einen Kreis (`robot_radius` 0,09 m plus Polster: Saum 0,098 m um jedes Hindernis), nicht für den echten Umriss. Lücken ab etwa 0,20 m sind planbar.
 
 ---
 
@@ -256,7 +256,7 @@ Sobald im 270°-Bereich (vorn, seitlich, schräg hinten) für `OBSTACLE_CLEAR_DE
 
 **Bekannte Grenze:** Die Kamera sieht nur 5–60 cm voraus. Weiter vorn kennt das Spurgedächtnis nur, was sie auf dem Weg dorthin schon gesehen hat. Das Planziel 1 m voraus liegt deshalb anfangs teils hinter dem bekannten Korridor; der Weg wird mit jeder Neuplanung genauer.
 
-**Bekannte Grenze:** NavFn braucht 0,21 m, MPPI gerade 0,20 m und schräg bis 0,22 m (Mindestbreiten in `Nav2_Costmap_Werte.md`, Abschnitt 3). Lücken um 22 cm liegen an der Grenze. Bricht MPPI an einer solchen Lücke ab, plant `nav2_goal_publisher` denselben Weg neu, ohne Ausweg.
+**Bekannte Grenze:** NavFn braucht etwa 0,20 m, MPPI gerade 0,20 m und schräg bis 0,22 m (Mindestbreiten in `Nav2_Costmap_Werte.md`, Abschnitt 3). Lücken um 22 cm liegen an der Grenze. Bricht MPPI an einer solchen Lücke ab, plant `nav2_goal_publisher` denselben Weg neu, ohne Ausweg.
 
 ---
 
