@@ -1,0 +1,24 @@
+# Wie tunnel_wide, dazu Waende um die Plattform (4 x 3 m).
+# Tunnel 1,0 x 1,0 m (Innenmasse), Waende 2 cm dick und 25 cm hoch (ueber der LiDAR-Ebene).
+# Eingang unten (Oeffnung 30 cm), Ausgang rechts oben (30 cm). Eine Trennwand laesst nur
+# links eine Luecke von 30 cm frei. Der Bot steht mit der Radachse 10 cm vor dem Eingang, wo am
+# echten Bot die Spurlinien enden und er auf Tunnel schaltet.
+start: [0.0, -0.10, 90.0]
+objects:
+  # Unten, links und rechts der Eingangsoeffnung
+  - {type: box, center: [-0.335, -0.01], size: [0.37, 0.02], height: 0.25}
+  - {type: box, center: [0.335, -0.01], size: [0.37, 0.02], height: 0.25}
+  # Oben
+  - {type: box, center: [0.0, 1.01], size: [1.04, 0.02], height: 0.25}
+  # Links
+  - {type: box, center: [-0.51, 0.5], size: [0.02, 1.0], height: 0.25}
+  # Rechts, unter und ueber der Ausgangsoeffnung (y 0,65 bis 0,95)
+  - {type: box, center: [0.51, 0.325], size: [0.02, 0.65], height: 0.25}
+  - {type: box, center: [0.51, 0.975], size: [0.02, 0.05], height: 0.25}
+  # Trennwand von der rechten Wand bis 30 cm vor die linke
+  - {type: box, center: [0.150, 0.475], size: [0.700, 0.05], height: 0.25}
+  # Waende um die Plattform: der LiDAR sieht ueberall ein Echo.
+  - {type: box, center: [0.0, -1.0], size: [4.04, 0.02], height: 0.5}
+  - {type: box, center: [0.0, 2.0], size: [4.04, 0.02], height: 0.5}
+  - {type: box, center: [-2.01, 0.5], size: [0.02, 3.0], height: 0.5}
+  - {type: box, center: [2.01, 0.5], size: [0.02, 3.0], height: 0.5}

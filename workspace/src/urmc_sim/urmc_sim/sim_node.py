@@ -60,8 +60,9 @@ PHYSICS_HZ = 50.0
 JOINT_HZ = 30.0
 IMU_HZ = 50.0
 VIEW_HZ = 5.0
-# Draufsicht: Pixel je Meter, Rand (m)
+# Draufsicht: hoechstens so viele Pixel je Meter bzw. Pixel Kantenlaenge, Rand (m)
 VIEW_SCALE = 400.0
+VIEW_MAX_PX = 900
 VIEW_MARGIN_M = 0.15
 
 
@@ -260,21 +261,22 @@ class sim_node(Node):
         xmin, ymin, xmax, ymax = self.world.bounds()
         xmin, ymin = xmin - VIEW_MARGIN_M, ymin - VIEW_MARGIN_M
         xmax, ymax = xmax + VIEW_MARGIN_M, ymax + VIEW_MARGIN_M
-        w = int((xmax - xmin) * VIEW_SCALE)
-        h = int((ymax - ymin) * VIEW_SCALE)
+        scale = min(VIEW_SCALE, VIEW_MAX_PX / max(xmax - xmin, ymax - ymin))
+        w = int((xmax - xmin) * scale)
+        h = int((ymax - ymin) * scale)
         view = np.full((h, w, 3), 40, np.uint8)
 
         def px(pts):
             pts = np.atleast_2d(pts)
-            return np.column_stack([(pts[:, 0] - xmin) * VIEW_SCALE,
-                                    (ymax - pts[:, 1]) * VIEW_SCALE]).astype(np.int32)
+            return np.column_stack([(pts[:, 0] - xmin) * scale,
+                                    (ymax - pts[:, 1]) * scale]).astype(np.int32)
 
         for b in self.world.boxes:
             color = (170, 170, 170) if b.height > SCAN_HEIGHT else (110, 110, 110)
             cv2.fillPoly(view, [px(b.corners)], color)
         for c in self.world.cylinders:
             color = (170, 170, 170) if c.height > SCAN_HEIGHT else (110, 110, 110)
-            cv2.circle(view, tuple(px(c.center)[0]), int(c.radius * VIEW_SCALE), color, -1)
+            cv2.circle(view, tuple(px(c.center)[0]), max(1, int(c.radius * scale)), color, -1)
         if self.last_ranges is not None:
             (ox, oy, yaw), local, ranges = self.last_ranges
             ok = np.isfinite(ranges)

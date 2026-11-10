@@ -25,7 +25,9 @@ Ohne Kamera laufen Spurerkennung, Zonen- und Palettenerkennung noch nicht.
    bash /mnt/c/Users/Flori/Documents/Florian/Master/Turtlebot/wt-sim/scripts/sim/sim-setup.sh
    ```
    installiert die Nav2-Plugins aus unserer `nav2_params.yaml` (MPPI, RotationShim) und legt
-   `~/urmc_sim_ws` an.
+   `~/urmc_sim_ws` an. Auf CPUs ohne AVX2/FMA (z.B. Pentium 3558U) stuerzt das MPPI aus apt
+   ab (`controller_server`, Code -4); dann baut `sim-setup.sh` es mit `build-mppi.sh` selbst
+   nach `~/nav2_mppi_ws` (einige Minuten), `sim-env.sh` bindet es ein.
 
 ## Starten
 
@@ -59,6 +61,12 @@ Ohne Kamerabild schaltet TunnelEntry nach 1 s auf Tunnel.
 |---|---|
 | `tunnel_gap` | Tunnel 1,0 x 1,0 m, Eingang unten, Ausgang rechts oben, Trennwand mit 22 cm Luecke |
 | `tunnel_wide` | wie `tunnel_gap`, Luecke 30 cm (Vergleich) |
+| `tunnel_wide_room` | wie `tunnel_wide`, dazu Waende um die Plattform (4 x 3 m) |
+
+Der Bot startet mit der Radachse 10 cm vor dem Eingang: dort enden am echten Bot die
+Spurlinien, und er schaltet auf Tunnel. Ohne Waende um die Plattform liefert der LiDAR
+draussen kein Echo (inf); mit ihnen sieht er ueberall eines. Welcher Fall bei der Challenge
+gilt, haengt von der Halle ab.
 
 Format (Meter, Draufsicht, x nach rechts, y nach oben):
 ```yaml

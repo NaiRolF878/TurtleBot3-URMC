@@ -1,7 +1,8 @@
 # Tunnel 1,0 x 1,0 m (Innenmasse), Waende 2 cm dick und 25 cm hoch (ueber der LiDAR-Ebene).
 # Eingang unten (Oeffnung 30 cm), Ausgang rechts oben (30 cm). Eine Trennwand laesst nur
-# links eine Luecke von 30 cm frei. Der Bot steht 35 cm vor dem Eingang.
-start: [0.0, -0.35, 90.0]
+# links eine Luecke von 30 cm frei. Der Bot steht mit der Radachse 10 cm vor dem Eingang, wo am
+# echten Bot die Spurlinien enden und er auf Tunnel schaltet.
+start: [0.0, -0.10, 90.0]
 objects:
   # Unten, links und rechts der Eingangsoeffnung
   - {type: box, center: [-0.335, -0.01], size: [0.37, 0.02], height: 0.25}
