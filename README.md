@@ -8,7 +8,7 @@ Die Begeisterung für autonome Roboter entstand in der Vorlesung Robogistic, in 
 
 ## Über den Wettbewerb
 
-Bei der URMC programmieren Teams standardisierte TurtleBot3 Burger Roboter, die sich autonom und sicher durch eine simulierte urbane Testumgebung bewegen müssen.
+Bei der URMC programmieren Teams standardisierte TurtleBot3 Burger Roboter, die sich autonom und sicher durch eine simulierte urbane Testumgebung bewegen müssen (https://urmrc.github.io/URMRC/).
 
 ## Tech-Stack
 
