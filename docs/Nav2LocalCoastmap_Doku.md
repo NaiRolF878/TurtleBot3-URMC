@@ -275,7 +275,7 @@ Der Roboter hat **keine vorab gespeicherte Karte**. Er baut sich rein aus dem Li
 3. **Frontier jenseits der Eingangslinie**, weit weg vom Eingang (Rückfall).
 4. **Weitester erreichbarer Punkt.** Gibt es auch den nicht, meldet der Node das.
 
-Befahrbar heißt dabei immer: was NavFn befahren darf. Besuchte und gescheiterte Stellen werden nicht wieder gewählt; ein Ziel gilt nach zwei Abbrüchen als gescheitert. Gibt es kein Ziel mehr, werden sie vergessen und neu gewählt.
+Befahrbar heißt dabei immer: was NavFn befahren darf. Besuchte und gescheiterte Stellen werden nicht wieder gewählt; ein Ziel gilt nach zwei Abbrüchen als gescheitert. Liegt dann auf dem restlichen Pfad bis 0,6 m voraus eine Engstelle unter 0,26 m (quer zum Pfad gemessen), sperrt der Explorer sie mit einer Linie von Wand zu Wand (`/tunnel/blocked`, `entrance_layer`); NavFn sucht eine andere Route. Gibt es kein Ziel mehr, werden die besuchten Stellen einmal vergessen (nach einer neuen Sperre wieder); danach wartet der Bot und meldet „Kein Weg nach draußen gefunden“. Sperren gelten bis zum Ende der Tunnelfahrt oder Taste L.
 
 **Neuplanung.** Ein Ziel wechselt nur bei Ankunft, wenn es unerreichbar wird oder wenn eine Öffnung auftaucht. Keine Planung im Takt, die Wege sollen nicht springen: Neu geplant wird zum selben Ziel nur, wenn eine gesperrte Zelle auf dem Pfad liegt oder der Regler einmal abbricht. Anders als im Obstacle-Modus gibt es keine Rückwärtssperre, der Bot muss aus Sackgassen wieder herauskommen.
 
