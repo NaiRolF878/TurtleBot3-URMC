@@ -1,10 +1,10 @@
 """2D-Simulator fuer den TurtleBot3 Burger: faehrt nach /cmd_vel und liefert, was der Bot
 selbst sendet. Die Pipeline (odom_filter, Nav2, switch_control, ...) laeuft unveraendert.
 
-Ein:  /cmd_vel (Twist), /sim/reset (Empty: zurueck an den Start)
+Ein:  /cmd_vel (Twist), /sim/reset (Empty: zurueck an den Start), /control/mode
 Aus:  /joint_states, /imu, /scan (LDS-03), statische TF des Bots (base_footprint ->
       base_link -> base_scan, imu_link), /sim/pose (PoseStamped, Welt), /sim/view (Image,
-      Draufsicht)
+      Draufsicht), /detect/lines_lost (Bool, Ersatz fuer die Kamera, siehe cb_mode)
 
 Die odom-TF sendet odom_filter aus /joint_states und /imu, wie am Bot.
 """
@@ -25,7 +25,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, Imu, JointState, LaserScan
-from std_msgs.msg import Empty
+from std_msgs.msg import Bool, Empty, UInt8
 from tf2_ros import StaticTransformBroadcaster
 
 from urmc_sim.world import World
@@ -56,6 +56,8 @@ SCAN_RANGE_MIN = 0.05
 SCAN_RANGE_MAX = 12.0
 SCAN_HZ = 10.0
 SCAN_HEIGHT = BASE_LINK_Z + SCAN_XYZ[2]
+# ControlType.TunnelEntry (Follow_Lane/src/common.py)
+TUNNEL_ENTRY = 7
 PHYSICS_HZ = 50.0
 JOINT_HZ = 30.0
 IMU_HZ = 50.0
@@ -97,6 +99,7 @@ class sim_node(Node):
         # --- Subscriber ---
         self.create_subscription(Twist, '/cmd_vel', self.cb_cmd_vel, 10)
         self.create_subscription(Empty, '/sim/reset', self.cb_reset, 1)
+        self.create_subscription(UInt8, '/control/mode', self.cb_mode, 1)
 
         # --- Publisher ---
         self.pub_joints = self.create_publisher(JointState, '/joint_states', qos_profile_sensor_data)
@@ -104,6 +107,7 @@ class sim_node(Node):
         self.pub_scan = self.create_publisher(LaserScan, '/scan', qos_profile_sensor_data)
         self.pub_pose = self.create_publisher(PoseStamped, '/sim/pose', 10)
         self.pub_view = self.create_publisher(Image, '/sim/view', 1)
+        self.pub_lines = self.create_publisher(Bool, '/detect/lines_lost', 1)
         self.static_tf = StaticTransformBroadcaster(self)
         self.publish_static_tf()
 
@@ -121,6 +125,7 @@ class sim_node(Node):
         self.contact_time = -math.inf
         self.last_ranges = None
         self.last_step = time.monotonic()
+        self.mode = None
 
         # --- Timer ---
         self.create_timer(1.0 / PHYSICS_HZ, self.step)
@@ -136,6 +141,14 @@ class sim_node(Node):
     def cb_cmd_vel(self, msg):
         self.cmd = (msg.linear.x, msg.angular.z)
         self.cmd_time = time.monotonic()
+
+    def cb_mode(self, msg):
+        """Ohne Kamerabild: beim Wechsel auf TunnelEntry einmal 'Linien gesehen', wie
+        detect_lane vor dem Tunnel. Sonst hielte tunnel_explorer_node den Bot schon fuer
+        drinnen und liesse die Einfahrt durch die Tuer aus."""
+        if msg.data == TUNNEL_ENTRY and self.mode != TUNNEL_ENTRY:
+            self.pub_lines.publish(Bool(data=False))
+        self.mode = msg.data
 
     def cb_reset(self, _msg):
         self.pose = list(self.world.start)

@@ -53,7 +53,9 @@ bash scripts/sim/sim.sh wt-nav2 tunnel_gap
 | Zurueck an den Start | `ros2 topic pub --once /sim/reset std_msgs/msg/Empty '{}'`, danach L im Not-Aus |
 | Welt von oben | Fenster `/sim/view`: Objekte (hellgrau: der LiDAR sieht sie), Bot gruen, bei Kollision rot, LiDAR-Treffer rot |
 
-Ohne Kamerabild schaltet TunnelEntry nach 1 s auf Tunnel.
+Ohne Kamerabild schaltet TunnelEntry nach 1 s auf Tunnel. Bis zum Kamerabild meldet der
+Simulator beim Wechsel auf TunnelEntry einmal „Linien gesehen“ (`/detect/lines_lost`), wie
+`detect_lane` vor dem Tunnel; sonst liesse `tunnel_explorer_node` die Einfahrt durch die Tuer aus.
 
 ## Welten
 
