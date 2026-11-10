@@ -6,13 +6,17 @@ Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
       /detect/lane_mask (LaneMask fuer lane_costmap_node),
       /detect/lines_lost (Bool, nur TunnelEntry),
       /detect/barrier, /detect/barrier_pixels, /detect/barrier_debug/compressed,
-      /detect/objects (vision_msgs/Detection2DArray, Pixel im Rohbild)
+      /detect/objects (vision_msgs/Detection2DArray, Pixel im Rohbild),
+      /detect/intersection (PolygonStamped, Kreuzungsfeld in BEV-Pixeln),
+      /detect/lane_far (Float64MultiArray, nur im Modus Intersection),
+      /detect/timing (String, JSON, 1x/s: Bildalter, Raten, Rechenzeiten fuer debug_view)
 Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 """
 import array
+import json
 import os
 import time
-from collections import deque
+from collections import defaultdict, deque
 
 import cv2
 import numpy as np
@@ -20,17 +24,19 @@ import numpy as np
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point32, Polygon, PolygonStamped
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Bool, Float64, Int32, UInt8
+from std_msgs.msg import Bool, Float64, Float64MultiArray, Int32, String, UInt8
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, irange, read_params, require_params, run_node)
+    ControlType, bev_pixels_to_ground, control_mode_from_msg, frange, inverse_transform_points,
+    irange, read_params, require_params, run_node, transform_points, yaw_from_quaternion)
 
 # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
 LANE_MASK_STRIDE = 2
@@ -75,6 +81,17 @@ CLOSE_KERNEL = 11
 MAX_CORNER_DX_M = 0.06
 # So viele der letzten Bilder muessen die Kreuzung zeigen, bevor sie als erkannt gilt.
 INTERSECTION_CONFIRM = (3, 5)
+# Bestaetigte Kreuzung so lange (s) halten, wenn sie in einzelnen Bildern fehlt; in der Zeit
+# per Odometrie mitgeschoben (bleibt am Boden stehen, waehrend der Bot faehrt).
+INTERSECTION_HOLD_S = 0.5
+# Fernes Linienpaar beim Queren der Kreuzung (Modus Intersection, far_lane_pair): von der
+# Suchzeile aus in Baendern nach oben (fern). Je Band +-FAR_BAND_PX Zeilen, davon mindestens
+# FAR_MIN_ROWS mit Kante je Linie; Baender alle FAR_ROW_STEP_PX. Abstand gelb -> weiss
+# zwischen min_lane_width und FAR_MAX_LANE_WIDTH_M (Spur 20 cm + Spiel).
+FAR_BAND_PX = 16
+FAR_ROW_STEP_PX = 16
+FAR_MIN_ROWS = 8
+FAR_MAX_LANE_WIDTH_M = 0.30
 # Schranken-Debugbild (Rohbild) hoechstens so oft (s).
 BARRIER_DEBUG_PERIOD_S = 0.1
 # YOLO (Schilder, andere Bots, Startlinie) auf dem Rohbild: TensorRT-Engine relativ zum
@@ -85,6 +102,9 @@ YOLO_CONF = 0.25      # Mindest-Konfidenz einer Box
 YOLO_IOU = 0.7        # Ueberlappung, ab der NMS die schwaechere Box derselben Klasse verwirft
 # Aelter (s) darf das Rohbild fuer YOLO nicht sein.
 YOLO_MAX_AGE_S = 0.5
+# Zeitmessung (/detect/timing) so oft (s) senden, jede TIMING_LOG_EVERY-te auch ins Log.
+TIMING_PERIOD_S = 1.0
+TIMING_LOG_EVERY = 5
 
 
 class detect_lane(Node):
@@ -149,6 +169,8 @@ class detect_lane(Node):
         self.sub_raw_image = self.create_subscription(Image, '/lokal/raw_image', self.cbGetRawImage, 1)
 
         self.sub_bev = self.create_subscription(Image, '/lokal/bev', self.cb_bev, 1)
+        # Nur fuers Mitschieben einer gehaltenen Kreuzung.
+        self.sub_odom = self.create_subscription(Odometry, '/odom_filtered', self.cb_odom, 1)
 
         # --- Publisher ---
         self.pub_lane_error = self.create_publisher(Float64, '/detect/lane', 1)
@@ -169,6 +191,12 @@ class detect_lane(Node):
         self.pub_intersection = self.create_publisher(PolygonStamped, '/detect/intersection', 1)
         # YOLO-Boxen im Rohbild (Pixel), Header = der des Rohbilds.
         self.pub_objects = self.create_publisher(Detection2DArray, '/detect/objects', 1)
+        # Nur im Modus Intersection: naechstes gelb/weiss-Paar ab der Suchzeile nach vorn,
+        # [lane_error, Abstand Paar (m ab Radachse), Abstand Suchzeile (m)]; leer = keins.
+        self.pub_lane_far = self.create_publisher(Float64MultiArray, '/detect/lane_far', 1)
+        # Bildalter (Kamera-Stempel -> Ankunft hier), Raten und Rechenzeiten, siehe publish_timing.
+        self.pub_timing = self.create_publisher(String, '/detect/timing', 1)
+        self.timer_timing = self.create_timer(TIMING_PERIOD_S, self.publish_timing)
 
         # --- Zustand ---
         self.bridge = CvBridge()
@@ -184,8 +212,16 @@ class detect_lane(Node):
         self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
         self._intersection_hits = deque(maxlen=INTERSECTION_CONFIRM[1])
         self._intersection_seen = False
+        # Zuletzt erkannte Kreuzung: Flaechen am Boden (m, base_footprint), Odometrie-Pose
+        # dazu, Zeitpunkt (monotonic); None = keine.
+        self._held = None
+        self._odom_pose = None
         self.yolo = self.load_yolo()
         self._yolo_times = []    # Dauer je Bild (ms) fuers gedrosselte Log
+        self._timing = defaultdict(list)   # Messreihe -> Werte seit dem letzten publish_timing
+        self._last_arrival = {}            # 'raw'/'bev'/'pid' -> monotonic der letzten Ankunft
+        self._timing_count = 0
+        self._timing_log = defaultdict(list)   # dasselbe ueber TIMING_LOG_EVERY Sekunden
 
         self.get_logger().info('Started detect_lane Node (Nav2-Zweig).')
 
@@ -216,8 +252,13 @@ class detect_lane(Node):
 
     def cbGetRawImage(self, img):
         self.raw_image = img
+        self.note_arrival('raw', img.header.stamp)
         self.detectBarrier()
         self.vision_detection()
+
+    def cb_odom(self, msg):
+        p = msg.pose.pose
+        self._odom_pose = (p.position.x, p.position.y, yaw_from_quaternion(p.orientation))
 
     def cb_control_mode(self, msg):
         new_mode = control_mode_from_msg(self, msg)
@@ -235,6 +276,8 @@ class detect_lane(Node):
         if self.is_running:
             return
         self.is_running = True
+        self.note_arrival('bev', img.header.stamp)
+        t0 = time.monotonic()
         # Alles im try: sonst bliebe das Flag nach einer Exception dauerhaft True und
         # der Node verarbeitete still keine Bilder mehr.
         try:
@@ -243,6 +286,7 @@ class detect_lane(Node):
             self.get_logger().error(f'Spurerkennung fehlgeschlagen: {e}')
         finally:
             self.is_running = False
+            self._timing['lane_ms'].append((time.monotonic() - t0) * 1000.0)
 
     # --- Hilfsmethoden ---
 
@@ -305,12 +349,16 @@ class detect_lane(Node):
 
         polies, horizontal, vertical = self.detect_intersection(
             mask_white, mask_yellow, (center_yellow_x, center_yellow_y),
-            (center_white_x, center_white_y))
+            (center_white_x, center_white_y), img.header.stamp)
+        if self.control_mode == ControlType.Intersection:
+            self.pub_lane_far.publish(self.far_lane_pair(mask_yellow, mask_white))
 
         self.pub_lane_error.publish(Float64(data=lane_error))
+        # Alter beim Senden an den PID (control_driving rechnet sofort, < 1 ms).
+        self.note_arrival('pid', img.header.stamp)
         self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y,
                                    lane_error, int(lane_center), cv_image, polies, horizontal,
-                                   vertical)
+                                   vertical, img.header)
         self.publish_mask_debug(mask_yellow, mask_white,
                                 center_yellow_x, center_yellow_y, center_white_x, center_white_y)
         # Ungefilterte Masken: die links der gelben Linie ausgeblendeten weissen Pixel
@@ -389,8 +437,10 @@ class detect_lane(Node):
 
     def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x,
                               center_white_y, lane_error, lane_center, img, polies,
-                              horizontal, vertical):
+                              horizontal, vertical, header):
         info = FollowLaneDebug()
+        # Stempel des BEV-Bilds: debug_view misst damit Alter und Versatz zum Rohbild.
+        info.raw_image.header = header
         info.center_white_x = center_white_x
         info.center_white_y = center_white_y
         info.center_yellow_x = center_yellow_x
@@ -437,7 +487,45 @@ class detect_lane(Node):
         d = abs(a - b) % 180.0
         return min(d, 180.0 - d)
 
-    def detect_intersection(self, img_white, img_yellow, yellow_point, white_point):
+    def far_lane_pair(self, mask_yellow, mask_white):
+        """Naechstes Spurpaar ab der Suchzeile nach vorn (Queren der Kreuzung).
+
+        Wie find_lane, aber ohne Tracking (die Linien hinter der Kreuzung tauchen erst
+        fern auf): je Band die rechte Kante von gelb (die rechteste) und die linke Kante
+        von weiss (die linkeste rechts von gelb + min_lane_width), Median ueber die Zeilen.
+        Das erste Band mit plausibler Spurbreite gewinnt. Querlinien der Kreuzung haben
+        kaum senkrechte Kanten und stoeren deshalb wenig."""
+        out = Float64MultiArray()
+        res = self._res()
+        x_max = self._bev['x_max'] if self._bev is not None else 0.60
+        yellow = -cv2.Sobel(mask_yellow, cv2.CV_16S, 1, 0, ksize=3) > 127
+        white = cv2.Sobel(mask_white, cv2.CV_16S, 1, 0, ksize=3) > 127
+        max_width = FAR_MAX_LANE_WIDTH_M / res
+        start = int(self.img_height * self.detection_row_factor)
+        for row in range(start, FAR_BAND_PX - 1, -FAR_ROW_STEP_PX):
+            rows = range(max(0, row - FAR_BAND_PX), min(self.img_height, row + FAR_BAND_PX))
+            ys = [hits[-1] for hits in (np.flatnonzero(yellow[r]) for r in rows) if hits.size]
+            if len(ys) < FAR_MIN_ROWS:
+                continue
+            yx = float(np.median(ys))
+            ws = []
+            for r in rows:
+                hits = np.flatnonzero(white[r])
+                hits = hits[hits >= yx + self.min_lane_width]
+                if hits.size:
+                    ws.append(hits[0])
+            if len(ws) < FAR_MIN_ROWS:
+                continue
+            wx = float(np.median(ws))
+            if wx - yx > max_width:
+                continue
+            lane_error = 1 - ((yx + wx) / 2 / self.img_width * 2)
+            out.data = [float(lane_error), x_max - (row + 0.5) * res,
+                        x_max - (start + 0.5) * res]
+            break
+        return out
+
+    def detect_intersection(self, img_white, img_yellow, yellow_point, white_point, stamp):
         """Kreuzung vor dem Bot: Polygone, Quer- und Laengsgeraden fuers Debugbild.
 
         Je Seite wird die eigene Linie an der vom PID verfolgten Stelle gesucht und ihre
@@ -449,7 +537,8 @@ class detect_lane(Node):
 
         Ecke links und rechts etwa gleich weit voraus = Kreuzung, die Verbindung beider
         Ecken ist die Haltelinie. Nur eine Seite = Abzweig auf dieser Seite. Gemeldet
-        wird erst nach INTERSECTION_CONFIRM Bildern (Log), angezeigt wird jedes Bild.
+        wird erst nach INTERSECTION_CONFIRM Bildern; fehlt sie danach in einzelnen Bildern,
+        gilt bis INTERSECTION_HOLD_S die letzte, per Odometrie mitgeschobene Lage.
         """
         # Schliessen: am Farbwechsel (weiss -> gelb) liegen nach der Erosion beide Linien
         # getrennt; die Kontur soll ueber die Ecke hinweg durchlaufen.
@@ -477,16 +566,25 @@ class detect_lane(Node):
         # Debug: Haltelinie, Kreuzungsflaechen und kleine Rauten an den Ecken als
         # Polygone (rot).
         marks = []
-        center = None
+        areas = None
         if stop_line is not None:
-            marks.append(np.array(stop_line, np.int32).reshape(-1, 1, 2))
             areas = self.intersection_areas(stop_line, full)
+            if self._intersection_seen:
+                self._remember_intersection(areas)
+        elif self._intersection_seen:
+            areas = self._recall_intersection()
+        center = None
+        if areas is not None:
             center = areas['mitte']
+            # Haltelinie = Unterkante der Mitte (unten links -> unten rechts)
+            marks.append(np.array([center[3], center[2]], np.int32).reshape(-1, 1, 2))
             for area in areas.values():
                 marks.append(area.reshape(-1, 1, 2))
-        # Bestaetigte Kreuzung (Mitte, BEV-Pixel) fuers Rohbild-Debug; leer = keine.
+        # Bestaetigte Kreuzung (Mitte, BEV-Pixel) fuers Rohbild-Debug und intersection_node;
+        # leer = keine. Stempel des Kamerabilds: intersection_node legt die Haltelinie per
+        # TF zu genau diesem Zeitpunkt in odom ab.
         out = PolygonStamped()
-        out.header.stamp = self.get_clock().now().to_msg()
+        out.header.stamp = stamp
         out.header.frame_id = 'bev'
         if center is not None and self._intersection_seen:
             out.polygon.points = [Point32(x=float(x), y=float(y), z=0.0) for x, y in center]
@@ -626,6 +724,31 @@ class detect_lane(Node):
     def _res(self):
         return self._bev['res'] if self._bev is not None else 0.00125
 
+    def _remember_intersection(self, areas):
+        """Flaechen (BEV-Pixel) als Bodenpunkte mit der aktuellen Odometrie merken."""
+        if self._bev is None:
+            return
+        ground = {}
+        for name, poly in areas.items():
+            X, Y = bev_pixels_to_ground(self._bev, poly[:, 0], poly[:, 1])
+            ground[name] = np.column_stack([X, Y])
+        self._held = {'ground': ground, 'pose': self._odom_pose, 'time': time.monotonic()}
+
+    def _recall_intersection(self):
+        """Gemerkte Flaechen in BEV-Pixeln, um die seitdem gefahrene Strecke verschoben;
+        None ohne Merker oder nach INTERSECTION_HOLD_S."""
+        h, b = self._held, self._bev
+        if h is None or time.monotonic() - h['time'] > INTERSECTION_HOLD_S:
+            return None
+        areas = {}
+        for name, pts in h['ground'].items():
+            if h['pose'] is not None and self._odom_pose is not None:
+                pts = inverse_transform_points(self._odom_pose, transform_points(h['pose'], pts))
+            u = (b['y_half'] - pts[:, 1]) / b['res'] - 0.5
+            v = (b['x_max'] - pts[:, 0]) / b['res'] - 0.5
+            areas[name] = np.round(np.column_stack([u, v])).astype(np.int32)
+        return areas
+
     def _report_intersection(self, stop_line, corners):
         """Entprellt melden: erst nach INTERSECTION_CONFIRM Bildern, einmal je Kreuzung."""
         self._intersection_hits.append(stop_line is not None)
@@ -638,10 +761,11 @@ class detect_lane(Node):
                 dist = x_max - (v + 0.5) * self._res()
                 self.get_logger().info(f'Kreuzung erkannt, Haltelinie {dist * 100:.0f} cm voraus.')
             self._intersection_seen = True
-        elif not any(self._intersection_hits):
-            if self._intersection_seen:
-                self.get_logger().info('Kreuzung nicht mehr im Bild.')
+        elif stop_line is None and self._intersection_seen and (
+                self._held is None or time.monotonic() - self._held['time'] > INTERSECTION_HOLD_S):
+            self.get_logger().info('Kreuzung nicht mehr im Bild.')
             self._intersection_seen = False
+            self._held = None
         elif len(corners) == 1 and stop_line is None:
             side = next(iter(corners))
             self.get_logger().info(f'Abzweig nur {side} gesehen.', throttle_duration_sec=2.0)
@@ -788,6 +912,7 @@ class detect_lane(Node):
             t0 = time.monotonic()
             detections = self.yolo.detect(cv_image)
             self._yolo_times.append((time.monotonic() - t0) * 1000.0)
+            self._timing['yolo_ms'].append(self._yolo_times[-1])
         except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
             self.get_logger().error(f'YOLO fehlgeschlagen: {e}', throttle_duration_sec=5.0)
             return None
@@ -812,7 +937,64 @@ class detect_lane(Node):
             det.results.append(hyp)
             out.detections.append(det)
         self.pub_objects.publish(out)
+        self._timing['yolo_age_ms'].append(self.age_ms(self.raw_image.header.stamp))
         return detections
+
+    # --- Zeitmessung ---
+
+    def age_ms(self, stamp):
+        """Alter (ms) eines Kamera-Stempels jetzt. Stimmt nur, wenn die Bot-Uhr synchron ist
+        (scripts/tb/sync-time.sh); Raten und Luecken sind davon unabhaengig."""
+        return (self.get_clock().now() - Time.from_msg(stamp)).nanoseconds / 1e6
+
+    def note_arrival(self, name, stamp):
+        """Alter beim Eintreffen und Abstand zur letzten Ankunft (Ruckler) mitschreiben."""
+        now = time.monotonic()
+        last = self._last_arrival.get(name)
+        if last is not None:
+            self._timing[name + '_gap_ms'].append((now - last) * 1000.0)
+        self._last_arrival[name] = now
+        self._timing[name + '_age_ms'].append(self.age_ms(stamp))
+
+    @staticmethod
+    def timing_stats(samples, period):
+        """{Messreihe: [Mittel, max]} und Raten (1/s) ueber period Sekunden."""
+        stats = {key: [round(float(np.mean(v)), 1), round(float(np.max(v)), 1)]
+                 for key, v in samples.items() if v}
+        for name, key in (('raw', 'raw_age_ms'), ('bev', 'bev_age_ms'), ('yolo', 'yolo_ms'),
+                          ('pid', 'pid_age_ms')):
+            stats[name + '_hz'] = len(samples.get(key, ())) / period
+        return stats
+
+    def publish_timing(self):
+        """Je Messreihe Mittel und Maximum seit dem letzten Aufruf, dazu Raten (1/s) als
+        JSON auf /detect/timing. raw = /lokal/raw_image (Schranke, YOLO), bev = /lokal/bev,
+        soweit die Spurerkennung es verarbeitet hat (Rest verworfen, weil sie noch rechnete),
+        pid = Spurfehler an control_driving gesendet."""
+        self.pub_timing.publish(String(data=json.dumps(
+            self.timing_stats(self._timing, TIMING_PERIOD_S))))
+        for key, values in self._timing.items():
+            self._timing_log[key].extend(values)
+        self._timing.clear()
+        self._timing_count += 1
+        if self._timing_count % TIMING_LOG_EVERY == 0:
+            # Ueber alle TIMING_LOG_EVERY Sekunden, damit kein Ruckler durchrutscht.
+            stats = self.timing_stats(self._timing_log, TIMING_PERIOD_S * TIMING_LOG_EVERY)
+            self._timing_log.clear()
+
+            def part(name, src, calc=None):
+                age, gap = stats.get(f'{src}_age_ms'), stats.get(f'{src}_gap_ms')
+                text = f'{name} {stats.get(src + "_hz", 0):.0f} Hz'
+                if age:
+                    text += f' Alter {age[0]:.0f}/{age[1]:.0f}'
+                if gap:
+                    text += f' Luecke max {gap[1]:.0f}'
+                if calc and stats.get(calc):
+                    text += f' Rechnen {stats[calc][0]:.0f}/{stats[calc][1]:.0f}'
+                return text
+            self.get_logger().info('Zeit (ms, Mittel/max): ' + ' | '.join([
+                part('Kamera', 'raw'), part('Spur', 'bev', 'lane_ms'), part('PID', 'pid'),
+                part('YOLO', 'yolo', 'yolo_ms')]))
 
 
     # Linien-Tracking entsprechend zur Duckiebot Challenge (DuckieRace,

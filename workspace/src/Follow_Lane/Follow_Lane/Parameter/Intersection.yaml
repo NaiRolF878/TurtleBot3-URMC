@@ -1,0 +1,6 @@
+cross_speed: 0.1
+far_kp: 2.0
+heading_kp: 2.0
+max_cross_distance: 0.9
+min_stop_time: 1.0
+stop_distance: 0.15

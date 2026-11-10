@@ -1,8 +1,9 @@
 """Zustandsmaschine fuer den Fahrmodus, einziger Publisher von /control/mode.
 
 Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request,
-      /detect/lines_lost, /tunnel/outside
-Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String)
+      /detect/lines_lost, /tunnel/outside, /detect/barrier, /intersection/active
+Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
+      /control/obstacle_enabled (Bool, fuers Debugbild)
 Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier.
 """
 import math
@@ -79,6 +80,9 @@ class switch_control(Node):
     Lane -> Stop, wenn detect_lane BARRIER_CONFIRM Mal in Folge eine Schranke meldet
     (/detect/barrier); Stop -> Lane, wenn sie BARRIER_CLEAR_DEBOUNCE_S lang weg ist
     (Schranke offen). In Stop sendet control_driving Null.
+
+    Lane -> Intersection, solange intersection_node /intersection/active True meldet
+    (Haltelinie erreicht: halten, Vorfahrt pruefen, queren); False -> zurueck zu Lane.
     """
 
     def __init__(self):
@@ -113,10 +117,13 @@ class switch_control(Node):
             Bool, '/tunnel/outside', self.cb_tunnel_outside, 1)
         self.sub_barrier = self.create_subscription(
             Bool, '/detect/barrier', self.cb_barrier, 1)
+        self.sub_intersection_active = self.create_subscription(
+            Bool, '/intersection/active', self.cb_intersection_active, 1)
 
         # --- Publisher ---
         self.pub_control_mode = self.create_publisher(UInt8, '/control/mode', 1)
         self.pub_tunnel_source = self.create_publisher(String, '/control/tunnel_source', 1)
+        self.pub_obstacle_enabled = self.create_publisher(Bool, '/control/obstacle_enabled', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(MODE_PUBLISH_PERIOD_S, self.cb_timer)
@@ -193,6 +200,12 @@ class switch_control(Node):
             elif time.monotonic() - self._barrier_clear_since >= BARRIER_CLEAR_DEBOUNCE_S:
                 self._set_mode(ControlType.Lane, 'Schranke offen')
 
+    def cb_intersection_active(self, msg):
+        if msg.data and self.control_mode == ControlType.Lane:
+            self._set_mode(ControlType.Intersection, 'Haltelinie erreicht')
+        elif not msg.data and self.control_mode == ControlType.Intersection:
+            self._set_mode(ControlType.Lane, 'Kreuzung gequert')
+
     def cb_scan(self, scan):
         read_params(self, self._param_names)
 
@@ -230,6 +243,9 @@ class switch_control(Node):
     def _publish_mode(self):
         self.pub_control_mode.publish(UInt8(data=self.control_mode.value))
         self.pub_tunnel_source.publish(String(data=self._tunnel_source))
+        # Frisch gelesen: Taste O / rqt wirken sonst erst mit dem naechsten Scan.
+        self.pub_obstacle_enabled.publish(
+            Bool(data=bool(self.get_parameter('obstacle_enabled').value)))
 
     def _enter_tunnel(self, source):
         if self.control_mode in TUNNEL_MODES:

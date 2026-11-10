@@ -1,9 +1,10 @@
 """Einzige Quelle fuer Fahrbefehle: waehlt je nach /control/mode den Regler.
 
-Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist)
+Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist),
+      /intersection/cmd_vel (Twist)
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel
-Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel, auf die
-Radgrenze skaliert.
+Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel, Intersection:
+/intersection/cmd_vel (intersection_node: halten, queren), beide auf die Radgrenze skaliert.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 """
 import time
@@ -20,6 +21,7 @@ from Follow_Lane.src.common import (
 # nicht zwischen die Spurwaende.
 PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
+INTERSECTION_MODES = (ControlType.Intersection,)
 
 # Prueft, ob die aktive Quelle noch liefert. 20 Hz = controller_frequency in
 # nav2_params.yaml, damit nav2_cmd_timeout auf eine Reglerperiode genau greift.
@@ -44,6 +46,8 @@ WHEEL_SEPARATION = 0.160
 # (2 Hz).
 LANE_CMD_TIMEOUT = 0.3
 NAV2_CMD_TIMEOUT = 0.25
+# intersection_node sendet mit 20 Hz, auch im Halt (Null).
+INTERSECTION_CMD_TIMEOUT = 0.25
 MODE_TIMEOUT = 1.5
 MODE_SWITCH_HOLD = 0.3
 
@@ -85,6 +89,8 @@ class control_driving(Node):
             Float64, '/detect/lane', self.cb_lane_error, 1)
         self.sub_nav2_cmd_vel = self.create_subscription(
             Twist, '/nav2/cmd_vel', self.cb_nav2_cmd_vel, 1)
+        self.sub_intersection_cmd_vel = self.create_subscription(
+            Twist, '/intersection/cmd_vel', self.cb_intersection_cmd_vel, 1)
 
         # --- Publisher ---
         self.pub_cmd_vel = self.create_publisher(Twist, '/control/cmd_vel', 1)
@@ -98,6 +104,7 @@ class control_driving(Node):
         self._mode_time = None
         self._lane_time = None
         self._nav2_time = None
+        self._intersection_time = None
         self._nav2_blocked_until = 0.0
         self._reset_pid()
 
@@ -121,6 +128,7 @@ class control_driving(Node):
             return
         self._lane_time = None
         self._nav2_time = None
+        self._intersection_time = None
         if new_mode in PID_MODES:
             self._reset_pid()
         if new_mode == ControlType.Tunnel:
@@ -149,6 +157,12 @@ class control_driving(Node):
         self._nav2_time = now
         self.pub_cmd_vel.publish(self._limit_wheels(msg))
 
+    def cb_intersection_cmd_vel(self, msg):
+        if not self._mode_is(*INTERSECTION_MODES):
+            return
+        self._intersection_time = time.monotonic()
+        self.pub_cmd_vel.publish(self._limit_wheels(msg))
+
     def cb_watchdog(self):
         read_params(self, self._param_names)
         now = time.monotonic()
@@ -156,6 +170,8 @@ class control_driving(Node):
             fresh = self._fresh(self._lane_time, now, LANE_CMD_TIMEOUT)
         elif self._mode_is(*NAV2_MODES):
             fresh = self._fresh(self._nav2_time, now, NAV2_CMD_TIMEOUT)
+        elif self._mode_is(*INTERSECTION_MODES):
+            fresh = self._fresh(self._intersection_time, now, INTERSECTION_CMD_TIMEOUT)
         else:
             fresh = False
         if not fresh:

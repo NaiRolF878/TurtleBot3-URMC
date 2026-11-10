@@ -1,22 +1,26 @@
 """Debugbild mit Spurerkennung, Fahrmodus und Tunnel-Button.
 
 Ein:  /detect/lane_debug, /control/mode, /control/tunnel_source, /control/cmd_vel, /odom,
-      /battery_state, /detect/lane_obstacles, Klicks aus rqt_image_view
+      /battery_state, /detect/lane_obstacles, /detect/timing, /control/obstacle_enabled,
+      Klicks aus rqt_image_view
 Aus:  /lokal/debug_view (Image), /control/tunnel_request (Bool, Button)
 """
 import datetime as dt
+import json
 import math
+import time
+from collections import defaultdict
 import os
 
 import cv2
 import numpy as np
-import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, PolygonStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import BatteryState, CompressedImage, Image, PointCloud2
 from std_msgs.msg import Bool, Int32, String, UInt8
@@ -52,7 +56,7 @@ MODE_COLOR = {
     ControlType.TunnelEntry:  (255, 200, 0),     # cyan
     ControlType.Tunnel:       (255, 200, 0),
     ControlType.Stop:         (60, 60, 255),     # rot
-    ControlType.Intersection: (200, 200, 200),
+    ControlType.Intersection: (255, 0, 255),     # magenta
     ControlType.Align:        (200, 200, 200),
 }
 
@@ -73,6 +77,18 @@ OBJECT_COLOR = {
     'no_entry':   (120, 0, 200),
 }
 
+# Zeitmessung von detect_lane (/detect/timing): Grenzen (ms) gruen/gelb, darueber rot.
+# Alter = Kamera-Stempel bis Ankunft (braucht synchrone Bot-Uhr), Luecke = groesster Abstand
+# zweier Bilder (Ruckler). Aelter als TIMING_STALE_S -> Anzeige grau.
+TIMING_AGE_MS = (150.0, 300.0)
+TIMING_GAP_MS = (80.0, 200.0)
+TIMING_CALC_MS = (25.0, 45.0)
+TIMING_STALE_S = 3.0
+# Eigene Messung (Anzeige, Punktversatz) jede so-vielte Sekunde zusammengefasst ins Log.
+VIEW_LOG_EVERY = 5
+# Ab so viel (ms) Alter laeuft eher die Bot-Uhr falsch als das Netz.
+CLOCK_SUSPECT_MS = 5000.0
+
 # Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
 CLICK_TOPIC = '/lokal/debug_view_mouse_left'
 
@@ -83,6 +99,7 @@ MODE_SOURCE = {
     ControlType.Obstacle: 'Nav2/MPPI',
     ControlType.TunnelEntry: 'PID',
     ControlType.Tunnel:   'Nav2/MPPI',
+    ControlType.Intersection: 'Kreuzung',
 }
 
 
@@ -128,6 +145,14 @@ class debug_view(Node):
         # YOLO-Boxen (Pixel im Rohbild) fuer die Rohbild-Ansicht.
         self.sub_objects = self.create_subscription(
             Detection2DArray, '/detect/objects', self.cb_objects, 1)
+        # Phase von intersection_node (Anfahrt/Halt/Queren) fuers Mode-Panel.
+        self.sub_intersection_state = self.create_subscription(
+            String, '/intersection/state', self.cb_intersection_state, 1)
+        # Bildalter, Raten, Rechenzeiten (detect_lane) als Tabelle im Kamerabild.
+        self.sub_timing = self.create_subscription(String, '/detect/timing', self.cb_timing, 1)
+        # Obstacle erlaubt (Taste O / rqt) -- Schild in der Kopfzeile.
+        self.sub_obstacle_enabled = self.create_subscription(
+            Bool, '/control/obstacle_enabled', self.cb_obstacle_enabled, 1)
 
         # --- Publisher ---
         self.pub_debug_image = self.create_publisher(Image, '/lokal/debug_view', 1)
@@ -152,6 +177,19 @@ class debug_view(Node):
         self.barrier_pixels = None
         self.barrier = False
         self.intersection = None          # bestaetigtes Kreuzungsfeld (N, 2) in BEV-Pixeln
+        self.intersection_state = ''      # Phase von intersection_node
+        self.timing = None                # letztes /detect/timing (dict)
+        self.obstacle_enabled = None      # None = von switch_control noch nichts gehoert
+        self._timing_time = None          # monotonic beim Empfang
+        # Eigene Messung je Ansicht ('view' = BEV-Debugbild, 'rawview' = Rohbild-Debug):
+        # Alter des gezeigten Bilds beim Senden, Abstand der Sendungen, im Rohbild zusaetzlich
+        # der Versatz der Spurpunkte (BEV-Bild) zum gezeigten Rohbild. 1x/s zusammengefasst.
+        self._view_samples = defaultdict(list)
+        self._view_last = {}
+        self.view_stats = {}
+        self.timer_view_stats = self.create_timer(1.0, self.cb_view_stats)
+        self._view_log = defaultdict(list)   # dasselbe ueber VIEW_LOG_EVERY Sekunden
+        self._view_count = 0
         self.objects = None               # letztes Detection2DArray (YOLO)
         self._bev_to_raw = None           # 3x3 BEV-Pixel -> Rohbild-Pixel (entzerrt)
         self._bev_to_raw_size = None
@@ -195,6 +233,19 @@ class debug_view(Node):
     def cb_barrier(self, msg):
         self.barrier = msg.data
 
+    def cb_obstacle_enabled(self, msg):
+        self.obstacle_enabled = msg.data
+
+    def cb_timing(self, msg):
+        try:
+            self.timing = json.loads(msg.data)
+        except ValueError:
+            return
+        self._timing_time = time.monotonic()
+
+    def cb_intersection_state(self, msg):
+        self.intersection_state = msg.data
+
     def cb_intersection(self, msg):
         pts = [(p.x, p.y) for p in msg.polygon.points]
         self.intersection = np.array(pts, np.float64) if len(pts) >= 3 else None
@@ -213,7 +264,15 @@ class debug_view(Node):
             return
         self.draw_intersection_raw(raw)
         self.draw_objects_raw(raw, msg.header.stamp)
-        out = self.bridge.cv2_to_imgmsg(self.compose(raw), encoding='bgr8')
+        self.note_view('rawview', msg.header.stamp)
+        d = self.follow_lane_debug
+        if d is not None and d.raw_image.header.stamp.sec \
+                and (self.lane_debug_age() or 1e9) <= LANE_DEBUG_STALE_S:
+            # > 0: Punkte stammen aus einem aelteren Bild als das gezeigte Rohbild.
+            self._view_samples['offset_ms'].append(
+                (Time.from_msg(msg.header.stamp) - Time.from_msg(d.raw_image.header.stamp))
+                .nanoseconds / 1e6)
+        out = self.bridge.cv2_to_imgmsg(self.compose(raw, 'rawview'), encoding='bgr8')
         out.header = msg.header
         self.pub_debug_raw.publish(out)
 
@@ -254,7 +313,10 @@ class debug_view(Node):
         camera = self.camera_view()
         if camera is None:
             return
-        final_debug_image = self.compose(camera)
+        fresh = (self.lane_debug_age() or 1e9) <= LANE_DEBUG_STALE_S
+        if fresh and self.follow_lane_debug.raw_image.header.stamp.sec:
+            self.note_view('view', self.follow_lane_debug.raw_image.header.stamp)
+        final_debug_image = self.compose(camera, 'view')
         if self.control_mode is not None:
             bx0, by0, bx1, by1 = TUNNEL_BUTTON
             off_x, off_y = camera.shape[1] + PANEL_W, HEAD_H
@@ -268,9 +330,11 @@ class debug_view(Node):
             msg.header.stamp = self.get_clock().now().to_msg()
         self.pub_debug_image.publish(msg)
 
-    def compose(self, camera):
-        """Kopfzeile (Datum, Akku) ueber Kamerabild und den beiden Seitenpanels."""
+    def compose(self, camera, view):
+        """Kopfzeile (Datum, Akku) ueber Kamerabild und den beiden Seitenpanels.
+        view: 'view' (BEV-Debugbild) oder 'rawview' (Rohbild-Debug), fuer die Zeittabelle."""
         cam_h, cam_w = camera.shape[:2]
+        self.draw_timing(camera, view)
         panel_generic = self.build_generic_panel(cam_h)
         panel_mode = self.build_mode_panel(cam_h, PANEL_W)
 
@@ -282,7 +346,106 @@ class debug_view(Node):
         cv2.putText(head_panel, now.strftime('%H:%M'), (200, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2, cv2.LINE_AA)
         self.draw_battery(head_panel, total_w)
+        self.draw_obstacle_badge(head_panel)
         return np.vstack([head_panel, np.hstack([camera, panel_generic, panel_mode])])
+
+    def note_view(self, name, stamp):
+        """Alter des gezeigten Bilds (Kamera-Stempel) beim Senden und Abstand der Sendungen."""
+        now = time.monotonic()
+        if name in self._view_last:
+            self._view_samples[name + '_gap_ms'].append((now - self._view_last[name]) * 1000.0)
+        self._view_last[name] = now
+        self._view_samples[name + '_age_ms'].append(
+            (self.get_clock().now() - Time.from_msg(stamp)).nanoseconds / 1e6)
+
+    @staticmethod
+    def view_stats_of(samples, period):
+        stats = {k: [round(float(np.mean(v)), 1), round(float(np.max(v)), 1)]
+                 for k, v in samples.items() if v}
+        for name in ('view', 'rawview'):
+            stats[name + '_hz'] = len(samples.get(name + '_age_ms', ())) / period
+        return stats
+
+    def cb_view_stats(self):
+        self.view_stats = self.view_stats_of(self._view_samples, 1.0)
+        for key, values in self._view_samples.items():
+            self._view_log[key].extend(values)
+        self._view_samples.clear()
+        self._view_count += 1
+        if self._view_count % VIEW_LOG_EVERY:
+            return
+        st = self.view_stats_of(self._view_log, float(VIEW_LOG_EVERY))
+        self._view_log.clear()
+        parts = []
+        for name, label in (('view', 'Debugbild'), ('rawview', 'Rohbild-Debug')):
+            age, gap = st.get(name + '_age_ms'), st.get(name + '_gap_ms')
+            if age:
+                parts.append(f'{label} {st[name + "_hz"]:.0f} Hz Alter {age[0]:.0f}/{age[1]:.0f}'
+                             + (f' Luecke max {gap[1]:.0f}' if gap else ''))
+        if 'offset_ms' in st:
+            parts.append(f'Punkte aelter als Rohbild {st["offset_ms"][0]:.0f}/'
+                         f'{st["offset_ms"][1]:.0f}')
+        if parts:
+            self.get_logger().info('Anzeige (ms, Mittel/max): ' + ' | '.join(parts))
+
+    def draw_timing(self, img, view):
+        """Tabelle unten links, je Stufe der Kette Alter (Mittel/max), Rate, groesste Luecke
+        und Rechenzeit: Kamera (Rohbild in detect_lane), Spur (BEV), PID (Spurfehler
+        gesendet), YOLO (Boxen gesendet) aus /detect/timing; Anzeige = dieses Debugbild.
+        Im Rohbild zusaetzlich, wie viel aelter die Spurpunkte als das gezeigte Bild sind."""
+        if self.timing is None:
+            return
+        stale = time.monotonic() - self._timing_time > TIMING_STALE_S
+        t = dict(self.timing, **self.view_stats)
+
+        def cell(key, limits, idx=0):
+            v = t.get(key)
+            if v is None:
+                return '--', (150, 150, 150)
+            v = v[idx]
+            if stale:
+                return f'{v:.0f}', (150, 150, 150)
+            color = (0, 220, 0) if v <= limits[0] else (0, 220, 255) if v <= limits[1] \
+                else (60, 60, 255)
+            return f'{v:.0f}', color
+
+        rows = [('Kamera', 'raw', 'raw_hz', None), ('Spur', 'bev', 'bev_hz', 'lane_ms'),
+                ('PID', 'pid', 'pid_hz', None), ('YOLO', 'yolo', 'yolo_hz', 'yolo_ms'),
+                ('Anzeige', view, view + '_hz', None)]
+        font, scale = cv2.FONT_HERSHEY_SIMPLEX, 0.45
+        cols = [8, 70, 118, 160, 200, 268]          # Name, Alter, max, Hz, Luecke, Rechnen
+        line_h = 18
+        h = line_h * (len(rows) + 1) + 10
+        y0 = img.shape[0] - h - 4
+        box = img[y0:y0 + h, 4:4 + 330]
+        box[:] = (box * 0.35).astype(np.uint8)
+        head = ['ms', 'Alter', 'max', 'Hz', 'Luecke', 'Rechn.']
+        for x, text in zip(cols, head):
+            cv2.putText(img, text, (4 + x, y0 + 15), font, scale, (200, 200, 200), 1, cv2.LINE_AA)
+        clock_bad = False
+        for i, (name, src, hz_key, calc_key) in enumerate(rows):
+            y = y0 + 15 + line_h * (i + 1)
+            age_key = 'yolo_age_ms' if src == 'yolo' else f'{src}_age_ms'
+            if (t.get(age_key) or [0])[0] > CLOCK_SUSPECT_MS:
+                clock_bad = True
+            hz = t.get(hz_key)
+            cells = [(name, (230, 230, 230)), cell(age_key, TIMING_AGE_MS),
+                     cell(age_key, TIMING_AGE_MS, 1),
+                     ('--' if hz is None else f'{hz:.0f}', (230, 230, 230)),
+                     cell(f'{src}_gap_ms', TIMING_GAP_MS, 1) if src != 'yolo' else ('', None),
+                     cell(calc_key, TIMING_CALC_MS) if calc_key else ('', None)]
+            for x, (text, color) in zip(cols, cells):
+                if text:
+                    cv2.putText(img, text, (4 + x, y), font, scale, color, 1, cv2.LINE_AA)
+        if view == 'rawview' and 'offset_ms' in t:
+            text, color = cell('offset_ms', TIMING_GAP_MS)
+            text_max, _ = cell('offset_ms', TIMING_GAP_MS, 1)
+            cv2.putText(img, f'Punkte {text} ms (max {text_max}) aelter als Bild', (8, y0 - 6),
+                        font, 0.5, color, 1, cv2.LINE_AA)
+            y0 -= 20
+        if clock_bad:
+            cv2.putText(img, 'Bot-Uhr falsch? scripts/tb/sync-time.sh', (8, y0 - 6), font, 0.5,
+                        (60, 60, 255), 1, cv2.LINE_AA)
 
     def bev_to_raw(self, shape):
         """3x3 BEV-Pixel -> Pixel im entzerrten Rohbild dieser Groesse; None ohne
@@ -294,22 +457,11 @@ class debug_view(Node):
         self._bev_to_raw = None
         pdir = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
         try:
-            with open(os.path.join(pdir, 'camera_info', CALIBRATION)) as f:
-                cal = yaml.safe_load(f)
-            with open(os.path.join(pdir, 'camera_info', EXTRINSICS)) as f:
-                ext = yaml.safe_load(f)
-            self._bev_spec = bev_geometry.load_bev_spec(pdir)
+            self._bev_to_raw, self._bev_spec = bev_geometry.load_bev_to_image(
+                pdir, CALIBRATION, EXTRINSICS, FISHEYE_BALANCE, (w, h))
         except Exception as e:  # noqa: BLE001 -- ohne Kalibrierung keine Projektion
             self.get_logger().warn(f'Keine Kalibrierung fuers Rohbild-Debug ({e}).')
             return None
-        K = np.array(cal['camera_matrix']['data'], np.float64).reshape(3, 3)
-        K[0] *= w / cal['image_width']
-        K[1] *= h / cal['image_height']
-        if cal.get('distortion_model', 'plumb_bob') in ('equidistant', 'fisheye'):
-            D = np.array(cal['distortion_coefficients']['data'], np.float64).reshape(4, 1)
-            K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-                K, D, (w, h), np.eye(3), balance=FISHEYE_BALANCE)
-        self._bev_to_raw = bev_geometry.bev_to_image_homography(self._bev_spec, ext, K)
         return self._bev_to_raw
 
     def draw_intersection_raw(self, raw):
@@ -501,6 +653,9 @@ class debug_view(Node):
         dist = self.intersection_distance()
         text, ink = ('--', (120, 120, 120)) if dist is None else (f'{dist * 100:.0f} cm', (0, 255, 0))
         cv2.putText(panel, text, (8, 410), cv2.FONT_HERSHEY_SIMPLEX, 1, ink, 2, cv2.LINE_AA)
+        if self.intersection_state and self.intersection_state != 'Frei':
+            cv2.putText(panel, self.intersection_state, (8, 432), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, MODE_COLOR[ControlType.Intersection], 1, cv2.LINE_AA)
         return panel
 
     def draw_tunnel_button(self, panel):
@@ -539,6 +694,19 @@ class debug_view(Node):
             return None
         ratio = (state.voltage - BATT_EMPTY_V) / (BATT_FULL_V - BATT_EMPTY_V)
         return int(round(max(0.0, min(1.0, ratio)) * 100))
+
+    def draw_obstacle_badge(self, head_panel):
+        """Schild 'OBSTACLE AN/AUS' rechts neben der Uhrzeit (Taste O / rqt)."""
+        if self.obstacle_enabled is None:
+            return
+        text = 'OBSTACLE AN' if self.obstacle_enabled else 'OBSTACLE AUS'
+        fill = MODE_COLOR[ControlType.Obstacle] if self.obstacle_enabled else (120, 120, 120)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+        x0, y0 = 320, 6
+        cv2.rectangle(head_panel, (x0, y0), (x0 + tw + 16, HEAD_H - 6), fill, -1)
+        cv2.putText(head_panel, text, (x0 + 8, y0 + (HEAD_H - 12 + th) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0) if self.obstacle_enabled
+                    else (255, 255, 255), 2, cv2.LINE_AA)
 
     def draw_battery(self, head_panel, total_w):
         text = '--%' if self.battery_level is None else f'{self.battery_level}%'

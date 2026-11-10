@@ -45,6 +45,8 @@ def launch_setup(context, *args, **kwargs):
     detect_params = load_flat_params(LaunchConfiguration('detect_params').perform(context))
     control_params = load_flat_params(LaunchConfiguration('control_params').perform(context))
     switch_params = load_flat_params(LaunchConfiguration('switch_control_params').perform(context))
+    intersection_params = load_flat_params(
+        LaunchConfiguration('intersection_params').perform(context))
     # Obstacle nur mit Nav2 (nav2_obstacle.launch.py setzt obstacle:=true). Ohne Nav2 kaeme
     # in Obstacle kein Fahrbefehl, der Bot bliebe stehen. Live umschaltbar in rqt.
     switch_params['obstacle_enabled'] = \
@@ -69,6 +71,11 @@ def launch_setup(context, *args, **kwargs):
             package='Follow_Lane', executable='switch_control', name='switch_control',
             parameters=[switch_params],
         ),
+        # Kreuzung: an der Haltelinie halten, Vorfahrt (YOLO) pruefen, geradeaus queren.
+        Node(
+            package='Follow_Lane', executable='intersection_node', name='intersection_node',
+            parameters=[intersection_params],
+        ),
         Node(package='Follow_Lane', executable='debug_view', name='debug_view'),
     ]
 
@@ -83,6 +90,8 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'Control_driving_PID_Wide.yaml')),
         DeclareLaunchArgument('switch_control_params',
             default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
+        DeclareLaunchArgument('intersection_params',
+            default_value=os.path.join(PARAM_DIR, 'Intersection.yaml')),
         DeclareLaunchArgument('obstacle', default_value='false'),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
