@@ -28,6 +28,9 @@ BOT_IP=$(bash "$SCRIPT_DIR/find-bot-ip.sh") || exit 1
 if [ "$1" != "--no-time" ]; then
     echo ""
     echo "=== Uhr stellen (Pi hat keine gepufferte Echtzeituhr) ==="
+    # Zeitserver auf dem Laptop + Bot als Client: haelt die Uhr laufend nach, sync-time.sh
+    # stellt sie vorher einmal sofort richtig (timesyncd braucht sonst einige Minuten).
+    bash "$SCRIPT_DIR/time-server.sh" || echo "  Zeitserver nicht verfuegbar, Uhr laeuft nach dem Stellen frei."
     bash "$SCRIPT_DIR/sync-time.sh" || echo "  Zeitsynchronisation fehlgeschlagen, mache trotzdem weiter."
 fi
 

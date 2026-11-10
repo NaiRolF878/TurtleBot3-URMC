@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     iproute2 \
     iputils-ping \
     nmap \
+    chrony \
     && rm -rf /var/lib/apt/lists/*
 
 # TurtleBot3-relevante ROS-Pakete (wie in der ROBOTIS Doku)
