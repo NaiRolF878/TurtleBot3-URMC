@@ -3,10 +3,8 @@
     # --- Eintritt Lane -> Obstacle ---
     # Halbwinkel: 45.0 heisst 90 Grad Gesamtkegel.
     obstacle_check_angle_deg: 45.0
-    # LiDAR-Punkt im Kegel naeher als das (m, ab LiDAR) -> Obstacle, sofern keine
-    # Spurlinie zwischen Bot und Punkt liegt. Der PID beachtet Hindernisse nicht; je
-    # kleiner der Wert, desto weniger Weg bleibt Nav2 zum Ausweichen. Wird vor Ort
-    # abgestimmt.
+    # LiDAR-Punkt im Kegel naeher als das (m, ab LiDAR) und keine Spurlinie dazwischen
+    # -> Obstacle.
     obstacle_trigger_distance: 0.30
 
     # --- Austritt Obstacle -> Lane ---

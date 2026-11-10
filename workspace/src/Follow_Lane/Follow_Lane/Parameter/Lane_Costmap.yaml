@@ -4,8 +4,7 @@
     # Linie bzw. wieder frei.
     line_confirm_frames: 3
     free_confirm_frames: 10
-    # m, 0 = nur die Linienmitte wird Wand. Mit 0.04 waren die Linien in der Costmap
-    # 8-10 cm breit und liessen in der 20-cm-Spur keinen Platz fuer den Bot (17,8 cm).
+    # m um die Linienmitte, die Wand wird; 0 = nur die Mitte.
     line_margin: 0.0
 
 /nav2_goal_publisher:

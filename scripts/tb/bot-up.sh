@@ -15,13 +15,12 @@ source "$SCRIPT_DIR/camera.conf" || exit 1
 
 # Klang am Ende (Dienst /sound, fest in der OpenCR-Firmware -- keine eigenen Melodien):
 # 0 OFF, 1 ON, 2 LOW_BATTERY, 3 ERROR. Leer = kein Klang.
-# 4 BUTTON1 / 5 BUTTON2 werden angenommen (success=True), spielen bei uns aber NICHTS (getestet).
+# 4 BUTTON1 / 5 BUTTON2 werden angenommen, spielen aber nichts.
 SOUND_OK=1
 SOUND_FAIL=3
 
-# false: der Bot sendet die TF odom -> base_footprint nicht selbst, das macht odom_filter
-# in der Pipeline (filtert kaputte Radwerte, die die Odometrie um ~1700 m springen liessen).
-# Ohne laufende Pipeline gibt es dann keine odom-TF. Einmalig anders: BOT_ODOM_TF=true botup
+# false: die TF odom -> base_footprint sendet odom_filter in der Pipeline (filtert kaputte
+# Radwerte), ohne Pipeline gibt es keine. Einmalig anders: BOT_ODOM_TF=true botup
 BOT_ODOM_TF="${BOT_ODOM_TF:-false}"
 
 BOT_IP=$(bash "$SCRIPT_DIR/find-bot-ip.sh") || exit 1
@@ -33,12 +32,10 @@ if [ "$1" != "--no-time" ]; then
 fi
 
 REMOTE=$(cat <<'EOF'
-# Ubuntus .bashrc steigt bei nicht-interaktiven Shells sofort aus -- alles, was dort
-# exportiert wird, fehlt hier. Deshalb die relevanten Exports von dort herausziehen...
+# Ubuntus .bashrc steigt bei nicht-interaktiven Shells sofort aus: Exports von dort holen ...
 eval "$(grep -E '^[[:space:]]*export[[:space:]]+(TURTLEBOT3_MODEL|LDS_MODEL|ROS_DOMAIN_ID|RMW_IMPLEMENTATION)=' "$HOME/.bashrc" 2>/dev/null)"
 
-# ...und fuer alles, was dort nicht steht, Standardwerte setzen.
-# TURTLEBOT3_MODEL fehlte hier zuerst -- turtlebot3_bringup startet ohne die Variable nicht.
+# ... und Fehlendes vorbelegen (turtlebot3_bringup braucht TURTLEBOT3_MODEL).
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-__DOMAIN_ID__}"
 export TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}"
 [ -f "$HOME/fastdds_profile.xml" ] && export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/fastdds_profile.xml"
@@ -137,8 +134,7 @@ echo "=== Gegenprobe vom Laptop ==="
 # Der Daemon cacht nach Bot-Neustart oder IP-Wechsel falsch -> hier bewusst --no-daemon.
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
 export ROS_DOMAIN_ID=$BOT_DOMAIN_ID
-# Bis zu 3 Versuche: nach dem Start (und mit WLAN + Kabel gleichzeitig) tauchen nicht alle
-# Topics sofort auf -- einmal pruefen meldete sonst Fehler, obwohl kurz darauf alles da war.
+# Bis zu 3 Versuche: nach dem Start tauchen nicht alle Topics sofort auf.
 EXPECTED="/scan /odom /battery_state /camera/image_raw/compressed"
 for attempt in 1 2 3; do
     sleep 3

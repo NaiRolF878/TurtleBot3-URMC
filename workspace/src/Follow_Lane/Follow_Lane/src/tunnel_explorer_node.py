@@ -14,11 +14,13 @@ import rclpy
 from geometry_msgs.msg import Point32, PolygonStamped
 from nav2_msgs.action import ComputePathToPose
 from nav_msgs.msg import OccupancyGrid, Path
+from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, String, UInt8
+from std_msgs.msg import Bool, Empty, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
@@ -38,6 +40,18 @@ MAP_SETTLE_S = 1.5
 EXIT_HOLD_S = 1.0
 # Um diesen Radius (m) gilt eine Stelle als dieselbe: xy_goal_tolerance des Reglers.
 SAME_TARGET_M = 0.15
+# Reglerwerte im Tunnel, beim Verlassen zurueck auf NORMAL (= nav2_params.yaml): lockerer
+# Fortschritt (Mindestweg m in Sekunden) und langsamer zwischen den engen Waenden.
+TUNNEL_CONTROLLER = {
+    'progress_checker.required_movement_radius': 0.05,
+    'progress_checker.movement_time_allowance': 6.0,
+    'FollowPath.vx_max': 0.10,
+}
+NORMAL_CONTROLLER = {
+    'progress_checker.required_movement_radius': 0.1,
+    'progress_checker.movement_time_allowance': 3.0,
+    'FollowPath.vx_max': 0.22,
+}
 
 ENTERING = 'Einfahrt'
 EXPLORING = 'Suche'
@@ -54,6 +68,13 @@ class tunnel_explorer_node(Node):
     nicht dazu. Drinnen liegt der Bot in der Huelle, draussen liegen alle Waende auf einer Seite:
     das kommt ohne Masse der Enclosure aus. /tunnel/outside wird erst gesendet, nachdem der Bot
     einmal drin war, ein Start vor dem Tunnel springt also nicht zurueck.
+
+    Die Tuer wird nur einmal je Tunnelfahrt gesucht und bleibt danach fest, auch wenn das
+    Ziel dahinter scheitert.
+
+    Im Tunnel faehrt der Regler langsamer und prueft den Fortschritt lockerer
+    (TUNNEL_CONTROLLER), weil MPPI zwischen engen Waenden kriecht und dreht; ausserhalb gilt
+    wieder nav2_params.yaml (NORMAL_CONTROLLER).
 
     Zielwahl in fester Reihenfolge: (1) Strahlen durch die Huelle nach aussen zeigen auf eine
     Oeffnung, nicht die am Eingang. (2) Naechste Frontier in der Huelle: Graues dort ist Schatten
@@ -80,11 +101,14 @@ class tunnel_explorer_node(Node):
             Bool, '/detect/lines_lost', self.cb_lines_lost, 1)
         self.sub_path_result = self.create_subscription(
             String, '/tunnel/path_result', self.cb_path_result, 1)
+        self.sub_clear_maps = self.create_subscription(
+            Empty, '/control/clear_maps', self.cb_clear_maps, 1)
 
         self.pub_explore_path = self.create_publisher(Path, '/tunnel/explore_path', 1)
         self.pub_door = self.create_publisher(PolygonStamped, '/tunnel/door', 1)
         self.pub_outside = self.create_publisher(Bool, '/tunnel/outside', 1)
         self.plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
+        self.controller_params = self.create_client(SetParameters, '/controller_server/set_parameters')
 
         self.timer = self.create_timer(TICK_S, self.cb_timer)
 
@@ -111,7 +135,23 @@ class tunnel_explorer_node(Node):
             self.latest_costmap = None
             self._tunnel_since = time.monotonic()
             self._phase = ENTERING if self._saw_lines else EXPLORING
+            self._set_controller_params(TUNNEL_CONTROLLER, 'Tunnel')
+        elif self.control_mode == ControlType.Tunnel:
+            self._set_controller_params(NORMAL_CONTROLLER, 'normal')
         self.control_mode = new_mode
+
+    def cb_clear_maps(self, _msg):
+        """Taste L im Tunnel: Neustart vor dem Tunnel, Modus bleibt Tunnel. Alles Gemerkte
+        (Tuer, Waende, Ziele) weg, die Karte wird erst nach MAP_SETTLE_S wieder gelesen (bis
+        dahin hat lane_costmap_node die Costmaps geleert). Einfahrt wie nach TunnelEntry: Tuer
+        im Scan suchen. Die Tunnel-Reglerwerte bleiben."""
+        if self.control_mode != ControlType.Tunnel:
+            return
+        self._reset()
+        self.latest_costmap = None
+        self._tunnel_since = time.monotonic()
+        self._phase = ENTERING
+        self.get_logger().info('Taste L: Tunnelmodus zurueckgesetzt -- Einfahrt neu.')
 
     def cb_costmap(self, grid):
         if self._tunnel_since is not None \
@@ -282,7 +322,9 @@ class tunnel_explorer_node(Node):
             if (center - entrance) @ inward <= 0.0:
                 continue
             target = geo.nearest_free(free, res, origin, center + direction * geo.BOT_LENGTH, width)
-            if target is not None and not self._is_done(target):
+            # Liegt das Ziel noch in der Huelle, war die Luecke fuer NavFn zu eng.
+            if target is not None and cv2.pointPolygonTest(hull, target, False) < 0 \
+                    and not self._is_done(target):
                 return target
         return None
 
@@ -342,7 +384,7 @@ class tunnel_explorer_node(Node):
         if len(seeds) == 0:
             return
         rc = np.floor((np.asarray(seeds) - origin) / res).astype(np.int64)[:, ::-1]
-        walls = geo.connected_walls(grid, rc)
+        walls = geo.connected_walls(grid, rc, res)
         rows, cols = np.nonzero(walls)
         if rows.size == 0:
             return
@@ -381,10 +423,9 @@ class tunnel_explorer_node(Node):
 
     def _finish_target(self, failed):
         if self._kind == 'Tuer':
-            if failed:
-                self._door = None
-            else:
-                self._phase = EXPLORING
+            # Die Tuer bleibt auch nach einem Fehlschlag fest (neu gesucht faende der Scan
+            # Luecken zwischen beliebigen Objekten). Weiter mit der Suche.
+            self._phase = EXPLORING
         else:
             self._done.append(self._target)
         if failed:
@@ -425,6 +466,28 @@ class tunnel_explorer_node(Node):
             lambda f, t=target: self.cb_plan_response(f, t))
 
     # --- Hilfsmethoden ---
+
+    def _set_controller_params(self, values, label):
+        """Reglerwerte des controller_server zur Laufzeit umstellen (SimpleProgressChecker
+        und MPPI nehmen sie dynamisch an; Humble kennt nur einen progress_checker)."""
+        if not self.controller_params.service_is_ready():
+            self.get_logger().warn('controller_server/set_parameters nicht erreichbar -- '
+                                   f'Reglerwerte ({label}) bleiben unveraendert.')
+            return
+        req = SetParameters.Request()
+        req.parameters = [Parameter(name, Parameter.Type.DOUBLE, float(v)).to_parameter_msg()
+                          for name, v in values.items()]
+        text = ', '.join(f'{name.split(".")[-1]}={v}' for name, v in values.items())
+
+        def done(future):
+            res = future.result()
+            if res is None or not all(r.successful for r in res.results):
+                reasons = '' if res is None else '; '.join(r.reason for r in res.results)
+                self.get_logger().warn(f'Reglerwerte ({label}) nicht gesetzt: {reasons}')
+            else:
+                self.get_logger().info(f'Reglerwerte {label}: {text}.')
+
+        self.controller_params.call_async(req).add_done_callback(done)
 
     def _reset(self):
         self._tunnel_since = None

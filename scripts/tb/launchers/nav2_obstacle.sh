@@ -45,8 +45,7 @@ mkdir -p "$REPO_ROOT/logs/pipeline"
 NODE_LOG="$REPO_ROOT/logs/pipeline/nav2_obstacle-$(date +%Y%m%d-%H%M%S).log"
 ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/nav2_obstacle-latest.log"
 
-# set -m: eigene Prozessgruppe fuer den Hintergrundjob, sonst ignoriert er SIGINT und laesst
-# sich nicht mehr sauber beenden (Begruendung ausfuehrlich in follow_lane.sh).
+# set -m: eigene Prozessgruppe, sonst ignoriert der Hintergrundjob SIGINT (siehe follow_lane.sh).
 set -m
 ros2 launch Follow_Lane nav2_obstacle.launch.py > "$NODE_LOG" 2>&1 &
 LAUNCH_PID=$!

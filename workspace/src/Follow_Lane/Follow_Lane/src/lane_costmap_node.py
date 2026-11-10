@@ -44,7 +44,7 @@ ODOM_FRAME = 'odom'
 LANE_OBSTACLES_TOPIC = '/detect/lane_obstacles'
 CENTER_PATH_TOPIC = '/lane/center_path'
 PIXEL_STRIDE = 2
-# Zellgroesse (m), gleich der resolution der local_costmap (global 2,5 cm).
+# Zellgroesse (m), = resolution beider Costmaps.
 MEMORY_RESOLUTION = 0.01
 # Weiter entfernte Zellen bleiben gemerkt, werden aber nicht gesendet; = obstacle_max_range
 # der lane_layer in nav2_params.yaml.
@@ -356,18 +356,16 @@ class lane_costmap_node(Node):
     das Ziel, zu dem nav2_goal_publisher den Bahnplaner rechnen laesst.
 
     Pixel -> Meter ueber Parameter/bev.yaml: X vorwaerts ab Radachse, Y nach links, am
-    Boden. Das ist genau base_footprint: in der TurtleBot3-URDF (burger) sitzen die
-    Radgelenke bei x=0 relativ zu base_link, base_link liegt 0.010 m ueber
-    base_footprint, die Achse also 0.010+0.023 = 0.033 m hoch = Radradius.
+    Boden, also base_footprint (TurtleBot3-URDF).
     """
 
     def __init__(self):
         super().__init__('lane_costmap_node')
 
         # --- Parameter ---
-        # Vor Ort einstellen, Werte nur in Lane_Costmap.yaml. Bilder in Folge, bis eine Zelle zur
-        # Linie bzw. wieder frei wird. free groesser als line: ein Hindernis oder der eigene
-        # Schatten kann eine Linie kurz verdecken, ohne dass die LiDAR-Schattenpruefung greift.
+        # Werte nur in Lane_Costmap.yaml. Bilder in Folge, bis eine Zelle zur Linie bzw. wieder
+        # frei wird. free groesser als line: ein Hindernis oder der eigene Schatten kann eine
+        # Linie kurz verdecken, ohne dass die LiDAR-Schattenpruefung greift.
         self.declare_parameter('line_confirm_frames', Parameter.Type.INTEGER, irange(1, 100))
         self.declare_parameter('free_confirm_frames', Parameter.Type.INTEGER, irange(1, 500))
         # Pixel bis so weit (m) um die Linienmitte werden Wand; 0: nur Pixel direkt auf der

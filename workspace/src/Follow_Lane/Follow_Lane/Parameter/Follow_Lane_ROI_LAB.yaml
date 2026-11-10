@@ -1,6 +1,6 @@
 clahe_clip_limit: 2.0
 clahe_tile_grid_size: 8
-detection_row_factor: 0.8
+detection_row_factor: 0.85
 lab_a_blue_h: 200
 lab_a_blue_l: 127
 lab_a_white_h: 182

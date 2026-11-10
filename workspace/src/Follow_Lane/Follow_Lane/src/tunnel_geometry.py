@@ -11,20 +11,19 @@ from Follow_Lane.src.common import COSTMAP_BLOCKED
 
 # Umriss wie local_costmap.footprint in nav2_params.yaml (base_footprint).
 FOOTPRINT = np.array([[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089],
-                      [-0.101, 0.069], [-0.101, -0.069], [-0.033, -0.089], [0.033, -0.089]])
+                      [-0.079, 0.069], [-0.092, 0.05], [-0.101, 0.028], [-0.101, -0.028],
+                      [-0.092, -0.05], [-0.079, -0.069], [-0.033, -0.089], [0.033, -0.089]])
 BOT_LENGTH = 0.138
 BOT_WIDTH = 0.178
-# Schmalste Luecke fuer NavFn: 2 * (robot_radius 0.09 + footprint_padding 0.01) + eine Zelle.
-MIN_OPENING_M = 0.225
 LETHAL_COST = 100
 # Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar: einzelne Strahlen ins
-# Unbekannte. Waende sind schon um robot_radius aufgeblasen, die Bot-MITTE darf schmal fahren.
-MIN_PASSAGE_M = 0.075
+# Unbekannte. Die Waende sind schon um robot_radius aufgeblasen, die Bot-Mitte darf schmal fahren.
+MIN_PASSAGE_M = 0.02
 # Liegt die naechste befahrbare Flaeche weiter vom Bot weg, steht er in keiner.
 MAX_START_GAP_M = 0.15
-# Wandzellen mit einer Luecke bis hierhin gehoeren zusammen (Zellen je Seite): ab ~1,6 m
-# liegen die Strahlen (0,9 Grad) weiter auseinander als eine 2,5-cm-Zelle.
-WALL_GAP_CELLS = 1
+# Wandzellen mit einer Luecke bis hierhin (m je Seite) gehoeren zusammen: ab ~1,6 m liegen die
+# Strahlen (0,9 Grad) weiter als 2,5 cm auseinander.
+WALL_GAP_M = 0.025
 # So weit (m) hinter die Tuerlinie faehrt die Einfahrt: Heck 0.101 + footprint_padding 0.01 +
 # xy_goal_tolerance 0.15, damit der ganze Bot auch bei fruehem "erreicht" drin ist.
 DOOR_DEPTH_M = 0.261
@@ -76,7 +75,7 @@ def find_openings(angles, ranges, origin=(0.0, 0.0)):
                 continue
             a, b = points[i], points[j]
             width = float(np.hypot(*(b - a)))
-            if width < MIN_OPENING_M:
+            if width < BOT_WIDTH:
                 continue
             between = (i + np.arange(step // 4 + 1, step - step // 4)) % n
             seen = between[finite[between]]
@@ -182,8 +181,6 @@ def hull_openings(hull, origin, angles, ranges):
     for group in groups:
         a, b = crossings[group[0]], crossings[group[-1]]
         width = float(np.hypot(*(b - a)))
-        if width < MIN_OPENING_M:
-            continue
         center = (a + b) / 2.0
         direction = center - origin
         openings.append((center, width, direction / max(np.hypot(*direction), 1e-9)))
@@ -253,10 +250,10 @@ def hull_mask(hull, shape, info_res, origin_xy):
     return mask.astype(bool)
 
 
-def connected_walls(grid, seeds_rc):
+def connected_walls(grid, seeds_rc, info_res):
     """Wandzellen (Maske), die mit den Seeds (N, 2; Zeile, Spalte) verbunden sind."""
     lethal = (grid == LETHAL_COST).astype(np.uint8)
-    size = 2 * WALL_GAP_CELLS + 1
+    size = 2 * max(1, int(round(WALL_GAP_M / info_res))) + 1
     closed = cv2.dilate(lethal, np.ones((size, size), np.uint8))
     _, labels = cv2.connectedComponents(closed, connectivity=8)
     h, w = grid.shape

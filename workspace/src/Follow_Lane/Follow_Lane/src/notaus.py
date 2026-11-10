@@ -13,6 +13,9 @@
 * Zustand auf /notaus/drive (std_msgs/Bool, latched) fuer GUIs/andere Nodes.
 * Taste L: /control/clear_maps (std_msgs/Empty), lane_costmap_node leert Spurgedaechtnis und
   Costmaps, wenn sie nicht mehr zur Odometrie passen (Bot angehoben). Erst absetzen, dann L.
+  Im Tunnel-Modus zusaetzlich Neustart vor dem Tunnel (Modus bleibt Tunnel): Eingangssperre
+  neu an der aktuellen Pose (keepout_zone_node), Tunnel-Explorer von vorn mit Tuersuche,
+  laufendes Nav2-Ziel abgebrochen. Bot also erst vor den Eingang stellen, dann L.
 * Taste O: Obstacle-Modus an/aus (Parameter obstacle_enabled von switch_control, wie das
   Haekchen in rqt). Aus heisst: kein Wechsel nach Obstacle, aus Obstacle sofort zurueck zu Lane.
 * Beim Beenden: mehrfach Stopp. Danach kommt nichts mehr zum Bot durch (kein Remapping mehr).

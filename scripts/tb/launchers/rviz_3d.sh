@@ -3,9 +3,7 @@
 # Startet rviz2 mit der Projekt-Konfiguration: Roboter, TF, LaserScan, beide Costmaps
 # und die geplanten Pfade.
 #
-# Fixed Frame ist bewusst "odom", nicht "map": Beide Costmaps laufen auf diesem Branch
-# in odom (siehe global_frame in nav2_params.yaml), es gibt weder Karte noch AMCL.
-# Mit "map" bliebe die Anzeige leer.
+# Fixed Frame "odom": beide Costmaps laufen in odom, es gibt weder Karte noch AMCL.
 
 CONFIG="$(ros2 pkg prefix Follow_Lane 2>/dev/null)/share/Follow_Lane/rviz/urmc.rviz"
 
@@ -15,9 +13,7 @@ if [ ! -f "$CONFIG" ]; then
     exit 1
 fi
 
-# Kein xset-Test hier: das Programm ist im Container nicht installiert und meldete
-# deshalb faelschlich fehlenden X-Zugriff. Scheitert rviz mit "could not connect to
-# display", auf dem HOST "xhost +local:root" ausfuehren (nicht persistent).
+# Scheitert rviz mit "could not connect to display": auf dem Host "xhost +local:root".
 if [ -z "$DISPLAY" ]; then
     echo "WARNUNG: DISPLAY ist nicht gesetzt -- rviz kann kein Fenster oeffnen."
     echo ""

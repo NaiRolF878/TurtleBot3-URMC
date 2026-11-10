@@ -1,6 +1,6 @@
 """Sperrt im Tunnel den Eingang, damit der Bot dort nicht wieder hinausfaehrt.
 
-Ein:  /control/mode, /tunnel/door (PolygonStamped: Tuerkanten, Punkt innen), TF
+Ein:  /control/mode, /control/clear_maps (Taste L: Sperre neu an der aktuellen Pose), TF
 Aus:  /detect/tunnel_entrance_obstacle (PointCloud2, odom)
 """
 import math
@@ -8,15 +8,15 @@ import math
 import numpy as np
 
 import rclpy
-from geometry_msgs.msg import PolygonStamped
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Header, UInt8
+from std_msgs.msg import Empty, Header, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
-from Follow_Lane.src.common import ControlType, control_mode_from_msg, run_node
+from Follow_Lane.src.common import (
+    ControlType, control_mode_from_msg, pose2d_from_transform, run_node)
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
@@ -24,13 +24,19 @@ PUBLISH_PERIOD_S = 0.2
 # Heck 0.101 + footprint_padding 0.01 + 0.05 Reserve: erst dann liegt keine Wandzelle
 # mehr unter dem Bot.
 WALL_DELAY_M = 0.16
-# Abstand der Wandpunkte (m): = resolution der global_costmap, sonst bleiben Luecken.
-WALL_POINT_STEP_M = 0.025
+# Laenge der Sperre (m), mittig quer zur Fahrtrichtung: Eingang max. 30 cm + je 5 cm, weil der
+# Bot nicht genau mittig steht. Der Ueberstand liegt auf der Tunnelwand.
+WALL_WIDTH_M = 0.4
+# Abstand der Wandpunkte (m): = kleinste resolution der Costmaps (global und local 0.01),
+# sonst bleiben Luecken.
+WALL_POINT_STEP_M = 0.01
 
 
 class keepout_zone_node(Node):
-    """Sendet eine virtuelle Wand zwischen die von tunnel_explorer_node gemessenen Tuerkanten,
-    im odom-Frame, damit sie ortsfest bleibt. Ohne Tuer (Start im Tunnel) gibt es keine Wand.
+    """Sendet eine virtuelle Wand an der Stelle, an der switch_control von TunnelEntry nach
+    Tunnel wechselt (Spurlinien enden = Eingang): quer zur Fahrtrichtung durch die Radachse,
+    WALL_WIDTH_M lang, im odom-Frame, damit sie ortsfest bleibt. Ohne TunnelEntry davor
+    (Start im Tunnel) gibt es keine Wand.
 
     Gesendet wird sie erst, wenn der Bot WALL_DELAY_M hinter der Tuer ist. Sonst stuende er
     in ihr und MPPI saehe jede Bewegung als Kollision.
@@ -41,7 +47,8 @@ class keepout_zone_node(Node):
 
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cb_control_mode, 1)
-        self.sub_door = self.create_subscription(PolygonStamped, '/tunnel/door', self.cb_door, 1)
+        self.sub_clear_maps = self.create_subscription(
+            Empty, '/control/clear_maps', self.cb_clear_maps, 1)
         self.pub_entrance = self.create_publisher(PointCloud2, '/detect/tunnel_entrance_obstacle', 1)
         self.timer = self.create_timer(PUBLISH_PERIOD_S, self.cb_timer)
 
@@ -62,15 +69,38 @@ class keepout_zone_node(Node):
         if (self.control_mode == ControlType.Tunnel) != (new_mode == ControlType.Tunnel):
             self._door = None
             self._wall_active = False
+        if new_mode == ControlType.Tunnel and self.control_mode == ControlType.TunnelEntry:
+            self._door = self._door_at_robot('Wechsel TunnelEntry -> Tunnel')
         self.control_mode = new_mode
 
-    def cb_door(self, msg):
-        a, b, inside = (np.array([p.x, p.y], dtype=np.float64) for p in msg.polygon.points)
-        center = (a + b) / 2.0
-        normal = (inside - center) / max(np.hypot(*(inside - center)), 1e-9)
-        self._door = (a, b, center, normal)
+    def cb_clear_maps(self, _msg):
+        """Taste L im Tunnel: Neustart vor dem Tunnel. Die alte Sperre verschwindet, die neue
+        liegt an der Pose beim Druck auf L (Bot also erst vor den Eingang stellen) und wird wie
+        beim Moduswechsel erst WALL_DELAY_M hinter ihr aktiv."""
+        if self.control_mode != ControlType.Tunnel:
+            return
+        # Leere Wolke zuerst: entrance_layer behaelt sonst die alte Wand im Puffer und traegt sie
+        # nach dem Leeren der Costmaps (lane_costmap_node, 0,3 s spaeter) wieder ein.
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = ODOM_FRAME
+        self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, []))
         self._wall_active = False
-        self.get_logger().info(f'Tunnel-Eingang bei x={center[0]:.2f} y={center[1]:.2f} (odom).')
+        self._door = self._door_at_robot('Taste L')
+
+    def _door_at_robot(self, reason):
+        """Eingang an der aktuellen Pose: Linie quer zur Fahrtrichtung durch die Radachse,
+        Normale = Fahrtrichtung (nach innen). None ohne Pose."""
+        pose = self._robot_pose()
+        if pose is None:
+            self.get_logger().warn('Keine Pose beim Wechsel in den Tunnel -- keine Eingangssperre.')
+            return None
+        x, y, yaw = pose
+        center = np.array([x, y])
+        normal = np.array([math.cos(yaw), math.sin(yaw)])
+        side = np.array([-normal[1], normal[0]]) * WALL_WIDTH_M / 2.0
+        self.get_logger().info(f'Tunnel-Eingang bei x={x:.2f} y={y:.2f} (odom, {reason}).')
+        return (center - side, center + side, center, normal)
 
     def cb_timer(self):
         if self.control_mode != ControlType.Tunnel or self._door is None:
@@ -87,17 +117,23 @@ class keepout_zone_node(Node):
 
     # --- Hilfsmethoden ---
 
-    def _distance_past_door(self):
-        """Wie weit die Radachse hinter der Tuerlinie steht (m); 0 ohne Pose."""
+    def _robot_pose(self):
+        """(x, y, yaw) in odom oder None."""
         try:
             tf = self.tf_buffer.lookup_transform(ODOM_FRAME, ROBOT_FRAME, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.get_logger().warn(
                 f'TF-Lookup fuer Roboterpose fehlgeschlagen: {e}', throttle_duration_sec=2.0)
+            return None
+        return pose2d_from_transform(tf)
+
+    def _distance_past_door(self):
+        """Wie weit die Radachse hinter der Tuerlinie steht (m); 0 ohne Pose."""
+        pose = self._robot_pose()
+        if pose is None:
             return 0.0
-        t = tf.transform.translation
         _, _, center, normal = self._door
-        return float((np.array([t.x, t.y]) - center) @ normal)
+        return float((np.array(pose[:2]) - center) @ normal)
 
     def _wall_points(self):
         a, b, _, _ = self._door

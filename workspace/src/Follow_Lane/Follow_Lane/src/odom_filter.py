@@ -3,11 +3,9 @@
 Ein:  /joint_states, /imu, /tf (nur zur Pruefung, ob der Bot selbst noch sendet)
 Aus:  TF odom -> base_footprint, /odom_filtered (Odometry)
 
-Der turtlebot3_node liefert ab und zu EINE /joint_states-Nachricht mit Unsinn fuer beide
-Raeder (gemessen 2026-11-03: -51674 rad statt 391 rad, eine Nachricht spaeter wieder
-richtig, auch im Stand). Sein diff_drive_controller rechnet das als Fahrt von ~1700 m hin
-und zurueck. Nav2s mitfahrende Costmaps verwerfen dabei alles, und es bleibt ein Versatz
-von Metern.
+Der turtlebot3_node liefert ab und zu eine /joint_states-Nachricht mit Unsinn fuer beide
+Raeder (z.B. -51674 rad statt 391 rad, auch im Stand). Daraus wuerde eine Fahrt von
+~1700 m, die mitfahrenden Costmaps verloeren alles, und es bliebe ein Versatz von Metern.
 
 Gerechnet wird wie im turtlebot3_node (odometry.use_imu: true): Weg aus den Raedern,
 Drehung aus dem IMU-Gierwinkel. Verworfen wird jede Nachricht, deren Raddrehung seit der

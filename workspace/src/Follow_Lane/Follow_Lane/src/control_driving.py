@@ -23,21 +23,17 @@ PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
 INTERSECTION_MODES = (ControlType.Intersection,)
 
-# Prueft, ob die aktive Quelle noch liefert. 20 Hz = controller_frequency in
-# nav2_params.yaml, damit nav2_cmd_timeout auf eine Reglerperiode genau greift.
+# Prueft, ob die aktive Quelle noch liefert; = controller_frequency in nav2_params.yaml.
 WATCHDOG_RATE_HZ = 20.0
 
-# Feste Abtastzeit fuer den D-Anteil, nicht die gemessene: detect_lane liefert so
-# schnell, wie es Bilder schafft, die Rate schwankt. kp/ki/kd sind mit diesem Wert
-# eingestellt; ein gemessenes dt wuerde ihre Wirkung veraendern. Der I-Anteil
-# summiert aus demselben Grund ohne dt.
+# Feste Abtastzeit fuer D- und I-Anteil: die Bildrate schwankt, kp/ki/kd sind auf diesen Wert
+# eingestellt.
 PID_SAMPLE_TIME_S = 0.1
 INTEGRAL_LIMIT = 1.0
 # Begrenzung der PID-Lenkung (rad/s); der Burger schafft ~2,84 rad/s.
 MAX_ANGULAR_VEL = 2.0
-# Max. Geschwindigkeit der Motoren 0,22 m/s (TurtleBot3-Handbuch, Burger), darum
-# bleibt das aeussere Rad (v + |omega| * WHEEL_SEPARATION / 2) darunter.
-# Gleicher Wert wie vx_max in nav2_params.yaml.
+# Hoechstgeschwindigkeit des Burger; das aeussere Rad (v + |omega| * WHEEL_SEPARATION / 2)
+# bleibt darunter. Gleicher Wert wie vx_max in nav2_params.yaml.
 MAX_WHEEL_VEL = 0.22
 WHEEL_SEPARATION = 0.160
 
@@ -62,16 +58,14 @@ class control_driving(Node):
     Nach jedem Wechsel des Reglers zaehlen nur Befehle, die danach eintreffen; der
     Wechsel selbst sendet sofort Null, damit turtlebot3_node nicht den letzten Befehl
     der alten Quelle weiterfaehrt. Lane <-> TunnelEntry behaelt den PID ohne Halt.
-    Nach dem Wechsel in den Tunnel bleibt die Nav2-Quelle MODE_SWITCH_HOLD lang
-    gesperrt: bis der Cancel von nav2_goal_publisher greift, faehrt controller_server
-    sonst noch ein Obstacle-Ziel aus der Spurmitte, also aus Kameradaten.
+    Nach dem Wechsel in den Tunnel bleibt die Nav2-Quelle MODE_SWITCH_HOLD lang gesperrt.
     """
 
     def __init__(self):
         super().__init__('control_driving')
 
         # --- Parameter ---
-        # Ohne Default: nur aus Control_driving_PID.yaml, sonst startet der Node nicht.
+        # Ohne Default: nur aus der Control-YAML des Launches, sonst startet der Node nicht.
         self.declare_parameter('kp',                 Parameter.Type.DOUBLE, frange(0.0, 20.0))
         self.declare_parameter('ki',                 Parameter.Type.DOUBLE, frange(0.0, 10.0))
         self.declare_parameter('kd',                 Parameter.Type.DOUBLE, frange(0.0, 10.0))

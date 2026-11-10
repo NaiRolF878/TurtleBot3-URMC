@@ -21,7 +21,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import String, UInt8
+from std_msgs.msg import Empty, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
@@ -87,9 +87,8 @@ class nav2_goal_publisher(Node):
         super().__init__('nav2_goal_publisher')
 
         # --- Parameter ---
-        # Vor Ort einstellen, Werte nur in Lane_Costmap.yaml. Abstand des Planziels vom Bot (m):
-        # muss hinter dem Hindernis liegen, sonst endet der Weg davor; MPPI schaut ~1 m voraus
-        # (nav2_params.yaml).
+        # Werte nur in Lane_Costmap.yaml. Abstand des Planziels vom Bot (m): muss hinter dem
+        # Hindernis liegen, sonst endet der Weg davor; MPPI schaut ~1 m voraus (nav2_params.yaml).
         self.declare_parameter('goal_distance', Parameter.Type.DOUBLE, frange(0.2, 5.0))
         # Ein Planweg mit einem Punkt mehr als so weit (m) hinter der Radachse wird verworfen:
         # NavFn kennt keine Fahrtrichtung und fuehrt sonst hinter dem Bot aussen um die
@@ -107,6 +106,8 @@ class nav2_goal_publisher(Node):
             Path, CENTER_PATH_TOPIC, self.cb_center_path, 1)
         self.sub_costmap = self.create_subscription(
             OccupancyGrid, '/global_costmap/costmap', self.cb_costmap, 1)
+        self.sub_clear_maps = self.create_subscription(
+            Empty, '/control/clear_maps', self.cb_clear_maps, 1)
 
         # --- Publisher ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -157,7 +158,7 @@ class nav2_goal_publisher(Node):
         self._latest_center_path = None
         self._center_path_received = None
 
-        # Auch Obstacle <-> Tunnel abbrechen, sonst laeuft die alte Fahrt weiter.
+        # Beim Verlassen eines aktiven Modus abbrechen, sonst laeuft die alte Fahrt weiter.
         if was_active:
             self._cancel_goal()
         if new_mode in ACTIVE_MODES:
@@ -170,6 +171,15 @@ class nav2_goal_publisher(Node):
 
     def cb_costmap(self, grid):
         self._costmap = grid
+
+    def cb_clear_maps(self, _msg):
+        # Taste L im Tunnel (Neustart vor dem Tunnel): der alte Explorer-Pfad fuehrte vom
+        # alten Standort weg, also abbrechen; den naechsten liefert tunnel_explorer_node.
+        if self.control_mode != ControlType.Tunnel:
+            return
+        self._latest_explore_path = None
+        self._cancel_goal()
+        self._set_status('Tunnel zurueckgesetzt (Taste L)')
 
     def cb_center_path(self, path):
         first = self._center_path_received is None

@@ -12,9 +12,8 @@
 LAUNCH_FILE="${FOLLOW_LANE_LAUNCH:-follow_lane.launch.py}"
 LOG_NAME="${LAUNCH_FILE%.launch.py}"
 
-# Laeuft schon eine Pipeline (z.B. in einem anderen Terminal)? Zwei gleichzeitig senden auf
-# dieselben Topics -- flackernde Debug-Bilder, und zwei Not-Aus-Knoten, von denen einer im STOPP
-# dauernd Null an den Bot schickt.
+# Laeuft schon eine Pipeline? Zwei senden auf dieselben Topics, ein zweiter Not-Aus im STOPP
+# schickt dauernd Null an den Bot.
 PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view|image_recorder|intersection_node)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Follow-Lane-Pipeline:"
@@ -47,10 +46,8 @@ mkdir -p "$REPO_ROOT/logs/pipeline"
 NODE_LOG="$REPO_ROOT/logs/pipeline/$LOG_NAME-$(date +%Y%m%d-%H%M%S).log"
 ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/$LOG_NAME-latest.log"
 
-# set -m: Hintergrundjobs bekommen eine eigene Prozessgruppe. Ohne das IGNORIEREN sie in einem
-# Skript SIGINT (Bash-Regel fuer '&' ohne Job-Control) -- dann laesst sich die Pipeline nicht mehr
-# mit Strg+C/kill -INT beenden. So erreicht Strg+C im Terminal nur den Not-Aus im Vordergrund,
-# und cleanup() beendet die Pipeline danach gezielt.
+# set -m: eigene Prozessgruppe, sonst ignoriert der Hintergrundjob SIGINT (Bash-Regel fuer '&'
+# ohne Job-Control). Strg+C trifft so nur den Not-Aus, cleanup() beendet danach die Pipeline.
 set -m
 ros2 launch Follow_Lane "$LAUNCH_FILE" > "$NODE_LOG" 2>&1 &
 LAUNCH_PID=$!
@@ -59,9 +56,7 @@ cleanup() {
     stty sane 2>/dev/null          # Sicherheitsnetz, falls der Not-Aus das Terminal nicht zurueckgestellt hat
     echo ""
     echo "Beende Pipeline ..."
-    # SIGINT an die GANZE Prozessgruppe (Gruppen-ID = LAUNCH_PID wegen set -m), wie es Strg+C im
-    # Terminal tun wuerde: ros2 launch leitet SIGINT nicht selbst an die Knoten weiter, sondern
-    # wartet nur und eskaliert nach 5 s auf SIGTERM.
+    # SIGINT an die ganze Prozessgruppe: ros2 launch leitet es nicht an die Knoten weiter.
     kill -INT -- -"$LAUNCH_PID" 2>/dev/null
     # notfalls nachhelfen
     for _ in $(seq 1 15); do
