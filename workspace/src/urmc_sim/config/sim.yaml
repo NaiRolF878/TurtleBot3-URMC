@@ -1,0 +1,4 @@
+/urmc_sim:
+  ros__parameters:
+    # Streuung jeder LiDAR-Entfernung (m, Standardabweichung).
+    scan_noise_m: 0.005

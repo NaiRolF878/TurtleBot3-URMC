@@ -26,3 +26,6 @@ Thumbs.db
 # YOLO Modelle (zu groß für Git)
 *.pt
 *.onnx
+
+# Simulation
+logs/

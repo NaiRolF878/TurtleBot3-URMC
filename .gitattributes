@@ -1,0 +1,2 @@
+# Shell-Skripte laufen in WSL/Linux: immer LF, auch bei core.autocrlf.
+*.sh text eol=lf
