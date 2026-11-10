@@ -11,5 +11,9 @@ sudo apt-get install -y ros-humble-navigation2 ros-humble-nav2-mppi-controller \
     ros-humble-nav2-rotation-shim-controller ros-humble-rqt-image-view \
     python3-opencv python3-yaml python3-numpy
 mkdir -p "$HOME/urmc_sim_ws/src"
+if ! grep -qw avx2 /proc/cpuinfo || ! grep -qw fma /proc/cpuinfo; then
+    echo "CPU ohne AVX2/FMA: baue Nav2-MPPI selbst (dauert)."
+    bash "$(dirname "$0")/build-mppi.sh"
+fi
 echo ""
 echo "Fertig. Start z.B.: bash scripts/sim/sim.sh wt-nav2 tunnel_gap"
