@@ -6,6 +6,7 @@ Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel,
       /control/maneuver_status (UInt32, id der zuletzt beendeten Grundbewegung)
 Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel.
 Maneuver: Grundbewegung in odom (auch das Andocken an die Palette, geradeaus).
+Tunnel mit laufender Grundbewegung (Durchfahrt einer Engstelle): nur diese.
 Alles ausser dem PID wird auf die Radgrenze skaliert, der PID begrenzt selbst.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 """
@@ -29,6 +30,9 @@ from Follow_Lane.src.common import (
 # nicht zwischen die Spurwaende.
 PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
+# Hier werden Grundbewegungen angenommen: in Maneuver nur sie (ohne Auftrag Null), im Tunnel hat
+# eine laufende Vorrang vor Nav2, der Modus bleibt (im Tunnel keine Kamera).
+MANEUVER_MODES = (ControlType.Maneuver, ControlType.Tunnel)
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
@@ -95,6 +99,7 @@ class control_driving(Node):
     Maneuver: switch_control sendet die Grundbewegung zyklisch auf /control/maneuver.
     Eine neue id startet sie ab der aktuellen Pose; ist sie fertig, meldet dieser
     Node die id auf /control/maneuver_status und sendet Null, bis eine neue kommt.
+    Im Tunnel zaehlt /nav2/cmd_vel nicht, solange sie laeuft; danach wieder Nav2.
     Ein Moduswechsel verwirft die laufende Bewegung.
 
     """
@@ -204,12 +209,14 @@ class control_driving(Node):
         if not self._mode_is(*NAV2_MODES):
             return
         now = time.monotonic()
-        if now < self._nav2_blocked_until:
+        if now < self._nav2_blocked_until or self._maneuver is not None:
             return
         self._nav2_time = now
         self.pub_cmd_vel.publish(self._limit_wheels(msg))
 
     def cb_maneuver(self, msg):
+        if not self._mode_is(*MANEUVER_MODES):
+            return
         # Zyklisch wiederholt: nur eine neue id (oder die erste nach einem
         # Moduswechsel) startet die Bewegung, eine beendete nie erneut.
         if msg.id in (self._maneuver_done_id, self._maneuver_failed_id):
@@ -228,7 +235,8 @@ class control_driving(Node):
             self.pub_maneuver_status.publish(UInt32(data=self._maneuver_done_id))
 
         now = time.monotonic()
-        if self._mode_is(ControlType.Maneuver):
+        if self._mode_is(ControlType.Maneuver) or \
+                (self._maneuver is not None and self._mode_is(ControlType.Tunnel)):
             self._drive_maneuver()
             return
         if self._mode_is(*PID_MODES):

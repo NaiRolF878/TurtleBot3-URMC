@@ -45,7 +45,7 @@ flowchart LR
 
 `switch_control` merkt sich beim Eintritt in den Tunnel, welcher Modus vorher aktiv war, und stellt genau den beim Verlassen wieder her (nicht stur "zurück zu Lane"). Jeder Moduswechsel wird sofort auf `/control/mode` gesendet, zusätzlich alle 0,5 s.
 
-Die Werte `Intersection` und `Align` gibt es im Enum schon, sie haben aber noch keinen Auslöser (vorgesehen für Kreuzung an Tag 1). In diesen Modi und in `Stop` sendet `control_driving` Null. `Stop`, `Dock` und `Maneuver` setzt bisher nur die Storage-Aufgabe (`storage.launch.py`, siehe `docs/Storage_Retrieval_Konzept.md`).
+Die Werte `Intersection` und `Align` gibt es im Enum schon, sie haben aber noch keinen Auslöser (vorgesehen für Kreuzung an Tag 1). In diesen Modi und in `Stop` sendet `control_driving` Null. `Stop` und `Maneuver` setzt bisher nur die Storage-Aufgabe (`storage.launch.py`, siehe `docs/Storage_Retrieval_Konzept.md`).
 
 ### Wer fährt, wer nutzt die Kamera?
 
@@ -53,7 +53,7 @@ Fahrbefehle erzeugt nur `control_driving`. Er wählt je nach Modus die Quelle un
 
 | | **Lane-Modus** | **Obstacle-Modus** | **Tunnel-Modus** |
 |---|---|---|---|
-| Quelle in `control_driving` | PID auf `/detect/lane` | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert |
+| Quelle in `control_driving` | PID auf `/detect/lane` | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert | `/nav2/cmd_vel` (MPPI), auf Radgrenze skaliert; bei der Durchfahrt einer Engstelle die Grundbewegung (`/control/maneuver`) |
 | Wer nutzt die Kamera? | `control_driving` über `/detect/lane`; `lane_costmap_node` für die Spurwände | `lane_costmap_node` für die Spurwände | niemand: `ingress_node` und `detect_lane` pausieren (Reglement) |
 | Was steht in local_ und global_costmap? | LiDAR + Spurgedächtnis | LiDAR + Spurgedächtnis | LiDAR + Eingangssperre |
 | Wird geplant? | nein, nichts geplant und nichts angezeigt | ja: NavFn plant bei Bedarf einen Weg um die Hindernisse, MPPI fährt ihn ab | ja: Explorer + NavFn |
@@ -105,6 +105,9 @@ flowchart TB
     CS -->|"/nav2/cmd_vel"| CD[control_driving]
     DL["/detect/lane\nSpurfehler (Kamera)"] --> CD
     SC -->|"/control/mode"| CD
+    TE -->|"/tunnel/passage_line"| SC
+    SC -->|"/control/maneuver"| CD
+    CD -->|"/control/maneuver_status"| SC
     CD -->|"/control/cmd_vel"| NA[notaus]
     NA -->|"/cmd_vel"| MOT[Motoren]
 ```
@@ -116,10 +119,10 @@ Wichtig zum Verständnis: **`lane_costmap_node` sendet die Spurwände in jedem M
 ## 4. Die Nodes im Einzelnen
 
 ### `switch_control` — die Zustandsmaschine
-Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `LANE_MAX_AGE_S`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`manuell`, `auto` oder leer). `obstacle_enabled` (Taste O) schaltet den Obstacle-Modus ab. Den Ablauf der Storage-Aufgabe führt er über `storage_sequence.py` (Button auf `/control/storage_request`); solange er läuft, gibt es weder Obstacle noch Tunnel.
+Entscheidet, welcher Modus aktiv ist (siehe Abschnitt 2), und veröffentlicht das laufend auf `/control/mode`. Alle anderen Nodes lesen nur mit, niemand sonst darf diesen Wert verändern. Für Eintritt und Austritt des Obstacle-Modus prüft er jeden LiDAR-Punkt gegen das Spurgedächtnis (`/detect/lane_obstacles`): Liegt auf der Strecke Bot → Punkt eine Spurlinie, gehört der Punkt nicht zur eigenen Fahrbahn und zählt nicht. Ist das Gedächtnis älter als `LANE_MAX_AGE_S`, zählt jeder Punkt. Den Tunnel-Wunsch des Buttons bekommt er auf `/control/tunnel_request` (`True` = Start, `False` = Abbruch), den Auslöser meldet er auf `/control/tunnel_source` (`manuell`, `auto` oder leer). `obstacle_enabled` (Taste O) schaltet den Obstacle-Modus ab. Im Tunnel fährt er auf Anfrage des Explorers eine Engstelle mit Grundbewegungen (`tunnel_passage.py`, Abschnitt 7); der Modus bleibt dabei Tunnel. Den Ablauf der Storage-Aufgabe führt er über `storage_sequence.py` (Button auf `/control/storage_request`); solange er läuft, gibt es weder Obstacle noch Tunnel.
 
 ### `control_driving` — die einzige Quelle für Fahrbefehle
-Wählt je nach `/control/mode` den PID (Lane, TunnelEntry) oder reicht `/nav2/cmd_vel` durch (Obstacle, Tunnel); für die Storage-Aufgabe regelt er `Dock` (auf die Vorderkante der Palette, `/detect/pallet`) und `Maneuver` (odom); in jedem anderen Modus Null. Würde das äußere Rad schneller als 0,22 m/s (`MAX_WHEEL_VEL`), skaliert es v und ω gemeinsam herunter, die Bahn bleibt gleich. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
+Wählt je nach `/control/mode` den PID (Lane, TunnelEntry) oder reicht `/nav2/cmd_vel` durch (Obstacle, Tunnel); in `Maneuver` (Storage) fährt er nur Grundbewegungen; in jedem anderen Modus Null. Grundbewegungen von `switch_control` (`/control/maneuver`: auf der Stelle drehen, geradeaus mit gehaltenem Kurs, Punkt anfahren; in odom) nimmt er in `Maneuver` und `Tunnel` an; im Tunnel hat eine laufende Vorrang vor Nav2. Ist sie fertig, meldet er ihre Nummer auf `/control/maneuver_status` und folgt im Tunnel wieder Nav2. Ein Moduswechsel verwirft sie. Würde das äußere Rad schneller als 0,22 m/s (`MAX_WHEEL_VEL`), skaliert es v und ω gemeinsam herunter, die Bahn bleibt gleich. Die MPPI-Grenzen (`vx_max`, `wz_max`) stehen in `nav2_params.yaml`. Zeitgrenzen und Verhalten beim Moduswechsel siehe Abschnitt 2.
 
 ### `notaus` — die Fahrfreigabe
 Letzte Stufe zwischen `/control/cmd_vel` und `/cmd_vel`. Erzeugt keine Bewegung, reicht nur nach Freigabe (Leertaste, rqt `drive`, `/notaus/set`) durch oder sendet Null, auch wenn 0,5 s (`cmd_timeout_s`) nichts kommt. Taste L sendet `/control/clear_maps` (Spurgedächtnis und Costmaps leeren, im Tunnel Neustart der Einfahrt), Taste O schaltet `obstacle_enabled` von `switch_control` um.
@@ -211,7 +214,7 @@ Die übrigen Werte (`ROBOT_FRAME`, `ODOM_FRAME`, `WATCHDOG_PERIOD_S`) sind techn
 
 ### 5.6 `control_driving.py` → Code-Defaults (rqt)
 
-PID-Werte stehen in `Control_driving_PID.yaml`. Die Zeitgrenzen haben nur Code-Defaults:
+PID- und Grundbewegungswerte stehen in `Control_driving_PID_Wide.yaml` (Pflicht, ohne sie startet der Node nicht): `maneuver_max_vel` und `maneuver_max_ang` begrenzen, `maneuver_k_lin` und `maneuver_k_ang` sind die Verstärkung auf den Restweg bzw. Restwinkel. Die Zeitgrenzen sind Konstanten:
 
 | Parameter | Standard | Bedeutung |
 |---|---|---|
@@ -275,7 +278,13 @@ Der Roboter hat **keine vorab gespeicherte Karte**. Er baut sich rein aus dem Li
 3. **Frontier jenseits der Eingangslinie**, weit weg vom Eingang (Rückfall).
 4. **Weitester erreichbarer Punkt.** Gibt es auch den nicht, meldet der Node das.
 
-Befahrbar heißt dabei immer: was NavFn befahren darf. Besuchte und gescheiterte Stellen werden nicht wieder gewählt; ein Ziel gilt nach zwei Abbrüchen als gescheitert. Liegt dann auf dem restlichen Pfad bis 0,6 m voraus eine Engstelle unter 0,26 m (quer zum Pfad gemessen), sperrt der Explorer sie mit einer Linie von Wand zu Wand (`/tunnel/blocked`, `entrance_layer`); NavFn sucht eine andere Route. Gibt es kein Ziel mehr, werden die besuchten Stellen einmal vergessen (nach einer neuen Sperre wieder); danach wartet der Bot und meldet „Kein Weg nach draußen gefunden“. Sperren gelten bis zum Ende der Tunnelfahrt oder Taste L.
+Befahrbar heißt dabei immer: was NavFn befahren darf. Besuchte und gescheiterte Stellen werden nicht wieder gewählt; ein Ziel gilt nach zwei Abbrüchen als gescheitert. Dann zählt die engste Stelle auf dem restlichen Pfad bis 0,6 m voraus. Ihre Breite kommt aus den beiden nächsten Wandzellen links und rechts (von Zellmitte zu Zellmitte, bei 1 cm Auflösung etwa ±1 cm genau):
+
+- **0,21 bis 0,26 m** und die Mitte höchstens 0,30 m vom Bot: **Durchfahrt** (unten).
+- **unter 0,21 m**, keine Luft auf der Geraden oder Durchfahrt schon einmal gescheitert: Der Explorer **sperrt** die Engstelle mit einer Linie von Wand zu Wand (`/tunnel/blocked`, `entrance_layer`); NavFn sucht eine andere Route.
+- **ab 0,26 m** oder weiter weg: nur das Ziel gilt als gescheitert.
+
+**Durchfahrt einer Engstelle.** Mit 1,6 bis 4 cm Luft je Seite schafft MPPI eine Engstelle nicht sicher. Der Explorer sucht die Gerade, auf der der Footprint den meisten Abstand zu den Wandzellen hat (um die Achse aus den Kanten ±30° gedreht und ±3 cm verschoben). Start ist der letzte Punkt davor mit 11 cm Platz zum Drehen auf der Stelle (Umkreis des Footprints 10,5 cm), Ende der Punkt, an dem das Heck 3 cm hinter der Wand ist; deren Rückseite sieht der LiDAR von vorn nicht (jeder Strahl endet an der Vorderseite), angenommen werden 2 cm Wandstärke (Tunnelwand höchstens 2 cm). Start und Ende schickt er auf `/tunnel/passage_line` und wartet. `switch_control` fährt die Gerade mit Grundbewegungen ab: zum Start (vor oder zurück), auf der Stelle Richtung Ende drehen, mit 0,05 m/s geradeaus. Danach meldet es `/tunnel/passage` False, und der Explorer plant zum selben Ziel neu. Dauert ein Schritt länger als 20 s, hält der Bot an. Ohne Platz zum Drehen vor der Engstelle sperrt der Explorer nicht (das kann am Rauschen der Karte liegen), nur das Ziel gilt als gescheitert. Gibt es kein Ziel mehr, werden die besuchten Stellen einmal vergessen (nach einer neuen Sperre wieder); danach wartet der Bot und meldet „Kein Weg nach draußen gefunden“. Sperren gelten bis zum Ende der Tunnelfahrt oder Taste L.
 
 **Neuplanung.** Ein Ziel wechselt nur bei Ankunft, wenn es unerreichbar wird oder wenn eine Öffnung auftaucht. Keine Planung im Takt, die Wege sollen nicht springen: Neu geplant wird zum selben Ziel nur, wenn eine gesperrte Zelle auf dem Pfad liegt oder der Regler einmal abbricht. Anders als im Obstacle-Modus gibt es keine Rückwärtssperre, der Bot muss aus Sackgassen wieder herauskommen.
 

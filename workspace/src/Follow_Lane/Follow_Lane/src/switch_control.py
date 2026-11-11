@@ -5,7 +5,8 @@ Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tu
       dazu die Eingaenge der Storage-Aufgabe (storage_sequence.py)
 Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
       dazu die Ausgaenge der Storage-Aufgabe (Zustand, Grundbewegungen, Magnet)
-Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier.
+Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier. Die Durchfahrt einer
+Engstelle im Tunnel (Grundbewegungen) steuert TunnelPassage (tunnel_passage.py).
 """
 import math
 import time
@@ -25,6 +26,7 @@ from Follow_Lane.src.common import (
     ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, require_params,
     run_node, scan_points, transform_points)
 from Follow_Lane.src.storage_sequence import StorageSequence
+from Follow_Lane.src.tunnel_passage import TunnelPassage
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als MODE_TIMEOUT nichts hoert.
@@ -81,6 +83,9 @@ class switch_control(Node):
     sie laeuft, gibt es kein Obstacle (der LiDAR spielt dort keine Rolle; Schilder-
     pfosten oder Stuetzen loesten ihn sonst aus) und keinen Tunnel. Nach Abbruch gilt
     initial_mode: Lane fuer die Strecke, Stop fuer den Start mit storage.launch.py.
+
+    Im Tunnel faehrt TunnelPassage auf Anfrage von tunnel_explorer_node eine Engstelle mit
+    Grundbewegungen; der Modus bleibt Tunnel, damit die Kamera aus bleibt.
     """
 
     def __init__(self):
@@ -137,8 +142,9 @@ class switch_control(Node):
         self._lane_frame = None
         self._lane_time = None
         self._scanner_poses = {}          # (Ziel-Frame, Scanner-Frame) -> (x, y, yaw)
-        # Braucht tf_buffer, daher zuletzt.
+        # Brauchen tf_buffer, daher zuletzt.
         self.storage = StorageSequence(self)
+        self.passage = TunnelPassage(self)
 
         self.get_logger().info(f'Started switch_control Node ({self.control_mode.name}).')
 
@@ -207,6 +213,8 @@ class switch_control(Node):
         if new_mode == self.control_mode:
             return
         self.get_logger().info(f'{reason} -> {self.control_mode.name} => {new_mode.name}.')
+        if self.control_mode == ControlType.Tunnel:
+            self.passage.cancel()
         self.control_mode = new_mode
         # Entprell-Zeitstempel gelten nur fuer den Modus, in dem sie gesetzt wurden.
         self._obstacle_clear_since = None
