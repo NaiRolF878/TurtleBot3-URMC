@@ -47,9 +47,9 @@ ROTATE_CLEAR_M = 0.11
 # liegen, gesucht bis PASSAGE_REACH_M vor und hinter der Mitte.
 FLANK_M = 0.04
 PASSAGE_REACH_M = 0.30
-# Die Rueckseite der Wand sieht der LiDAR von vorn nicht: mindestens so dick (m) annehmen. Das
-# Ende liegt so weit dahinter, dass das Heck PASSAGE_EXIT_M Abstand hat.
-WALL_MIN_M = 0.05
+# Tunnelwand hoechstens so dick (m, Angabe Team); ihre Rueckseite sieht der LiDAR von vorn nicht.
+# Das Ende liegt so weit dahinter, dass das Heck PASSAGE_EXIT_M Abstand hat.
+WALL_M = 0.02
 PASSAGE_EXIT_M = 0.03
 BLOCK_LOOKAHEAD_M = 0.6
 
@@ -377,7 +377,7 @@ def passage_line(grid, info_res, origin_xy, center, axis):
     Engstelle: der zusammenhaengende Abschnitt um center, in dem links und rechts Wandzellen
     bis FLANK_M neben dem Bot liegen (eine Wand nur auf einer Seite zaehlt nicht). Start: letzter
     Punkt davor mit ROTATE_CLEAR_M Platz (dort dreht der Bot auf der Stelle), sonst None. Ende:
-    das Heck PASSAGE_EXIT_M hinter der Wand, mindestens WALL_MIN_M dick angenommen."""
+    das Heck PASSAGE_EXIT_M hinter der Wand, mindestens WALL_M dick angenommen."""
     free = (grid != LETHAL_COST).astype(np.uint8)
     clearance = cv2.distanceTransform(free, cv2.DIST_L2, 5) * info_res
     h, w = grid.shape
@@ -421,9 +421,9 @@ def passage_line(grid, info_res, origin_xy, center, axis):
                     0, s.size - 1)
     flanked = np.ones(s.size, dtype=bool)
     for side in (across[near] > 0.0, across[near] < 0.0):
-        hit = np.zeros(s.size, dtype=bool)
-        hit[index[side]] = True
-        flanked &= hit | np.roll(hit, 1) | np.roll(hit, -1)
+        hit = np.zeros(s.size + 2, dtype=bool)
+        hit[index[side] + 1] = True
+        flanked &= hit[:-2] | hit[1:-1] | hit[2:]
     if not flanked.any():
         return None
     mid = int(np.argmin(np.where(flanked, np.abs(s), np.inf)))
@@ -436,5 +436,5 @@ def passage_line(grid, info_res, origin_xy, center, axis):
     before = np.flatnonzero(roomy[:first + 1])
     if before.size == 0:
         return None
-    s_end = max(s[last], s[first] + WALL_MIN_M) - FOOTPRINT[:, 0].min() + PASSAGE_EXIT_M
+    s_end = max(s[last], s[first] + WALL_M) - FOOTPRINT[:, 0].min() + PASSAGE_EXIT_M
     return point + s[before[-1]] * d, point + s_end * d, score
