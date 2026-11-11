@@ -4,7 +4,8 @@ Ein:  /avoid/zones (AvoidZones), /detect/sign, /control/tunnel_request, /detect/
       /tunnel/outside
 Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
       /control/obstacle_enabled (Bool, fuer den Offset in control_driving)
-Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier.
+Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier. Die Durchfahrt einer
+Engstelle im Tunnel (Grundbewegungen) steuert TunnelPassage (tunnel_passage.py).
 """
 import time
 
@@ -12,9 +13,11 @@ from follow_lane_msg.msg import AvoidZones
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, String, UInt8
+from tf2_ros import Buffer, TransformListener
 
 from Follow_Lane.src.common import (
     ControlType, SignType, frange, read_params, require_params, run_node)
+from Follow_Lane.src.tunnel_passage import TunnelPassage
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als MODE_TIMEOUT nichts hoert.
@@ -47,6 +50,9 @@ class switch_control(Node):
 
     Tunnel -> Modus von vor dem Tunnel, sobald tunnel_explorer_node meldet, dass der Bot
     ausserhalb der Wand-Huelle ist. Beides jederzeit von Hand abbrechbar (False).
+
+    Im Tunnel faehrt TunnelPassage auf Anfrage von tunnel_explorer_node eine Engstelle mit
+    Grundbewegungen; der Modus bleibt Tunnel, damit die Kamera aus bleibt.
     """
 
     def __init__(self):
@@ -93,6 +99,10 @@ class switch_control(Node):
         self._obstacle_clear_since = None
         self._lines_lost_count = 0        # Bilder in Folge ohne Spurlinie (TunnelEntry)
         self._lines_msg_time = None       # letztes /detect/lines_lost (TunnelEntry)
+        # TunnelPassage braucht die Roboterpose.
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.passage = TunnelPassage(self)
 
         self.get_logger().info('Started switch_control Node.')
 
@@ -149,6 +159,8 @@ class switch_control(Node):
         if new_mode == self.control_mode:
             return
         self.get_logger().info(f'{reason} -> {self.control_mode.name} => {new_mode.name}.')
+        if self.control_mode == ControlType.Tunnel:
+            self.passage.cancel()
         self.control_mode = new_mode
         # Entprell-Zeitstempel gelten nur fuer den Modus, in dem sie gesetzt wurden.
         self._obstacle_clear_since = None

@@ -18,7 +18,7 @@ Costmap und Nav2. Wie die gemeinsamen Teile aktuell gehalten werden, steht in
 | `Lane`        | Start, Ende von Obstacle; nach dem Tunnel der Modus davor    | PID auf den Spurfehler + Ausweich-Offset |
 | `Obstacle`    | Frontzone naeher als `takeover_distance`, `obstacle_enabled` | Ausweichmanoever aus `/avoid/zones`   |
 | `TunnelEntry` | Button im Debugbild oder Tunnelschild                        | PID auf den Spurfehler, ohne Offset   |
-| `Tunnel`      | Beide Spurlinien enden an der Oeffnung                       | Nav2 (`/nav2/cmd_vel`)                |
+| `Tunnel`      | Beide Spurlinien enden an der Oeffnung                       | Nav2 (`/nav2/cmd_vel`); Engstelle: Grundbewegungen |
 
 Jeder andere Modus, veraltete Eingangsdaten oder ein fehlendes `/control/mode`
 fuehren zu einem Nullbefehl.
@@ -46,7 +46,9 @@ das Zonen-Ausweichen nicht. Die Spurerkennung haelt im Lane-Modus gegen die Lini
 
 **Tunnel (TunnelEntry, Tunnel).** Wie auf `Nav2-Costmap-Fix`: Einfahrt mit Kamera und PID
 (ohne Offset), ab dem Linienende nur LiDAR (Kamera laut Reglement verboten), Ausgangssuche
-mit tunnel_explorer_node und NavFn/MPPI, Eingangssperre mit keepout_zone_node. Details:
+mit tunnel_explorer_node und NavFn/MPPI, Eingangssperre mit keepout_zone_node. Engstellen von
+0,21 bis 0,26 m faehrt switch_control (tunnel_passage.py) mit Grundbewegungen, der Modus bleibt
+Tunnel. Details:
 `Nav2LocalCoastmap_Doku.md`, `Nav2_Costmap_Werte.md`.
 
 **Nav2 plant hier nur den Tunnel.** `PLAN_MODES` (nav2_goal_publisher) und

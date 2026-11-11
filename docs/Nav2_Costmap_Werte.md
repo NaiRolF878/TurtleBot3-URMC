@@ -168,7 +168,8 @@ ankommt.
 
 ### `entrance_layer` (Tunnel-Eingangssperre, gesperrte Engstellen)
 Zwei Quellen mit denselben Werten: die Eingangssperre von `keepout_zone_node` und die
-Sperrlinien von `tunnel_explorer_node` quer über Engstellen, durch die der Regler nicht kam.
+Sperrlinien von `tunnel_explorer_node` quer über Engstellen unter 0,21 m oder solche, deren
+Durchfahrt gescheitert ist.
 
 - **`clearing: false`:** *Woher:* gewählt, siehe Kommentar in der Datei. Die
   Punkte sind virtuell und haben keinen echten Sensorursprung. Ein Raytrace
