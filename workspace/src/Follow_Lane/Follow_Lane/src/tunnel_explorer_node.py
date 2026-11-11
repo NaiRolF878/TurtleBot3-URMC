@@ -1,9 +1,11 @@
 """Faehrt durch die Tuer in den Tunnel, sucht den Ausgang und meldet, wenn der Bot draussen ist.
 
-Ein:  /control/mode, /global_costmap/costmap, /scan, /detect/lines_lost, /tunnel/path_result, TF
+Ein:  /control/mode, /global_costmap/costmap, /scan, /detect/lines_lost, /tunnel/path_result,
+      /tunnel/passage (Bool, Durchfahrt laeuft), TF
 Aus:  /tunnel/explore_path (Path, odom), /tunnel/door (PolygonStamped, odom: Tuerkanten und
       Punkt innen), /tunnel/outside (Bool), /tunnel/blocked (PointCloud2, odom: gesperrte
-      Engstellen); Pfade rechnet planner_server (ComputePathToPose)
+      Engstellen), /tunnel/passage_line (Path, odom: Start und Ende der Geraden fuer die
+      Durchfahrt einer Engstelle); Pfade rechnet planner_server (ComputePathToPose)
 """
 import math
 import time
@@ -12,14 +14,14 @@ import cv2
 import numpy as np
 
 import rclpy
-from geometry_msgs.msg import Point32, PolygonStamped
+from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
 from nav2_msgs.action import ComputePathToPose
 from nav_msgs.msg import OccupancyGrid, Path
 from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, Empty, Header, String, UInt8
@@ -45,6 +47,10 @@ SAME_TARGET_M = 0.15
 # Sperrlinie quer ueber eine Engstelle: so weit (m) ueber die Wandabstaende hinaus, Punktabstand.
 BLOCK_MARGIN_M = 0.02
 BLOCK_POINT_STEP_M = 0.01
+# Durchfahrt nur anfordern, wenn die Mitte der Engstelle so nah (m) an der Radachse liegt: die
+# Grundbewegungen kennen keine Hindernisse. Engstellen naeher als SAME_GAP_M sind dieselbe.
+GAP_NEAR_M = 0.30
+SAME_GAP_M = 0.05
 # So oft werden besuchte Stellen vergessen, bis eine neue Sperre die Lage aendert; danach
 # wartet der Bot, statt endlos dieselben Stellen anzufahren.
 FORGET_MAX = 1
@@ -89,11 +95,16 @@ class tunnel_explorer_node(Node):
     hinter Hindernissen. (3) Frontier jenseits der Eingangslinie, weit weg vom Eingang. (4) Der
     weiteste erreichbare Punkt. Besuchte und gescheiterte Stellen werden nicht wieder gewaehlt.
 
-    Gibt der Regler auf einem Pfad endgueltig auf, wird dessen engste Stelle voraus quer
-    gesperrt, wenn sie schmaler als geo.BLOCK_WIDTH_M ist (/tunnel/blocked, entrance_layer
-    beider Karten). NavFn sucht dann eine andere Route; Sperren gelten bis zum Ende der
-    Tunnelfahrt oder Taste L. Besuchte Stellen werden hoechstens FORGET_MAX-mal je Sperrlage
-    vergessen; danach wartet der Bot.
+    Gibt der Regler auf einem Pfad endgueltig auf, zaehlt dessen engste Stelle voraus. Bis
+    geo.PASSAGE_WIDTH_M und mit dem Bot davor (GAP_NEAR_M) wird einmal die Durchfahrt
+    angefordert: die Gerade mit dem meisten Abstand zur Wand (geo.passage_line) auf
+    /tunnel/passage_line, switch_control faehrt sie mit Grundbewegungen, solange wartet dieser
+    Node (/tunnel/passage) und plant danach zum selben Ziel neu. Ohne Platz zum Drehen davor
+    gilt nur das Ziel als gescheitert. Schmaler als geo.BLOCK_WIDTH_M, ohne Luft auf der
+    Geraden oder Durchfahrt schon versucht: die Engstelle wird quer gesperrt (/tunnel/blocked,
+    entrance_layer beider Karten). NavFn sucht dann eine andere Route; Sperren gelten bis zum
+    Ende der Tunnelfahrt oder Taste L. Besuchte Stellen werden hoechstens FORGET_MAX-mal je
+    Sperrlage vergessen; danach wartet der Bot.
 
     Ein Ziel wechselt nur bei Ankunft, wenn es unerreichbar wird oder wenn eine Oeffnung
     auftaucht. Keine Neuplanung im Takt, die Wege sollen im Tunnel nicht springen: neu geplant
@@ -117,11 +128,15 @@ class tunnel_explorer_node(Node):
             String, '/tunnel/path_result', self.cb_path_result, 1)
         self.sub_clear_maps = self.create_subscription(
             Empty, '/control/clear_maps', self.cb_clear_maps, 1)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.sub_passage = self.create_subscription(
+            Bool, '/tunnel/passage', self.cb_passage, latched)
 
         self.pub_explore_path = self.create_publisher(Path, '/tunnel/explore_path', 1)
         self.pub_door = self.create_publisher(PolygonStamped, '/tunnel/door', 1)
         self.pub_outside = self.create_publisher(Bool, '/tunnel/outside', 1)
         self.pub_blocked = self.create_publisher(PointCloud2, '/tunnel/blocked', 1)
+        self.pub_passage_line = self.create_publisher(Path, '/tunnel/passage_line', 1)
         self.plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
         self.controller_params = self.create_client(SetParameters, '/controller_server/set_parameters')
 
@@ -188,9 +203,17 @@ class tunnel_explorer_node(Node):
         elif not self._retried:
             self._retried = True
             self._request_path(self._target)
-        else:
-            self._block_narrowest()
+        elif not self._narrow_passage():
             self._finish_target(failed=True)
+
+    def cb_passage(self, msg):
+        if msg.data or not self._passage_wait:
+            return
+        self._passage_wait = False
+        if self.control_mode == ControlType.Tunnel and self._target is not None:
+            self.get_logger().info(f'Durchfahrt beendet -- plane neu zu {self._kind}.')
+            self._retried = False
+            self._request_path(self._target)
 
     def cb_timer(self):
         if self.control_mode != ControlType.Tunnel or self.latest_costmap is None:
@@ -203,6 +226,8 @@ class tunnel_explorer_node(Node):
         self._update_walls(grid, res, origin, pose)
         hull = geo.convex_hull(self._walls_xy())
         self._update_outside(hull, pose)
+        if self._passage_wait:
+            return
 
         if self._planning_since is not None:
             if time.monotonic() - self._planning_since < PLAN_TIMEOUT_S:
@@ -452,17 +477,64 @@ class tunnel_explorer_node(Node):
         self._kind = None
         self._path = None
 
-    def _block_narrowest(self):
-        """Engste Stelle des aufgegebenen Pfads voraus sperren, wenn sie zu schmal ist."""
+    def _narrow_passage(self):
+        """Engste Stelle des aufgegebenen Pfads voraus: Durchfahrt anfordern (True) oder
+        sperren."""
         pose = self._robot_pose()
         if self._path is None or pose is None or self.latest_costmap is None:
-            return
+            return False
         grid, res, origin = self._grid()
         path_xy = np.array([[p.pose.position.x, p.pose.position.y] for p in self._path.poses])
         found = geo.narrowest_ahead(path_xy, grid, res, origin, pose[:2])
-        if found is None or found[2] >= geo.BLOCK_WIDTH_M:
-            return
+        if found is None:
+            return False
         point, direction, width = found
+        # Die Kanten geben die Breite genauer als der Schnitt quer zum Pfad (bis eine Zelle).
+        gap = geo.gap_edges(grid, res, origin, point, direction)
+        if gap is not None:
+            width = gap[2]
+        if width >= geo.PASSAGE_WIDTH_M:
+            return False
+        tried = gap is not None and any(np.hypot(*(gap[0] - g)) < SAME_GAP_M for g in self._gaps)
+        if width >= geo.BLOCK_WIDTH_M and gap is not None and not tried:
+            center, axis, _ = gap
+            if np.hypot(*(center - np.array(pose[:2]))) > GAP_NEAR_M:
+                self.get_logger().warn(f'Engstelle {width:.2f} m zu weit voraus fuer die '
+                                       'Durchfahrt.')
+                return False
+            line = geo.passage_line(grid, res, origin, center, axis)
+            if line is None:
+                # Kann am Rauschen der Karte liegen: nicht sperren, spaeter neu versuchen.
+                self.get_logger().warn(f'Engstelle {width:.2f} m: kein Platz zum Drehen davor.')
+                return False
+            if line[2] <= 0.0:
+                self.get_logger().warn(f'Engstelle {width:.2f} m: keine Luft auf der Geraden.')
+            else:
+                start, end, clearance = line
+                self._gaps.append(center)
+                self._request_passage(start, end)
+                self.get_logger().info(
+                    f'Engstelle {width:.2f} m, {clearance * 100:.1f} cm Luft: Durchfahrt von '
+                    f'x={start[0]:.2f} y={start[1]:.2f} bis x={end[0]:.2f} y={end[1]:.2f} '
+                    'angefordert.')
+                return True
+        self._block(point, direction, width)
+        return False
+
+    def _request_passage(self, start, end):
+        msg = Path()
+        msg.header.frame_id = ODOM_FRAME
+        msg.header.stamp = self.get_clock().now().to_msg()
+        for xy in (start, end):
+            pose = PoseStamped()
+            pose.header = msg.header
+            pose.pose.position.x, pose.pose.position.y = float(xy[0]), float(xy[1])
+            pose.pose.orientation.w = 1.0
+            msg.poses.append(pose)
+        self._passage_wait = True
+        self.pub_passage_line.publish(msg)
+
+    def _block(self, point, direction, width):
         normal = np.array([-direction[1], direction[0]])
         half = width / 2.0 + BLOCK_MARGIN_M
         count = int(math.ceil(2.0 * half / BLOCK_POINT_STEP_M)) + 1
@@ -551,6 +623,8 @@ class tunnel_explorer_node(Node):
         self._blocked = []              # Sperrlinien (N, 2) in odom
         self._forgets = 0
         self._publish_blocked()
+        self._gaps = []                 # Mitten versuchter Durchfahrten (odom)
+        self._passage_wait = False
         self._planning_since = None
         self._scanner = None
 

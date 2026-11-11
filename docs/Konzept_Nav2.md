@@ -8,8 +8,9 @@ Variante mit Zonenaufteilung fuer den Obstacle-Modus liegt auf `LDS03-Doku`.
 ## Architektur
 
 - **switch_control** entscheidet als einziger ueber den Fahrmodus (`/control/mode`).
-- **control_driving** erzeugt als einziger Fahrbefehle (`/control/cmd_vel`): PID oder
-  die Befehle von Nav2, auf die Radgrenze skaliert.
+- **control_driving** erzeugt als einziger Fahrbefehle (`/control/cmd_vel`): PID, die
+  Befehle von Nav2 oder eine Grundbewegung in odom (`/control/maneuver`: drehen, geradeaus,
+  Punkt anfahren), auf die Radgrenze skaliert.
 - **notaus** gibt sie nach Freigabe an den Bot weiter (`/cmd_vel`).
 - Alle anderen Nodes liefern nur Daten: Spurfehler, Spurgedaechtnis, Pfade, Karten.
 
@@ -18,7 +19,7 @@ Variante mit Zonenaufteilung fuer den Obstacle-Modus liegt auf `LDS03-Doku`.
 | `Lane`        | Start, Ende von Obstacle; nach dem Tunnel der Modus davor          | PID auf den Spurfehler       |
 | `Obstacle`    | LiDAR-Punkt im Kegel voraus naeher als `obstacle_trigger_distance`, keine Spurlinie dazwischen | Nav2 (`/nav2/cmd_vel`) |
 | `TunnelEntry` | Button im Debugbild oder Tunnelschild                              | PID auf den Spurfehler       |
-| `Tunnel`      | Beide Spurlinien enden kurz vor dem Bot                            | Nav2 (`/nav2/cmd_vel`)       |
+| `Tunnel`      | Beide Spurlinien enden kurz vor dem Bot                            | Nav2 (`/nav2/cmd_vel`); Engstelle: Grundbewegungen von switch_control |
 
 Jeder andere Modus, veraltete Eingangsdaten oder ein fehlendes `/control/mode`
 fuehren zu einem Nullbefehl.
@@ -50,6 +51,12 @@ Tuer im Scan und faehrt hindurch, keepout_zone_node sperrt sie danach. Die Waend
 eine Huelle: Strahlen durch die Huelle nach aussen zeigen auf den Ausgang, Graues innerhalb
 ist Schatten hinter Hindernissen. Draussen ist der Bot, wenn er die Huelle ganz verlassen
 hat. Das alles kommt ohne Masse der Enclosure aus.
+
+Engstellen von 0,21 bis 0,26 m schafft MPPI nicht sicher (Bot 0,178 m breit). Gibt der Regler
+davor auf, misst tunnel_explorer_node die Gerade mit dem meisten Abstand zu den Waenden,
+switch_control (tunnel_passage.py) faehrt sie mit Grundbewegungen: zum Start, auf der Stelle
+drehen, langsam geradeaus hindurch. Der Modus bleibt Tunnel, die Kamera also aus. Schmalere
+Engstellen und gescheiterte Durchfahrten werden gesperrt.
 
 ## Detaildoku
 
