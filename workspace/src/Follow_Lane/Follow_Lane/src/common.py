@@ -24,7 +24,7 @@ from rclpy.signals import SignalHandlerOptions
 SPIN_TIMEOUT_S = 0.1
 # Kostenwert der OccupancyGrid-Skala: ab hier plant NavFn nicht mehr (253 -> 99).
 COSTMAP_BLOCKED = 99
-# Groesser als robot_radius + footprint_padding der global_costmap (0,11 m): so weit reicht
+# Groesser als robot_radius + footprint_padding der global_costmap (0,10 m): so weit reicht
 # der Sperrsaum der Wand, an der der Bot steht.
 PATH_CHECK_SKIP_M = 0.125
 # Eigener Bot vorn im Bild (Magnet, Halter), wie er in der BEV erscheint: bis SELF_MASK_X_M vor

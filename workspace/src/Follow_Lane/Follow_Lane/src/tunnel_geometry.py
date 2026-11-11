@@ -28,6 +28,10 @@ WALL_GAP_M = 0.025
 DOOR_DEPTH_M = 0.261
 # So weit (m) muss ein Strahl hinter der Huelle enden, damit er als "durch die Huelle" zaehlt.
 HULL_MARGIN_M = 0.05
+# Gibt der Regler auf einem Pfad auf, wird dessen engste Stelle bis BLOCK_LOOKAHEAD_M voraus
+# gesperrt, wenn sie schmaler als BLOCK_WIDTH_M ist (Drehen auf der Stelle braucht 0,238 m).
+BLOCK_WIDTH_M = 0.26
+BLOCK_LOOKAHEAD_M = 0.6
 
 
 def scan_rays(angles, ranges):
@@ -281,3 +285,37 @@ def side_wall_seeds(grid, info_res, origin_xy, pose):
             i = idx[np.argmin(d[idx])]
             seeds.append((rows[i], cols[i]))
     return np.array(seeds, dtype=np.int64)
+
+
+def narrowest_ahead(path_xy, grid, info_res, origin_xy, robot_xy):
+    """Engste Stelle auf dem Pfad ab dem Bot bis BLOCK_LOOKAHEAD_M: (Punkt, Pfadrichtung,
+    Breite) oder None. Breite quer zum Pfad: bis zur Wand links plus bis zur Wand rechts;
+    fehlt eine Seite innerhalb BLOCK_WIDTH_M, ist dort keine Engstelle."""
+    lethal = grid == LETHAL_COST
+    if not lethal.any() or len(path_xy) < 3:
+        return None
+    start = int(np.argmin(np.hypot(*(path_xy - np.asarray(robot_xy)).T)))
+    seg = np.hypot(*np.diff(path_xy[start:], axis=0).T)
+    end = min(len(path_xy), start + int(np.searchsorted(np.cumsum(seg), BLOCK_LOOKAHEAD_M)) + 2)
+    tangent = np.gradient(path_xy, axis=0)[start:end]
+    tangent /= np.maximum(np.hypot(tangent[:, 0], tangent[:, 1]), 1e-9)[:, None]
+    ahead = path_xy[start:end]
+    if len(ahead) < 2:
+        return None
+    normal = np.column_stack([-tangent[:, 1], tangent[:, 0]])
+    steps = np.arange(1, int(BLOCK_WIDTH_M / info_res) + 1) * info_res
+    h, w = grid.shape
+
+    def wall_distance(side):
+        pts = ahead[:, None, :] + side * normal[:, None, :] * steps[None, :, None]
+        cells = np.floor((pts - np.asarray(origin_xy)) / info_res).astype(np.int64)
+        ok = (cells[..., 0] >= 0) & (cells[..., 0] < w) & (cells[..., 1] >= 0) & (cells[..., 1] < h)
+        hit = np.zeros(ok.shape, dtype=bool)
+        hit[ok] = lethal[cells[ok][:, 1], cells[ok][:, 0]]
+        return np.where(hit.any(axis=1), steps[np.argmax(hit, axis=1)], np.inf)
+
+    width = wall_distance(1.0) + wall_distance(-1.0)
+    i = int(np.argmin(width))
+    if not np.isfinite(width[i]):
+        return None
+    return ahead[i], tangent[i], float(width[i])
