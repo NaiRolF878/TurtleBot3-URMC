@@ -41,7 +41,7 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 | `rolling_window` | `true` | `true` |
 | `width` / `height` | 4 / 4 m | 7 / 7 m |
 | `resolution` | 0.01 m | 0.01 m |
-| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.10 m |
+| Robotergröße | `footprint` (Umriss, 138 × 178 mm) | `robot_radius` 0.09 m |
 | `global_frame` | `odom` | `odom` |
 
 ### `rolling_window`
@@ -105,11 +105,13 @@ der Werte von der Breite der Spur abhängt, steht in Abschnitt 3.
 
 ### `robot_radius` (global_costmap)
 - **Was er bewirkt:** Die Inflation sperrt um jedes Hindernis einen Saum aus
-  `robot_radius` + `footprint_padding`, als 16-Eck gerechnet 0,108 m. Diese Zellen
+  `robot_radius` + `footprint_padding`, als 16-Eck gerechnet 0,098 m. Diese Zellen
   (Kosten 253) sind für NavFn Wand. Nur für `planner_server` (NavFn), im Obstacle- und
   im Tunnel-Modus. NavFn plant für einen Punkt ohne Ausrichtung, deshalb bleibt hier
   der Kreis als Ersatz für die halbe Bot-Breite.
-- **Woher:** 1,1 cm über der halben Breite des Burger (178 mm / 2 = 0,089 m).
+- **Woher:** die halbe Breite des Burger (178 mm / 2 = 0,089 m), aufgerundet. Mit 0,10
+  bliebe in einer 22-cm-Lücke rechnerisch eine Zellreihe frei, die Rasterung und die
+  Streuung des LiDAR schließen sie: NavFn findet keinen Weg (Simulation, `tunnel_gap`).
 - **Was kaputtgeht:** Ist der Wert zu klein, plant NavFn Wege zu dicht an den
   Enclosure-Wänden. Jede Wandberührung kostet einen Punkt. Ist eine Lücke für
   den Kreis zu eng, findet NavFn keinen Weg, auch wenn der echte Umriss passen
@@ -127,7 +129,7 @@ ankommt.
 |---|---|---|---|---|---|
 | `obstacle_layer` (local + global) | `/scan` | LiDAR | 0.0 / 3.0 m | 0.0 / 3.5 m | `true` |
 | `lane_layer` (local + global) | `/detect/lane_obstacles` | `base_footprint` | 0.0 / 2.0 m | 0.0 / 2.0 m | `true` |
-| `entrance_layer` (local + global) | `/detect/tunnel_entrance_obstacle` | `odom` | 0.0 / 100.0 m | 0.0 / 3.0 m | `false` |
+| `entrance_layer` (local + global) | `/detect/tunnel_entrance_obstacle`, `/tunnel/blocked` | `odom` | 0.0 / 100.0 m | 0.0 / 3.0 m | `false` |
 
 ### `obstacle_layer` (LiDAR)
 - **`obstacle_max_range` 3.0:** Bis zu dieser Entfernung tragen Messpunkte ein
@@ -139,6 +141,13 @@ ankommt.
   Das entspricht der halben Breite der global_costmap.
 - **`obstacle_min_range` / `raytrace_min_range` 0.0:** Kein zusätzlicher
   Nahfilter. Der LDS-03 liefert ohnehin erst ab 0,05 m (range_min).
+- **`inf_is_valid` true:** Ein Strahl ohne Echo (`inf`) räumt bis `raytrace_max_range`
+  frei. *Woher:* Ohne ihn bleibt hinter einer Öffnung alles unbekannt, wenn dahinter
+  nichts in Reichweite steht, und NavFn plant nicht hinaus (Simulation, `tunnel_wide`:
+  ohne bleibt der Bot im Tunnel, mit fährt er hinaus). Wirkt nur, wenn der LDS-03 `inf`
+  sendet; eine `0` gilt als ungültig und räumt nichts. *Was kaputtgeht:* Liefert der
+  LiDAR an einer Wand kein Echo (schwarze oder spiegelnde Fläche, sehr flacher Winkel),
+  räumt der Strahl ihre Zellen bis zum nächsten Treffer frei.
 - **Was kaputtgeht:** Ist `obstacle_max_range` zu groß, stehen lückenhafte
   Einträge in der Karte. Ist `raytrace_max_range` kleiner als
   `obstacle_max_range`, bleiben Geisterhindernisse am Rand stehen.
@@ -157,7 +166,10 @@ ankommt.
   `base_footprint`. *Woher:* gewählt, = `MEMORY_RADIUS` des Gedächtnisses. Wer
   einen der beiden Werte ändert, muss den anderen mitziehen.
 
-### `entrance_layer` (Tunnel-Eingangssperre)
+### `entrance_layer` (Tunnel-Eingangssperre, gesperrte Engstellen)
+Zwei Quellen mit denselben Werten: die Eingangssperre von `keepout_zone_node` und die
+Sperrlinien von `tunnel_explorer_node` quer über Engstellen, durch die der Regler nicht kam.
+
 - **`clearing: false`:** *Woher:* gewählt, siehe Kommentar in der Datei. Die
   Punkte sind virtuell und haben keinen echten Sensorursprung. Ein Raytrace
   liefe entlang einer willkürlichen Linie im odom-Frame und würde dabei echte
@@ -210,7 +222,7 @@ könnten unbemerkt über eine Linie fahren.
 - **Bedingungen:**
   - local: `inflation_radius` ≥ Umkreis des Footprints mit Polster (0,119 m),
     sonst prüft MPPI den Umriss an den äußersten Ecken nicht (siehe oben).
-  - global: `inflation_radius` ≥ `robot_radius` + Polster (0,108 m), sonst warnt Nav2
+  - global: `inflation_radius` ≥ `robot_radius` + Polster (0,098 m), sonst warnt Nav2
     beim Start und der Sperrsaum fehlt.
 - **Was kaputtgeht:** Ein breiter, flacher Saum (z. B. 0,3 m bei Faktor 3) macht jede
   enge Lücke fast maximal teuer, MPPI traut sich nicht hinein. **Im Hindernisbereich
@@ -221,7 +233,7 @@ könnten unbemerkt über eine Linie fahren.
 | Stufe | braucht | Herkunft |
 |---|---|---|
 | Bot real | 0,178 m gerade, bis 0,193 m schräg | Umriss |
-| NavFn | 21 freie Zellen = 0,21 m | Pfadzelle ≥ 11 Zellen von jeder Wand (Saum 0,108) |
+| NavFn | etwa 0,20 m | Pfadzelle ≥ 10 Zellen von jeder Wand (Saum 0,098) |
 | MPPI gerade | 20 freie Zellen = 0,20 m | Umriss mit Polster 0,198 m |
 | MPPI 15° / 30° / 45° schräg | 0,214 / 0,220 / 0,219 m | Umriss mit Polster |
 | Drehen auf der Stelle | 0,238 m | Umkreis mit Polster |

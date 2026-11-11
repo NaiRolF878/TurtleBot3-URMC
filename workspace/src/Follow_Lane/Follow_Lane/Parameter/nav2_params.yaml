@@ -158,8 +158,8 @@ global_costmap:
       # es unbekannt und fuer NavFn gesperrt.
       resolution: 0.01
       # Kreis fuer NavFn, das nur einen Punkt plant. Mit footprint_padding 0,01 sperrt die
-      # Inflation 0,108 m um jedes Hindernis: Luecken ab 0,21 m sind planbar.
-      robot_radius: 0.10
+      # Inflation 0,098 m um jedes Hindernis: Luecken ab etwa 0,20 m sind planbar.
+      robot_radius: 0.09
       # Der Tunnel-Explorer sucht die Grenze frei/unbekannt.
       track_unknown_space: true
       always_send_full_costmap: true
@@ -181,6 +181,9 @@ global_costmap:
           obstacle_min_range: 0.0
           raytrace_max_range: 3.5
           raytrace_min_range: 0.0
+          # Kein Echo (inf) raeumt bis raytrace_max_range frei; sonst bleibt hinter einer
+          # Oeffnung alles unbekannt und NavFn plant nicht hinaus.
+          inf_is_valid: true
 
       # Spurwaende wie in local_costmap.
       lane_layer:
@@ -204,7 +207,7 @@ global_costmap:
       entrance_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: "entrance_cloud"
+        observation_sources: "entrance_cloud blocked_cloud"
         entrance_cloud:
           topic: /detect/tunnel_entrance_obstacle
           sensor_frame: ""
@@ -217,9 +220,22 @@ global_costmap:
           obstacle_min_range: 0.0
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
+        # Gesperrte Engstellen von tunnel_explorer_node, wie die Eingangssperre.
+        blocked_cloud:
+          topic: /tunnel/blocked
+          sensor_frame: ""
+          data_type: "PointCloud2"
+          clearing: false
+          marking: true
+          max_obstacle_height: 2.0
+          min_obstacle_height: -1.0
+          obstacle_max_range: 100.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
 
-      # Nur ueber die Inflation kennt NavFn die Bot-Groesse: bis 0,108 m (robot_radius +
-      # footprint_padding) gesperrt, danach steil fallend. inflation_radius >= 0,108.
+      # Nur ueber die Inflation kennt NavFn die Bot-Groesse: bis 0,098 m (robot_radius +
+      # footprint_padding) gesperrt, danach steil fallend. inflation_radius >= 0,098.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 20.0
@@ -261,6 +277,9 @@ local_costmap:
           obstacle_min_range: 0.0
           raytrace_max_range: 3.5
           raytrace_min_range: 0.0
+          # Kein Echo (inf) raeumt bis raytrace_max_range frei; sonst bleibt hinter einer
+          # Oeffnung alles unbekannt und NavFn plant nicht hinaus.
+          inf_is_valid: true
 
       # Spurwaende aus dem Spurgedaechtnis von lane_costmap_node, im Tunnel leer. Jede Wolke
       # enthaelt alle gemerkten Linien: clearing raeumt frei, vergessene verschwinden.
@@ -287,9 +306,22 @@ local_costmap:
       entrance_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: "entrance_cloud"
+        observation_sources: "entrance_cloud blocked_cloud"
         entrance_cloud:
           topic: /detect/tunnel_entrance_obstacle
+          sensor_frame: ""
+          data_type: "PointCloud2"
+          clearing: false
+          marking: true
+          max_obstacle_height: 2.0
+          min_obstacle_height: -1.0
+          obstacle_max_range: 100.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+        # Gesperrte Engstellen von tunnel_explorer_node, wie die Eingangssperre.
+        blocked_cloud:
+          topic: /tunnel/blocked
           sensor_frame: ""
           data_type: "PointCloud2"
           clearing: false
