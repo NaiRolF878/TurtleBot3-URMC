@@ -35,8 +35,9 @@ SEARCH_PAD_PX = 12
 BLUR_KERNEL = 5
 # Magnet an: dieses Bild wird zur Vorlage. Danach wird verglichen.
 REF_STATE = StorageState.GREIFEN
-ATTACH_STATES = (StorageState.GRIFF_PRUEFEN, StorageState.HERAUSFAHREN, StorageState.TRANSPORT,
-                 StorageState.ABLAGE_ANFAHREN)
+# Nur direkt nach dem Greifen: einmal gegriffen, verliert der Magnet die Palette nicht. Beim
+# Tragen gab der Vergleich Fehlalarm (Spiegelung im Metallstreifen aendert sich beim Drehen).
+ATTACH_STATES = (StorageState.GRIFF_PRUEFEN,)
 # Andocken: mit dem Bild von vor so vielen Sekunden vergleichen (Andocken mit ~3 cm/s, also
 # ~1 cm: kommt die Palette naeher, aendert sich der Ausschnitt deutlich; schiebt der Bot sie
 # schon, nicht).

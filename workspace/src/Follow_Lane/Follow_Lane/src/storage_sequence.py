@@ -39,7 +39,6 @@ MANEUVER_STATES = (S.ZUR_ZONE_DREHEN, S.ZURUECKDREHEN, S.ZUR_PALETTENZONE, S.AUS
                    S.ANDOCKEN, S.GRIFF_PRUEFEN, S.NEU_ANSETZEN, S.HERAUSFAHREN, S.TRANSPORT,
                    S.ABLAGE_ANFAHREN, S.VERLASSEN)
 # Mit Palette am Magneten: verschwindet sie aus dem Bild, ist sie verloren.
-CARRY_STATES = (S.HERAUSFAHREN, S.TRANSPORT, S.ABLAGE_ANFAHREN)
 INACTIVE_STATES = (S.IDLE, S.FERTIG, S.FEHLER)
 # Zwei Querlinien naeher als das (m) zaehlen bei der Zonentiefe als eine.
 CROSS_LINE_MERGE_M = 0.03
@@ -63,6 +62,13 @@ ZONE_MIN_WIDTH = BOT_WIDTH
 ZONE_MIN_DEPTH = 0.08
 # Weicht die gemessene Linienrichtung mehr ab, gilt quer zur Spur.
 YAW_IN_MAX_DEG = 30.0
+# Spurrichtung aus der ersten gemessenen Zonenrichtung (Zonenkanten liegen parallel zur Spur):
+# einmal gesetzt, danach fest. Bis dahin gilt die Startrichtung. Mehr als TRACK_MAX_DEV_DEG davon weg
+# gilt als Messfehler (Aufnahme 11.11.: Start 26 Grad schraeg, mit Zonenrichtung parallel).
+TRACK_MAX_DEV_DEG = 40.0
+# Richtung in die Zone beim Schild-Lesen messen: Querlinien vor dem Bot (Vorder-/Hinterkante der
+# Zone, parallel zur Spur) -- mindestens so viele Treffer, sonst bleibt die Modellrichtung.
+YAW_IN_MIN_HITS = 5
 # Schild lesen: SIGN_SETTLE_S warten, dann SIGN_READ_S abstimmen, ohne Ergebnis
 # spaetestens nach SIGN_READ_TIMEOUT_S weiter.
 SIGN_SETTLE_S = 0.3
@@ -102,10 +108,11 @@ MAGNET_ON_WAIT_S = 1.0
 MAGNET_OFF_WAIT_S = 1.0
 # Griff pruefen: so weit zuruecksetzen (m).
 GRIP_CHECK_M = 0.03
-# Palette haengt am Magneten, wenn das Bild ueber dem Magneten nach dem Zuruecksetzen (und beim
-# Tragen) mindestens so aehnlich ist wie beim Greifen (Korrelation von pallet_node, 0..1).
+# Palette haengt am Magneten, wenn das Bild ueber dem Magneten nach dem Zuruecksetzen mindestens
+# so aehnlich ist wie beim Greifen (Korrelation von pallet_node, 0..1). Nur dort geprueft: einmal
+# gegriffen, verliert der Magnet die Palette nicht. Beim Tragen gab der Vergleich Fehlalarm
+# (Spiegelung im Metallstreifen aendert sich beim Drehen, Lauf 11.11.).
 GRIP_MIN = 0.8
-PALLET_LOST_S = 1.0
 STEP_TIMEOUT_S = 30.0
 
 
@@ -236,7 +243,7 @@ class StorageSequence:
         for pose in msg.poses:
             p = (pose.position.x, pose.position.y)
             b = self._add_hit(self._boundaries, self._s_of(p), seen,
-                              yaw_from_quaternion(pose.orientation))
+                              yaw_from_quaternion(pose.orientation), xy=p)
             if b is not None:
                 # Die Grenze selbst, nicht die Bot-Position: die BEV sieht bis 0,6 m voraus.
                 self._last_boundary_s = max(self._last_boundary_s, b['s'])
@@ -253,6 +260,7 @@ class StorageSequence:
             f = (pose.position.x - robot[0]) * c + (pose.position.y - robot[1]) * s
             if 0.0 < f < CROSS_LINE_MAX_M:
                 self._cross_lines.append(f)
+                self._cross_yaws.append(yaw_from_quaternion(pose.orientation))
 
     def cb_sign(self, msg):
         if self.state != S.SCHILD_LESEN or not self._reading():
@@ -275,19 +283,37 @@ class StorageSequence:
         robot = self._robot_xy()
         near = robot is not None and self._dock_start is not None \
             and math.dist(robot, self._dock_start) >= self._approach - DOCK_CHECK_M
+        log = self._dock_log
+        log['frames'] += 1
+        log['max'] = max(log['max'], msg.data)
+        if near:
+            log['near_frames'] += 1
+            log['max_near'] = max(log['max_near'], msg.data)
         if near and msg.data >= CONTACT_STILL_MIN:
             self._contact += 1
+            log['best_run'] = max(log['best_run'], self._contact)
             if self._contact >= CONTACT_FRAMES:
-                self.node.get_logger().info(f'Magnet liegt an (Bild steht still, {msg.data:.2f}).')
+                self._log_dock(f'Magnet liegt an (Bild steht still, {msg.data:.2f})')
                 self._enter(S.GREIFEN)
         else:
             self._contact = 0
 
+    def _log_dock(self, outcome):
+        """Andock-Versuch fuers Log: wie weit gefahren, wie still das Bild war."""
+        log, robot = self._dock_log, self._robot_xy()
+        driven = math.dist(robot, self._dock_start) if robot and self._dock_start else float('nan')
+        def f(v):
+            return f'{v:.2f}' if v >= 0 else '-'
+        self.node.get_logger().info(
+            f'Andocken: {outcome}. Gefahren {driven:.3f} m von erwartet {self._approach:.3f} m '
+            f'(Kontakt zaehlt ab {self._approach - DOCK_CHECK_M:.3f} m). Stillstand: '
+            f'{log["frames"]} Bilder, max {f(log["max"])}; im Kontaktbereich {log["near_frames"]} '
+            f'Bilder, max {f(log["max_near"])}, laengste Folge >= {CONTACT_STILL_MIN} '
+            f'{log["best_run"]}/{CONTACT_FRAMES}.')
+
     def cb_grip(self, msg):
-        self._attached = msg.data >= GRIP_MIN
+        self._grip_score = msg.data
         self._attached_time = time.monotonic()
-        if self.state in CARRY_STATES and self._attached:
-            self._pallet_ok_time = self._attached_time
 
     def cb_maneuver_status(self, msg):
         if self.state not in MANEUVER_STATES or not self._queue:
@@ -314,6 +340,7 @@ class StorageSequence:
         elif self.state == S.POSITIONIERT and elapsed >= POSITION_HOLD_S:
             self._plan_dock()
         elif self.state == S.ANDOCKEN and elapsed >= DOCK_TIMEOUT_S:
+            self._log_dock('Zeit abgelaufen')
             self._retry('Andocken dauert zu lange')
         elif self.state == S.GREIFEN and elapsed >= MAGNET_ON_WAIT_S:
             self._enter(S.GRIFF_PRUEFEN)
@@ -321,10 +348,7 @@ class StorageSequence:
             self._report('Palette abgelegt')
             self._enter(S.VERLASSEN)
 
-        if self.state in CARRY_STATES \
-                and time.monotonic() - self._pallet_ok_time > PALLET_LOST_S:
-            self._fail('Palette nicht mehr am Magneten')
-        elif self.state in MANEUVER_STATES and elapsed >= STEP_TIMEOUT_S:
+        if self.state in MANEUVER_STATES and elapsed >= STEP_TIMEOUT_S:
             self._fail(f'{self.state.name} dauert laenger als {STEP_TIMEOUT_S:.0f} s')
 
     # --- Ablauf ---
@@ -342,15 +366,18 @@ class StorageSequence:
             self.node.get_logger().warn('Storage nicht gestartet: keine Roboterpose (TF).')
             return
         self._reset_run()
-        self._origin = (pose[0], pose[1])
-        self._track_yaw = pose[2]
+        if self._magnet:
+            self.node.get_logger().info('Neuer Start: Magnet vom letzten Lauf noch an -- aus.')
+            self._set_magnet(False, force=True)
+        self._origin = self._start_xy = (pose[0], pose[1])
+        self._track_yaw = self._start_yaw = pose[2]
         self.node.get_logger().info(
             f'Storage gestartet, Ziel Zone {self.target_zone}'
             + (f', Ziffern in Fahrtrichtung {self.zone_order}' if self.zone_order else '') + '.')
         self._enter(S.ERKUNDEN)
 
     def _abort(self):
-        self._set_magnet(False, force=True)
+        self._release_unless_gripped()
         self._queue = []
         self._enter(S.IDLE)
         self.node.set_initial_mode('Storage abgebrochen')
@@ -386,6 +413,7 @@ class StorageSequence:
             self._sign_votes = Counter()
             self._pallet_frames = self._pallet_found = 0
             self._cross_lines = []
+            self._cross_yaws = []
         elif state == S.ZURUECKDREHEN:
             self._queue = [self._rotate(self._track_yaw)]
         elif state == S.ZUR_PALETTENZONE:
@@ -398,6 +426,12 @@ class StorageSequence:
         elif state == S.ANDOCKEN:
             self._contact = 0
             self._dock_start = self._robot_xy()
+            self._dock_log = {'frames': 0, 'max': -1.0, 'near_frames': 0, 'max_near': -1.0,
+                              'best_run': 0}
+            # Magnet schon beim Anfahren an: beruehrt er die Palette, haelt er sie sofort, sie
+            # bewegt sich mit dem Bot und das Bild steht sicher still (Lauf 11.11.: Kontakt nie
+            # erkannt). Haelt er die Palette nicht (Griffpruefung), schaltet NEU_ANSETZEN ihn aus.
+            self._set_magnet(True)
             fast = self._approach - PREDOCK_M
             slow = min(self._approach, PREDOCK_M) + DOCK_OVERSHOOT_M
             self._queue = ([self._straight(fast)] if fast > 0.01 else []) + \
@@ -413,7 +447,6 @@ class StorageSequence:
             self._queue = [self._path_to(self._dock_lane_xy(), reverse=True),
                            self._rotate(self._pallet_zone.yaw_in)]
         elif state == S.HERAUSFAHREN:
-            self._pallet_ok_time = time.monotonic()
             self._queue = [self._path_to(self._dock_lane_xy(), reverse=True,
                                          max_vel=self.carry_max_vel)]
         elif state == S.TRANSPORT:
@@ -427,11 +460,12 @@ class StorageSequence:
             self._queue = [self._path_to(self._drop_point(), reverse=False,
                                          max_vel=self.carry_max_vel)]
         elif state == S.ABLEGEN:
+            self._gripped = False
             self._set_magnet(False)
         elif state == S.VERLASSEN:
             self._queue = [self._path_to(self._target_zone.track_xy, reverse=True)]
         elif state == S.FEHLER:
-            self._set_magnet(False, force=True)
+            self._release_unless_gripped()
 
         if self._queue:
             mode = ControlType.Maneuver
@@ -446,10 +480,13 @@ class StorageSequence:
             self._enter(S.SCHILD_LESEN)
         elif self.state == S.ZURUECKDREHEN:
             robot = self._robot_pose()
-            self._last_stop_s = self._s_of(robot) if robot else self._last_stop_s
+            if robot:
+                self._last_stop_xy = (robot[0], robot[1])
+                self._last_stop_s = self._s_of(robot)
             if self._plan():
                 self._enter(S.ZUR_PALETTENZONE)
-            elif sum(1 for z in self._zones if not z.fallback) >= ZONE_COUNT:
+            elif sum(1 for z in self._zones if not z.fallback) >= \
+                    ZONE_COUNT - (self._target_index() is not None):
                 self._finish_exploration()
             else:
                 self._enter(S.ERKUNDEN)
@@ -458,7 +495,11 @@ class StorageSequence:
         elif self.state == S.AUSRICHTEN:
             self._enter(S.ANDOCKEN)
         elif self.state == S.ANDOCKEN:
-            self._retry('Kein Kontakt: Bild ueber dem Magneten stand nie still')
+            # Strecke bis zum erwarteten Kontakt + DOCK_OVERSHOOT_M abgefahren, Magnet ist an.
+            # Der Stillstand kam im ersten Versuch nie (die Palette rutscht beim Schieben, Lauf
+            # 11.11.); ob sie haengt, entscheidet die Griffpruefung nach dem Zuruecksetzen.
+            self._log_dock('Strecke abgefahren, Stillstand nicht erkannt -- greife trotzdem')
+            self._enter(S.GREIFEN)
         elif self.state == S.GRIFF_PRUEFEN:
             self._check_grip()
         elif self.state == S.NEU_ANSETZEN:
@@ -481,6 +522,7 @@ class StorageSequence:
             return
         s = self._s_of(robot)
         self._model = self._zone_model()
+        self._log_model()
 
         nxt = self._next_model_zone(s)
         if nxt is not None:
@@ -502,7 +544,7 @@ class StorageSequence:
         if s >= self.explore_max_distance:
             self._finish_exploration()
 
-    def _add_hit(self, clusters, s, seen, yaw=None):
+    def _add_hit(self, clusters, s, seen, yaw=None, xy=None):
         """Treffer bei s einem Buendel zuordnen; gibt das Buendel zurueck, wenn es damit
         gerade bestaetigt ist."""
         for c in clusters:
@@ -512,12 +554,15 @@ class StorageSequence:
                 seen.add(id(c))
                 n = c['n']
                 c['s'] = (c['s'] * n + s) / (n + 1)
+                if xy is not None and c.get('xy') is not None:
+                    c['xy'] = ((c['xy'][0] * n + xy[0]) / (n + 1), (c['xy'][1] * n + xy[1]) / (n + 1))
                 if yaw is not None:
                     # Richtung als Einheitsvektor mitteln, sonst springt der Mittelwert bei +-pi.
                     c['dir'] = (c['dir'][0] + math.cos(yaw), c['dir'][1] + math.sin(yaw))
                 c['n'] = n + 1
                 return c if c['n'] == BOUNDARY_CONFIRM else None
-        c = {'s': s, 'n': 1, 'dir': (0.0, 0.0) if yaw is None else (math.cos(yaw), math.sin(yaw))}
+        c = {'s': s, 'n': 1, 'xy': xy,
+             'dir': (0.0, 0.0) if yaw is None else (math.cos(yaw), math.sin(yaw))}
         seen.add(id(c))
         clusters.append(c)
         return None
@@ -590,8 +635,10 @@ class StorageSequence:
         if model is None:
             return None
         s, measured = model['s'], model['measured']
+        target = self._target_index()
         for k in range(ZONE_COUNT):
-            if any(z.index == k for z in self._zones):
+            # Zielzone ist laut Aufgabe immer frei: nicht anfahren, Lage aus dem Modell.
+            if k == target or any(z.index == k for z in self._zones):
                 continue
             s_center = (s[k] + s[k + 1]) / 2.0
             if s_robot < s_center:
@@ -600,6 +647,19 @@ class StorageSequence:
             # Schon hinter der Zone: weiter kommt nichts mehr dazu.
             return (k, s_center) if sure or s_robot >= s[k + 1] else None
         return None
+
+    def _log_model(self):
+        """Zonenmodell ins Log, wenn es sich merklich aendert."""
+        m = self._model
+        key = None if m is None else (tuple(round(v, 2) for v in m['s']), tuple(m['measured']))
+        if key == self._model_key:
+            return
+        self._model_key = key
+        if m is not None:
+            lines = ' / '.join(f'{v:.2f}' + ('' if ok else '*')
+                               for v, ok in zip(m['s'], m['measured']))
+            self.node.get_logger().info(
+                f'Zonenmodell: Linien {lines} m (* = ergaenzt), Breite {m["width"]:.3f} m.')
 
     def _tick_read(self, elapsed):
         if elapsed < SIGN_SETTLE_S + SIGN_READ_S and elapsed < SIGN_READ_TIMEOUT_S:
@@ -615,6 +675,15 @@ class StorageSequence:
         if robot is not None:
             z.track_xy = (robot[0], robot[1])
             z.yaw_in = robot[2]
+            measured = self._measured_yaw_in()
+            if measured is not None:
+                self.node.get_logger().info(
+                    f'Richtung in die Zone gemessen ({len(self._cross_yaws)} Linien): '
+                    f'{math.degrees(wrap_angle(measured - robot[2])):+.1f} Grad gegenueber der '
+                    'Blickrichtung.')
+                z.yaw_in = measured
+                if not self._track_from_zone:
+                    self._set_track_from_zone(measured)
         z.digit = by_hand if by_hand is not None else digit
         if by_hand is not None and digit is not None and digit != by_hand:
             self.node.get_logger().warn(
@@ -637,6 +706,49 @@ class StorageSequence:
             self.node.get_logger().info(f'Rueckfall: Schild {z.digit} schon bekannt, verworfen.')
             self._zones.pop()
         self._enter(S.ZURUECKDREHEN)
+
+    def _set_track_from_zone(self, yaw_in):
+        """Spurrichtung = gemessene Richtung in die Zone -/+ 90 Grad (einmal). Ursprung bleibt
+        der Startpunkt; alle bisherigen Strecken (Zonengrenzen, letzter Halt) werden aus ihren
+        Bodenpunkten neu berechnet, das Zonenmodell liegt danach parallel zur Spur."""
+        track = wrap_angle(yaw_in + (math.pi / 2 if ZONES_RIGHT else -math.pi / 2))
+        dev = math.degrees(wrap_angle(track - self._start_yaw))
+        if abs(dev) > TRACK_MAX_DEV_DEG:
+            self.node.get_logger().warn(
+                f'Spurrichtung aus der Zonenrichtung {dev:+.1f} Grad neben der Startrichtung -- '
+                'verworfen.')
+            return
+        self._track_yaw = track
+        self._track_from_zone = True
+        for b in self._boundaries:
+            if b.get('xy') is not None:
+                b['s'] = self._s_of(b['xy'])
+        confirmed = [b['s'] for b in self._boundaries if b['n'] >= BOUNDARY_CONFIRM]
+        self._last_boundary_s = max(confirmed, default=0.0)
+        if self._last_stop_xy is not None:
+            self._last_stop_s = self._s_of(self._last_stop_xy)
+        for z in self._zones:
+            z.s_center = self._s_of(z.center_xy)
+        self.node.get_logger().info(
+            f'Spurrichtung aus der Zonenrichtung: {dev:+.1f} Grad gegenueber der Startrichtung '
+            '(gilt ab jetzt).')
+
+    def _measured_yaw_in(self):
+        """Richtung in die Zone aus den Querlinien vor dem Bot (Vorder-/Hinterkante der Zone,
+        parallel zur Spur): senkrecht dazu, auf der Seite der Zonen. None bei zu wenig Treffern
+        oder mehr als YAW_IN_MAX_DEG neben der Querrichtung zur Spur."""
+        if len(self._cross_yaws) < YAW_IN_MIN_HITS:
+            return None
+        # Linien haben keine Richtung: Winkel verdoppeln, mitteln, halbieren.
+        cx = sum(math.cos(2.0 * a) for a in self._cross_yaws)
+        cy = sum(math.sin(2.0 * a) for a in self._cross_yaws)
+        line = 0.5 * math.atan2(cy, cx)
+        side = self._side_yaw()
+        yaw_in = min((wrap_angle(line + math.pi / 2), wrap_angle(line - math.pi / 2)),
+                     key=lambda a: abs(wrap_angle(a - side)))
+        if abs(wrap_angle(yaw_in - side)) > math.radians(TRACK_MAX_DEV_DEG):
+            return None
+        return yaw_in
 
     def _vote_digit(self):
         total = sum(self._sign_votes.values())
@@ -674,13 +786,39 @@ class StorageSequence:
             self._pallet_zone = None
         else:
             self._pallet_zone = None
-        self._target_zone = next((z for z in known if z.digit == self.target_zone), None)
+        self._target_zone = next((z for z in known if z.digit == self.target_zone), None) \
+            or self._target_from_model()
         ok = self._pallet_zone is not None and self._target_zone is not None \
             and self._pallet_zone is not self._target_zone
         if ok:
             self.node.get_logger().info(
                 f'Palette in Zone {self._pallet_zone.label()}, Ziel Zone {self._target_zone.label()}.')
         return ok
+
+    def _target_index(self):
+        """Platz der Zielzone im Modell aus zone_order, None ohne Reihenfolge (dann Schild)."""
+        order = self._zone_order()
+        return order.index(self.target_zone) if self.target_zone in order else None
+
+    def _target_from_model(self):
+        """Zielzone ohne Besuch (sie ist immer frei): Spurpunkt auf Hoehe ihrer Modellmitte,
+        auf der Linie des Spurpunkts einer besuchten Zone (Palettenzone bevorzugt), Richtung in
+        die Zone wie dort gemessen (Zonen liegen parallel). None ohne Modell oder Bezug."""
+        k, m = self._target_index(), self._model
+        ref = self._pallet_zone or next((z for z in self._zones if z.track_xy is not None), None)
+        if k is None or m is None or ref is None:
+            return None
+        s_center = (m['s'][k] + m['s'][k + 1]) / 2.0
+        d = s_center - self._s_of(ref.track_xy)
+        xy = (ref.track_xy[0] + d * math.cos(self._track_yaw),
+              ref.track_xy[1] + d * math.sin(self._track_yaw))
+        z = Zone(k, s_center, xy, ref.yaw_in, fallback=False)
+        z.track_xy = xy
+        z.digit = self.target_zone
+        self.node.get_logger().info(
+            f'Zielzone {self.target_zone} nicht angefahren (immer frei): Mitte aus dem Modell bei '
+            f's={s_center:.2f} m, {d:+.2f} m von Zone {ref.name()}.')
+        return z
 
     def _finish_exploration(self):
         if self._plan(final=True):
@@ -730,11 +868,24 @@ class StorageSequence:
 
     def _check_grip(self):
         fresh = time.monotonic() - self._attached_time <= PALLET_FRESH_S
-        if fresh and self._attached:
+        score = f'{self._grip_score:.2f}' if fresh else 'keine aktuelle Messung'
+        self.node.get_logger().info(f'Griff: Korrelation {score} (mindestens {GRIP_MIN}).')
+        if fresh and self._grip_score >= GRIP_MIN:
+            self._gripped = True
             self._report('Palette erfolgreich aufgenommen')
             self._enter(S.HERAUSFAHREN)
         else:
             self._retry('Palette kommt beim Zuruecksetzen nicht mit')
+
+    def _release_unless_gripped(self):
+        """Magnet aus -- ausser die Palette haengt dran: dann fiele sie mitten auf die Spur.
+        Ausschalten dann von Hand (Topic, siehe Log) oder mit botdown."""
+        if self._gripped:
+            self.node.get_logger().warn(
+                'Palette haengt am Magneten -- Magnet bleibt AN. Ablegen von Hand: ros2 topic pub '
+                f'--once {MAGNET_TOPIC} std_msgs/msg/Bool "{{data: false}}"')
+        else:
+            self._set_magnet(False, force=True)
 
     def _drop_point(self):
         """Ablagepunkt der Radachse: so tief in die Zielzone wie beim Aufnehmen in die
@@ -798,10 +949,14 @@ class StorageSequence:
             setattr(self, name, self.node.get_parameter(name).value)
 
     def _reset_run(self):
-        self._origin = (0.0, 0.0)
-        self._track_yaw = 0.0
+        self._origin = self._start_xy = (0.0, 0.0)
+        self._track_yaw = self._start_yaw = 0.0
+        self._last_stop_xy = None
+        self._track_from_zone = False   # Spurrichtung schon aus einer Zone gemessen
+        self._cross_yaws = []
         self._boundaries = []
         self._model = None
+        self._model_key = None
         self._zones = []
         self._last_stop_s = 0.0
         self._last_boundary_s = 0.0
@@ -814,9 +969,11 @@ class StorageSequence:
         self._align_queue = []
         self._dock_start = None
         self._fronts = []
-        self._attached = False
+        self._grip_score = 0.0
         self._attached_time = 0.0
-        self._pallet_ok_time = 0.0
+        self._gripped = False           # Griff bestaetigt, bis ABLEGEN
+        self._dock_log = {'frames': 0, 'max': -1.0, 'near_frames': 0, 'max_near': -1.0,
+                          'best_run': 0}
         self._sign_votes = Counter()
         self._pallet_frames = self._pallet_found = 0
         self._cross_lines = []

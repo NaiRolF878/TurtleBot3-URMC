@@ -1,5 +1,5 @@
 #!/bin/bash
-# Faehrt den Bot komplett hoch: Uhr stellen, Reste aufraeumen, Bringup + Kamera starten.
+# Faehrt den Bot komplett hoch: Uhr stellen, Reste aufraeumen, Bringup + Kamera + Magnet starten.
 # Aufruf: bash bot-up.sh [--no-time]
 #         --no-time  ueberspringt die Zeitsynchronisation (die fragt nach dem sudo-Passwort)
 #
@@ -56,7 +56,15 @@ echo "--- Reste beenden ---"
 pkill -9 -f camera_node          2>/dev/null && echo "  alte camera_node beendet"
 pkill -f turtlebot3_bringup      2>/dev/null && echo "  altes Bringup beendet"
 pkill -f robot.launch.py         2>/dev/null
+# Magnet nur per SIGTERM beenden (nie -9): dann setzt die Node den Pin selbst auf AUS.
+# magnet_test.py ist die alte Testnode -- zwei Prozesse am selben Pin gehen nicht.
+pkill -f "magnet_controll|magnet_test.py" 2>/dev/null && echo "  alte Magnet-Node beendet"
 sleep 2
+if pgrep -f "magnet_controll|magnet_test.py" >/dev/null; then
+    echo "  WARNUNG: alte Magnet-Node reagiert nicht auf SIGTERM -- kill -9, Pin-Zustand unklar"
+    pkill -9 -f "magnet_controll|magnet_test.py" 2>/dev/null
+    sleep 1
+fi
 
 # Der OpenCR springt nach Reset oder Akkuwechsel zwischen ttyACM0 und ttyACM1.
 PORT=""
@@ -98,6 +106,15 @@ sleep 6
 
 __CAMERA_START__
 
+echo "--- Magnet starten ---"
+# Einzelnes Skript, von bot-up.sh vorher nach ~/magnet_controll.py kopiert (kein Build noetig).
+if [ -f "$HOME/magnet_controll.py" ]; then
+    setsid nohup python3 "$HOME/magnet_controll.py" > "$HOME/logs/magnet.log" 2>&1 < /dev/null &
+    sleep 3
+else
+    echo "  FEHLER: ~/magnet_controll.py fehlt"
+fi
+
 echo "--- laufende Prozesse ---"
 # Bei Fehlschlag gleich das Log zeigen, statt nur darauf zu verweisen.
 if pgrep -f robot.launch.py >/dev/null; then
@@ -111,6 +128,12 @@ if pgrep -f camera_node >/dev/null; then
 else
     echo "  Kamera:  NICHT gestartet -- letzte Zeilen aus ~/logs/camera.log:"
     tail -15 "$HOME/logs/camera.log" 2>/dev/null | sed 's/^/    /'
+fi
+if pgrep -f magnet_controll >/dev/null; then
+    echo "  Magnet:  laeuft ($(grep -o 'ueber [A-Za-z.]*' "$HOME/logs/magnet.log" | head -1))"
+else
+    echo "  Magnet:  NICHT gestartet -- letzte Zeilen aus ~/logs/magnet.log:"
+    tail -15 "$HOME/logs/magnet.log" 2>/dev/null | sed 's/^/    /'
 fi
 EOF
 )
@@ -130,6 +153,10 @@ if [ -n "$CAM_TUNING" ]; then
         scp -q "$SCRIPT_DIR/tuning/$CAM_TUNING" "$BOT_USER@$BOT_IP:tuning/$CAM_TUNING" || \
         echo "  WARNUNG: Tuning-Datei $CAM_TUNING konnte nicht auf den Bot kopiert werden."
 fi
+# Magnet-Node mitschicken (immer die aktuelle Fassung aus dem Repo).
+MAGNET_PY="$SCRIPT_DIR/../../workspace/src/Follow_Lane/Follow_Lane/src/magnet_controll.py"
+scp -q "$MAGNET_PY" "$BOT_USER@$BOT_IP:magnet_controll.py" || \
+    echo "  WARNUNG: magnet_controll.py konnte nicht auf den Bot kopiert werden (alte Fassung bleibt)."
 ssh "$BOT_USER@$BOT_IP" "bash -s" <<< "$REMOTE" || exit 1
 
 echo ""

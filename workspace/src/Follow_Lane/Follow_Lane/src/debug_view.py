@@ -2,6 +2,8 @@
 
 Ein:  /detect/lane_debug, /control/mode, /control/tunnel_source, /control/cmd_vel, /odom,
       /battery_state, /detect/lane_obstacles, /control/storage_state, /control/storage_info,
+      /detect/zones_seen (Zonen, wie sie im Bild gesehen werden: gruene Kaesten mit Ziffer),
+      /control/storage_zones (Zonenmodell, duenner Umriss), TF odom -> base_footprint,
       Klicks aus rqt_image_view
 Aus:  /lokal/debug_view (Image), /control/tunnel_request (Bool, Button),
       /control/storage_request (Bool, Button)
@@ -18,14 +20,22 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, Image, PointCloud2
 from std_msgs.msg import Bool, String, UInt8
+from tf2_ros import Buffer, TransformListener
+from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
+from visualization_msgs.msg import MarkerArray
 
-from follow_lane_msg.msg import FollowLaneDebug
+from follow_lane_msg.msg import FollowLaneDebug, StorageZones
+from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    ControlType, StorageState, control_mode_from_msg, run_node, storage_state_from_msg)
+    ControlType, SharedParams, StorageState, control_mode_from_msg, draw_model_zones,
+    draw_seen_zones, pose2d_from_transform, run_node, storage_state_from_msg, zone_boxes)
 
+# Gesehene Zonen gelten nur zu einem Spurbild mit hoechstens so viel (s) Zeitunterschied.
+ZONES_SEEN_MAX_AGE_S = 0.3
 BATT_FULL_V = 12.6    # 4.2 V/Zelle
 BATT_EMPTY_V = 11.0
 
@@ -109,6 +119,11 @@ class debug_view(Node):
             String, '/control/storage_state', self.cb_storage_state, 1)
         self.sub_storage_info = self.create_subscription(
             String, '/control/storage_info', self.cb_storage_info, 1)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.sub_storage_zones = self.create_subscription(
+            StorageZones, '/control/storage_zones', self.cb_storage_zones, latched)
+        self.sub_zones_seen = self.create_subscription(
+            MarkerArray, '/detect/zones_seen', self.cb_zones_seen, 1)
 
         # --- Publisher ---
         self.pub_debug_image = self.create_publisher(Image, '/lokal/debug_view', 1)
@@ -132,6 +147,13 @@ class debug_view(Node):
         self.lane_obstacle_stamp = None
         self.storage_state = StorageState.IDLE
         self.storage_info = ''
+        self.storage_zones = None
+        self.zones_seen = None          # letzte MarkerArray von storage_zone_node
+        self.zone_params = None         # side_near_m von storage_zone_node, erst bei Bedarf
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.bev = bev_geometry.load_bev_spec(
+            os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
         # Lage der Buttons im zuletzt gesendeten Bild (x0, y0, x1, y1).
         self._tunnel_button = None
         self._storage_button = None
@@ -175,6 +197,15 @@ class debug_view(Node):
 
     def cb_storage_info(self, msg):
         self.storage_info = msg.data
+
+    def cb_zones_seen(self, msg):
+        self.zones_seen = msg
+
+    def cb_storage_zones(self, msg):
+        self.storage_zones = msg
+        if self.zone_params is None:
+            # Erst jetzt: ohne Storage gibt es storage_zone_node nicht (sonst Warnungen).
+            self.zone_params = SharedParams(self, 'storage_zone_node', ['side_near_m'])
 
     def cb_click(self, point):
         if self.control_mode is None:
@@ -303,7 +334,40 @@ class debug_view(Node):
             for line in lines:
                 a, b = line.points[0], line.points[1]
                 cv2.line(raw, (int(a.x), int(a.y)), (int(b.x), int(b.y)), color, 3, cv2.LINE_AA)
+        self.draw_storage_zones(raw, d.raw_image.header.stamp)
         return raw
+
+    def draw_storage_zones(self, raw, stamp):
+        """Zonen ins Spurbild (BEV): gruen gefuellt mit Ziffer = so, wie storage_zone_node sie im
+        Bild sieht (ohne Odometrie); orange Umriss = Zonenmodell (in odom, solange Storage laeuft).
+        Liegen beide auseinander, stimmt das Modell oder die Odometrie nicht."""
+        if raw.shape[:2] != (self.bev['height'], self.bev['width']):
+            return
+        t_img = stamp.sec + stamp.nanosec * 1e-9
+        if self.storage_state != StorageState.IDLE and self.storage_zones is not None \
+                and self.zone_params is not None and self.zone_params.ready:
+            pose = None
+            for t in (Time.from_msg(stamp), Time()):
+                try:
+                    pose = pose2d_from_transform(
+                        self.tf_buffer.lookup_transform('odom', 'base_footprint', t))
+                    break
+                except ExtrapolationException:
+                    continue
+                except (LookupException, ConnectivityException):
+                    break
+            draw_model_zones(raw, self.bev, zone_boxes(
+                self.storage_zones, pose, self.zone_params['side_near_m']))
+        seen = []
+        for m in (self.zones_seen.markers if self.zones_seen is not None else []):
+            if len(m.points) < 4:
+                continue
+            t_m = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+            if abs(t_m - t_img) > ZONES_SEEN_MAX_AGE_S:
+                continue
+            corners = np.array([(p.x, p.y) for p in m.points[:4]])
+            seen.append((corners, int(m.text) if m.text.isdigit() else 0))
+        draw_seen_zones(raw, self.bev, seen)
 
     def build_generic_panel(self, height):
         def speed(v):

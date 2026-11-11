@@ -133,7 +133,13 @@ nie als Palette.
 `pallet_node` nimmt beim Greifen das Bild direkt ueber dem Magneten als Vorlage und vergleicht
 danach jedes Bild damit (`/detect/pallet_grip`, Korrelation). Haengt die Palette, bewegt sie sich
 mit dem Bot und das Bild bleibt gleich; bleibt sie liegen, wird sie beim Zuruecksetzen kleiner.
-Ob es reicht, entscheidet switch_control mit der Konstante `GRIP_MIN`, auch waehrend des Tragens.
+Ob es reicht, entscheidet switch_control mit der Konstante `GRIP_MIN`, **nur in `GRIFF_PRUEFEN`**
+(Wert steht im Log). Einmal gegriffen, verliert der Magnet die Palette nicht; beim Tragen wird
+nicht mehr geprueft. Grund (Lauf 11.11.): Im Ausschnitt liegt der spiegelnde Metallstreifen,
+nach einer Drehung aendert sich die Spiegelung, die Korrelation fiel unter `GRIP_MIN`, FEHLER
+schaltete den Magneten aus und die Palette fiel auf die Spur. Eine Pruefung auf Verdeckung
+(oberer Bildteil dunkel) hilft in `GRIFF_PRUEFEN` nicht: Auch eine liegengebliebene Palette
+verdeckt nach 3 cm Zuruecksetzen noch fast das ganze Bild.
 Die Lage des Magneten im Bild (`MAGNET_X`, `MAGNET_TOP`) ist Bot-Mechanik und fest eingetragen
 (gemessen 10.11.); neu nur nach einem Umbau von Kamera oder Magnet. Aus der Geometrie laesst sie
 sich nicht rechnen: Der Magnet sitzt 7,5 cm hoch, seine Lage vor der Achse kennt man nur aus der
@@ -142,6 +148,10 @@ BEV, und dort erscheint er wegen der Hoehe viel weiter vorn.
 ### Zonenmodell
 
 - Linien L0..L3 im gleichen Abstand; Zone k liegt zwischen L(k-1) und L(k).
+- Querlinien beim Erkunden nur bis `EXPLORE_MAX_DIST_M` 0,35 m vor der Radachse und ab
+  `EXPLORE_MIN_LINE_M` 0,10 m Laenge (storage_zone_node). Weiter weg ist die BEV verzerrt (dieselbe
+  Linie 5-6 cm zu weit hinten, ~10 Grad gedreht -> Doppellinien), kurze Stuecke am Streifenrand
+  waren Scheinlinien. Nachgerechnet mit der Aufnahme vom 11.11. (logs/bags).
 - Nur aus den bestaetigten Querlinien (je drei Bilder), ohne Streckenmasse: Jede Querlinie darf
   L0 sein, jede spaetere mit 1-3 Zonen dazwischen gibt die Breite vor. Es gewinnt das Raster,
   das die meisten Linien erklaert. Dagegen zaehlen Linien innerhalb des Rasters, die nicht
@@ -150,11 +160,21 @@ BEV, und dort erscheint er wegen der Hoehe viel weiter vorn.
 - Keine Strichel-Erkennung mehr (bis 10.11.): Sie meldete bei langen Strichen weitere Anfaenge
   und Enden mitten in der Strichelung, das Raster wurde zu schmal und jede Zone um eine
   verschoben. Mit den Laeufen vom 10.11. getestet: alle Raster 0,27-0,30 m.
+- Die **Zielzone wird beim Erkunden nicht angefahren** (laut Aufgabe immer frei): Ihre Lage kommt
+  aus dem Zonenmodell (Mitte, auf der Spurpunkt-Linie der besuchten Palettenzone), die Richtung in
+  die Zone wie dort gemessen. Nur mit `zone_order`; ohne Reihenfolge entscheidet das Schild, dann
+  werden alle Zonen angefahren.
+- **Spurrichtung:** bis zur ersten gelesenen Zone die Startrichtung des Bots; danach einmal die
+  gemessene Richtung in diese Zone + 90 Grad (Zonenkanten liegen parallel zur Spur). Alle Strecken
+  werden dann neu berechnet. Grund: Steht der Bot beim Start schraeg (Aufnahme 11.11.: 26 Grad),
+  liegen sonst Modell, Zurueckfahren und Transport schraeg.
 - Die Ziffer einer Zone kommt aus `zone_order` nach ihrem Platz (Standard `1,2,3` in
   Fahrtrichtung). Das Schild dient nur zur Kontrolle; ein Widerspruch steht als Warnung im Log.
   Mit leerem `zone_order` entscheidet das Schild.
-- Gezeichnet im Debugbild `/detect/zone_debug/compressed`: gemessene Linien gruen, ergaenzte
-  orange, Ziffer je Zone. Mit
+- Gezeichnet als Kasten je Zone (ab `side_near_m`, 0,25 m tief) mit der Ziffer in der Mitte,
+  im Hauptbild `/lokal/debug_view` (solange Storage laeuft) und in
+  `/detect/zone_debug/compressed`: gruen = beide Grenzlinien gemessen, orange = mindestens eine
+  ergaenzt. Jede Aenderung des Modells steht im Log („Zonenmodell: Linien ... (* = ergaenzt)“). Mit
   Zuschauer laeuft die Erkennung auch ohne Storage-Ablauf, damit sie sich einstellen laesst.
 
 ### Zustandsdiagramm
@@ -184,7 +204,7 @@ stateDiagram-v2
     state "ABLEGEN (Stop, Magnet aus)" as ABLEGEN
     state "VERLASSEN (Maneuver)" as VERLASSEN
     state "FERTIG (Stop)" as FERTIG
-    state "FEHLER (Stop, Magnet aus)" as FEHLER
+    state "FEHLER (Stop, Magnet aus -- an, wenn Palette gegriffen)" as FEHLER
 
     ERKUNDEN --> ZUR_ZONE_DREHEN : Zonenmitte erreicht oder Rueckfall
     ZUR_ZONE_DREHEN --> SCHILD_LESEN : auf Zonenmitte, zur Zone gedreht
@@ -196,8 +216,8 @@ stateDiagram-v2
     POSITIONIERT --> AUSRICHTEN : Haltezeit vorbei, Vorderkante vermessen
     POSITIONIERT --> NEU_ANSETZEN : keine Vorderkante gefunden
     AUSRICHTEN --> ANDOCKEN : Versatz ausgeglichen, Kurs in die Zone
-    ANDOCKEN --> GREIFEN : Bild ueber dem Magneten steht still (Kontakt)
-    ANDOCKEN --> NEU_ANSETZEN : kein Kontakt bis 4 cm hinter dem erwarteten, Zeit
+    ANDOCKEN --> GREIFEN : Bild ueber dem Magneten steht still, sonst Strecke + 4 cm abgefahren
+    ANDOCKEN --> NEU_ANSETZEN : Zeit (DOCK_TIMEOUT_S)
     GREIFEN --> GRIFF_PRUEFEN : Wartezeit vorbei
     GRIFF_PRUEFEN --> HERAUSFAHREN : Palette kommt mit
     GRIFF_PRUEFEN --> NEU_ANSETZEN : Bild ueber dem Magneten aendert sich
@@ -210,7 +230,6 @@ stateDiagram-v2
 
     ERKUNDEN --> FEHLER : Zone nicht gefunden
     NEU_ANSETZEN --> FEHLER : dritter Fehlversuch
-    TRANSPORT --> FEHLER : Palette nicht mehr am Magneten
     FEHLER --> ERKUNDEN : Button STORAGE STARTEN
     FERTIG --> [*]
 ```
@@ -296,7 +315,7 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 | Maneuver | Eigener Regler in control_driving, kein Nav2 | Kurze, einfache Wege; exaktes Drehen auf der Stelle; Costmaps und LiDAR helfen hier nicht |
 | Ablegen | Tiefe aus den Zonenlinien der Erkundung, Magnet aus | Magnethoehe fest, Magnet nur an/aus; mit Palette vor der Kamera sind die Linien der Zielzone womoeglich verdeckt |
 | Verlassen | Rueckwaerts aus der Zielzone auf die Spur, anhalten | Kurz, ohne Drehung |
-| Fehler | Andocken/Greifen bis zum dritten Versuch, danach FEHLER; Palette verloren -> FEHLER | Haengt nie in einer Schleife; eine Palette am Boden ist mit fester Magnethoehe nicht mehr greifbar |
+| Fehler | Andocken/Greifen bis zum dritten Versuch, danach FEHLER. Ist die Palette gegriffen, bleibt der Magnet bei FEHLER und Abbruch an (Ablegen von Hand) | Haengt nie in einer Schleife; eine Palette auf der Spur ist mit fester Magnethoehe nicht mehr greifbar und blockiert die Strecke |
 
 ## Vor Ort einstellen
 
@@ -324,9 +343,10 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 - **Am Bot zu pruefen:** Magnetlage im Bild, Kontakt per Stillstand, Genauigkeit von `Maneuver`,
   Strichelung und Zonenmodell, ob die Vorderkante der Stuetze bis kurz vor dem Kontakt im
   Bild bleibt, ob der Streifen parallel zu ihr liegt.
-- **Magnet auf dem Bot:** `magnet_controll` braucht das Paket `Follow_Lane` auf dem Bot
-  (gebaut, mit `python3-gpiozero`). `scripts/tb/bot/magnet_node.py` hoert dagegen auf
-  `/magnet/cmd`; sein Kommentar sagt, `bot-up.sh` starte ihn, `bot-up.sh` tut das nicht.
+- **Magnet auf dem Bot:** `magnet_controll.py` laeuft als `ros2 run` aus dem gebauten Paket
+  oder als einzelnes Skript (`python3 magnet_controll.py`, per scp kopiert). Neue Fassung am
+  Bot testen (GPIO-Bibliothek, an/aus, AUS nach `pkill`). `bot-up.sh` kopiert und startet sie,
+  `bot-down.sh` beendet sie.
 - **Ablegen ohne Stuetze:** Die Palette faellt von Stuetzenhoehe auf den Boden **[V]**.
 - **BEV seitlich:** Reicht der Bereich der BEV nach rechts bis zu den Zonengrenzen? Die BEV
   reicht +-0,40 m, gesucht wird ab `side_near_m` 0,14 m.
@@ -351,7 +371,7 @@ ungleich breit (z. B. 25 / 30 / 35 cm) und die Strichelung verschieden lang, dam
 festen Massen haengt.
 
 1. **Bauen:** `colcon build` fuer `follow_lane_msg` und `Follow_Lane` (neue Nachrichten).
-2. **Magnet:** `ros2 run Follow_Lane magnet_controll` auf dem Bot,
+2. **Magnet:** laeuft nach `botup` auf dem Bot (Statuszeile „Magnet: laeuft“),
    `ros2 topic pub --once /lokal/magnet_control std_msgs/msg/Bool '{data: true}'`. Haelt er den
    Streifen, haengt die Palette sauber, faellt sie beim Ausschalten ab?
 3. **Einstellen** wie oben (Boden, Kontakt, Magnetlage, Vorlagen).

@@ -69,6 +69,14 @@ MANEUVER_YAW_TOL_DEG = 2.0
 MANEUVER_WAYPOINT_TOL = 0.03
 # Liegt der naechste Pfadpunkt weiter als das neben der Fahrtrichtung, erst auf der Stelle drehen.
 MANEUVER_ROTATE_FIRST_DEG = 30.0
+# Sicherungen (Lauf 11.11.: Bot drehte sich endlos, die Odometrie meldete die Drehung nicht):
+# aendert sich die Pose so lange (s) nicht, ist sie veraltet -> anhalten.
+MANEUVER_POSE_STALE_S = 0.5
+# Drehung abbrechen, wenn der Bot so viel (Grad) mehr gedreht haette als geplant
+# (aufsummierte Drehbefehle, unabhaengig von der Odometrie).
+MANEUVER_ROTATE_EXTRA_DEG = 90.0
+# Pfad: liegt das Ziel naeher (m), wird nicht mehr gedreht, nur noch gerade gefahren.
+MANEUVER_NEAR_M = 0.05
 
 
 def clamp(x, limit):
@@ -144,6 +152,11 @@ class control_driving(Node):
         self._maneuver_start = None     # (x, y, yaw) in odom beim Start
         self._waypoint = 0              # PATH: Index des naechsten Punkts
         self._maneuver_done_id = None
+        self._maneuver_failed_id = None  # abgebrochen (Sicherung): nicht neu starten
+        self._turned = 0.0              # ROTATE: aufsummierte Drehbefehle (rad)
+        self._turn_time = None
+        self._pose_stamp = None         # letzter Zeitstempel der odom-TF ...
+        self._pose_changed = None       # ... und wann (monotonic) er sich zuletzt geaendert hat
         self._reset_pid()
 
         self.get_logger().info('Started control_driving Node.')
@@ -199,13 +212,15 @@ class control_driving(Node):
     def cb_maneuver(self, msg):
         # Zyklisch wiederholt: nur eine neue id (oder die erste nach einem
         # Moduswechsel) startet die Bewegung, eine beendete nie erneut.
-        if msg.id == self._maneuver_done_id:
+        if msg.id in (self._maneuver_done_id, self._maneuver_failed_id):
             return
         if self._maneuver is not None and msg.id == self._maneuver.id:
             return
         self._maneuver = msg
         self._maneuver_start = None
         self._waypoint = 0
+        self._turned = 0.0
+        self._turn_time = None
 
     def cb_watchdog(self):
         read_params(self, self._param_names)
@@ -288,10 +303,16 @@ class control_driving(Node):
 
         if m.type == Maneuver.ROTATE:
             twist, done = self._rotate(pose, m.yaw)
+            planned = abs(wrap_angle(m.yaw - self._maneuver_start[2]))
+            if not done and self._rotation_runaway(m, twist, planned):
+                return
         elif m.type == Maneuver.STRAIGHT:
             twist, done = self._straight(pose, m)
         elif m.type == Maneuver.PATH:
             twist, done = self._path(pose, m)
+            # Ein Pfad dreht hoechstens einmal halb herum.
+            if not done and self._rotation_runaway(m, twist, math.pi):
+                return
         else:
             self.get_logger().warn(f'Unbekannte Grundbewegung {m.type} -- gilt als fertig.')
             twist, done = Twist(), True
@@ -304,6 +325,23 @@ class control_driving(Node):
             self._publish_stop()
             return
         self.pub_cmd_vel.publish(self._limit_wheels(twist))
+
+    def _rotation_runaway(self, m, twist, planned):
+        """True (und Grundbewegung abgebrochen), wenn die Drehbefehle schon deutlich mehr als
+        die geplante Drehung (rad) ergeben: der Bot dreht sich im Kreis."""
+        now = time.monotonic()
+        if self._turn_time is not None:
+            self._turned += abs(twist.angular.z) * min(now - self._turn_time, 0.5)
+        self._turn_time = now
+        if self._turned <= planned + math.radians(MANEUVER_ROTATE_EXTRA_DEG):
+            return False
+        self.get_logger().error(
+            f'Grundbewegung {m.id} abgebrochen: {math.degrees(self._turned):.0f} Grad gedreht, '
+            f'geplant hoechstens {math.degrees(planned):.0f} -- dreht sich im Kreis. Bot steht.')
+        self._maneuver_failed_id = m.id
+        self._maneuver = None
+        self._publish_stop()
+        return True
 
     def _max_vel(self, m):
         return m.max_vel if m.max_vel > 0.0 else self.maneuver_max_vel
@@ -359,6 +397,17 @@ class control_driving(Node):
             return Twist(), True
 
         twist = Twist()
+        if last and dist < MANEUVER_NEAR_M:
+            # Ganz nah: nicht mehr drehen -- die Richtung zu einem Punkt wenige cm entfernt
+            # springt mit jedem Odometrie-Wackler, der Bot drehte sich im Kreis (Lauf 11.11.).
+            # Nur noch gerade bis auf Hoehe des Ziels; der seitliche Rest bleibt.
+            along = dist * math.cos(bearing)
+            if abs(along) <= MANEUVER_DIST_TOL:
+                return Twist(), True
+            speed = max(MANEUVER_MIN_VEL, self.maneuver_k_lin * abs(along))
+            speed = math.copysign(min(self._max_vel(m), speed), along)
+            twist.linear.x = float(-speed if m.reverse else speed)
+            return twist, False
         if abs(bearing) > math.radians(MANEUVER_ROTATE_FIRST_DEG):
             twist.angular.z = float(self._turn_rate(bearing))
             return twist, False
@@ -377,6 +426,16 @@ class control_driving(Node):
             tf = self.tf_buffer.lookup_transform(ODOM_FRAME, ROBOT_FRAME, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.get_logger().warn(f'Keine Roboterpose fuer Maneuver: {e}', throttle_duration_sec=5.0)
+            return None
+        # Veraltet? Am lokalen Empfang gemessen, nicht an der Bot-Uhr (die kann abweichen).
+        now = time.monotonic()
+        stamp = (tf.header.stamp.sec, tf.header.stamp.nanosec)
+        if stamp != self._pose_stamp:
+            self._pose_stamp, self._pose_changed = stamp, now
+        elif now - self._pose_changed > MANEUVER_POSE_STALE_S:
+            self.get_logger().error(
+                f'Roboterpose seit {now - self._pose_changed:.1f} s unveraendert (odom_filter, '
+                '/joint_states?) -- Bot haelt an.', throttle_duration_sec=2.0)
             return None
         return pose2d_from_transform(tf)
 

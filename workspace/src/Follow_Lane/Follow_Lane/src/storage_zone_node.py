@@ -30,14 +30,17 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
+from geometry_msgs.msg import Point
+from visualization_msgs.msg import Marker, MarkerArray
+
 from follow_lane_msg.msg import PalletDetection, StorageZones
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
     CLAHE_PARAMS, COLOR_SOURCE, SELF_MASK_X_M, SELF_MASK_Y_M, WHITE_PARAMS, SharedParams,
-    StorageState, bev_pixels_to_ground,
+    StorageState, bev_pixels_to_ground, draw_model_zones, draw_seen_zones,
     frange, ground_to_bev_pixels, inverse_transform_points, lab_clahe, pose2d_from_transform,
     read_params, require_params, run_node, storage_state_from_msg, transform_points, white_in,
-    yaw_from_quaternion)
+    seen_zone_boxes, yaw_from_quaternion, zone_boxes, zone_digit_at)
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
@@ -50,9 +53,12 @@ CROSS_HALF_M = 0.08
 MIN_LINE_M = 0.05
 MAX_GAP_M = 0.03
 HOUGH_THRESHOLD = 30
-# Zonenmodell im Debugbild: Linien so lang (m) ab side_near_m, Ziffer so tief in der Zone.
-ZONE_DRAW_M = 0.25
-ZONE_LABEL_M = 0.12
+# Erkunden: nur Querlinien bis so weit vor der Radachse (m) und mindestens so lang (m). Weiter weg
+# ist die BEV verzerrt -- dieselbe Linie lag dort 5-6 cm zu weit hinten und um ~10 Grad gedreht,
+# daraus wurden Doppellinien; kurze Stuecke am Streifenrand waren Scheinlinien (Aufnahme 11.11.,
+# nachgerechnet: damit genau die echten Linien 0,267 / 0,496).
+EXPLORE_MAX_DIST_M = 0.35
+EXPLORE_MIN_LINE_M = 0.10
 # Palette: in diesen Zustaenden werden Zone und Palette vermessen.
 PALLET_STATES = (StorageState.SCHILD_LESEN, StorageState.POSITIONIERT, StorageState.ANDOCKEN,
                  StorageState.GREIFEN)
@@ -138,6 +144,9 @@ class storage_zone_node(Node):
         self.pub_cross_lines = self.create_publisher(PoseArray, '/detect/zone_cross_lines', 5)
         self.pub_pallet = self.create_publisher(PalletDetection, '/detect/pallet', 1)
         self.pub_debug = self.create_publisher(CompressedImage, '/detect/zone_debug/compressed', 1)
+        # Zonen, wie sie im aktuellen Bild zu sehen sind (Bot-Frame zum Bildzeitpunkt), fuer
+        # debug_view; Ziffer im Feld text (aus dem Zonenmodell).
+        self.pub_seen = self.create_publisher(MarkerArray, '/detect/zones_seen', 1)
 
         # --- Zustand ---
         self.bridge = CvBridge()
@@ -163,20 +172,21 @@ class storage_zone_node(Node):
         lines_active = self.state in (StorageState.ERKUNDEN, StorageState.SCHILD_LESEN)
         pallet_active = self.state in PALLET_STATES
         viewer = self.pub_debug.get_subscription_count() > 0
-        if not (lines_active or pallet_active or viewer):
+        seen_viewer = self.pub_seen.get_subscription_count() > 0
+        if not (lines_active or pallet_active or viewer or seen_viewer):
             return
         if not self.colors.ready:
             self.get_logger().warn(f'Noch keine Farben von /{COLOR_SOURCE}.', throttle_duration_sec=5.0)
             return
         read_params(self, self._param_names)
         try:
-            self.process(img, lines_active, pallet_active, viewer)
+            self.process(img, lines_active, pallet_active, viewer, seen_viewer)
         except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
             self.get_logger().error(f'Zonenerkennung fehlgeschlagen: {e}')
 
     # --- Hilfsmethoden ---
 
-    def process(self, img, lines_active, pallet_active, viewer):
+    def process(self, img, lines_active, pallet_active, viewer, seen_viewer=False):
         image = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
         w = image.shape[1]
         res = self.bev['res']
@@ -206,14 +216,26 @@ class storage_zone_node(Node):
             # Querlinie: Richtung nahe der Y-Achse.
             if math.degrees(math.atan2(abs(dx), abs(dy))) > self.max_angle_deg:
                 continue
+            if exploring and (float(np.mean(gx)) > EXPLORE_MAX_DIST_M
+                              or math.hypot(dx, dy) < EXPLORE_MIN_LINE_M):
+                continue
             # Richtung zur Seite der Zonen, also von der Spur weg (bei SCHILD_LESEN egal).
             if (dy > 0) == ZONES_RIGHT:
                 dx, dy = -dx, -dy
             lines.append(((float(np.mean(gx)), float(np.mean(gy))), (dx, dy)))
 
         need_pose = (lines_active and lines) or \
-            ((pallet_active or viewer) and self.zones is not None)
+            ((pallet_active or viewer or seen_viewer) and self.zones is not None)
         pose = self.robot_pose(img.header.stamp) if need_pose else None
+
+        # Gesehene Zonen nur aus dem Streifen neben der Spur (beim Schild-Lesen blickt der Bot
+        # in die Zone, dort sind es andere Linien).
+        seen = []
+        if exploring:
+            seen = [(c, zone_digit_at(self.zones, pose, c.mean(axis=0)))
+                    for c in seen_zone_boxes(lines, self.side_near_m, self.side_sign())]
+        if seen_viewer:
+            self.publish_seen(img.header.stamp, seen)
 
         pallet = None
         if pallet_active or viewer:
@@ -222,7 +244,7 @@ class storage_zone_node(Node):
                                       measure_fill=not exploring or viewer)
             if pallet_active:
                 self.publish_pallet(img.header.stamp, pallet)
-        self.publish_debug(image, mask, (u0, u1), segments, lines, pose, pallet)
+        self.publish_debug(image, mask, (u0, u1), segments, lines, pose, pallet, seen)
         if not lines_active or pose is None:
             return
 
@@ -424,7 +446,25 @@ class storage_zone_node(Node):
         self.get_logger().warn('Keine Roboterpose zum Bildzeitpunkt.', throttle_duration_sec=5.0)
         return None
 
-    def publish_debug(self, image, mask, band, segments, lines, pose, pallet):
+    def publish_seen(self, stamp, seen):
+        """Je gesehene Zone ein LINE_STRIP-Marker (Ecken im Bot-Frame), Ziffer in text."""
+        out = MarkerArray()
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        out.markers.append(clear)
+        for k, (corners, digit) in enumerate(seen):
+            m = Marker()
+            m.header.frame_id = ROBOT_FRAME
+            m.header.stamp = stamp
+            m.ns, m.id, m.type, m.action = 'zones_seen', k, Marker.LINE_STRIP, Marker.ADD
+            m.points = [Point(x=float(x), y=float(y)) for x, y in list(corners) + [corners[0]]]
+            m.scale.x = 0.01
+            m.color.g, m.color.a = 0.8, 1.0
+            m.text = str(digit) if digit else '?'
+            out.markers.append(m)
+        self.pub_seen.publish(out)
+
+    def publish_debug(self, image, mask, band, segments, lines, pose, pallet, seen=()):
         if self.pub_debug.get_subscription_count() == 0:
             return
         view = image.copy()
@@ -437,7 +477,8 @@ class storage_zone_node(Node):
         for x1, y1, x2, y2 in segments:
             cv2.line(view, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2, cv2.LINE_AA)
         if pose is not None:
-            self.draw_zones(view, pose)
+            draw_model_zones(view, self.bev, zone_boxes(self.zones, pose, self.side_near_m))
+        draw_seen_zones(view, self.bev, list(seen))
         if pallet is not None:
             self.draw_pallet(view, pallet)
         cv2.putText(view, f'{self.state.name}: {len(lines)} Querlinien', (10, 30),
@@ -450,35 +491,6 @@ class storage_zone_node(Node):
         msg.format = 'jpeg'
         msg.data = array.array('B', encoded.tobytes())
         self.pub_debug.publish(msg)
-
-    def draw_zones(self, view, pose):
-        """Zonenmodell von switch_control: gemessene Linien gruen, ergaenzte orange, Ziffern."""
-        z = self.zones
-        if z is None or not z.lines:
-            return
-        pts = inverse_transform_points(
-            pose, np.array([(p.position.x, p.position.y) for p in z.lines]))
-        yaws = [yaw_from_quaternion(p.orientation) - pose[2] for p in z.lines]
-
-        def px(x, y):
-            u, v = ground_to_bev_pixels(self.bev, x, y)
-            return int(round(float(u))), int(round(float(v)))
-
-        for (x, y), yaw, measured in zip(pts, yaws, z.measured):
-            c, s = math.cos(yaw), math.sin(yaw)
-            a = px(x + self.side_near_m * c, y + self.side_near_m * s)
-            b = px(x + (self.side_near_m + ZONE_DRAW_M) * c, y + (self.side_near_m + ZONE_DRAW_M) * s)
-            cv2.line(view, a, b, (0, 220, 0) if measured else (0, 165, 255),
-                     3 if measured else 2, cv2.LINE_AA)
-        for k, digit in enumerate(z.digits):
-            if k + 1 >= len(pts):
-                break
-            x, y = (pts[k] + pts[k + 1]) / 2.0
-            yaw = yaws[k]
-            d = self.side_near_m + ZONE_LABEL_M
-            cv2.putText(view, str(digit) if digit else '?',
-                        px(x + d * math.cos(yaw), y + d * math.sin(yaw)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 220, 0), 3, cv2.LINE_AA)
 
     def draw_pallet(self, view, pallet):
         """Zonengrenzen (gelb), Kantenpunkte, Vorderkante mit Rahmen des Metallstreifens

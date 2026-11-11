@@ -1,5 +1,5 @@
 #!/bin/bash
-# Beendet Bringup und Kamera auf dem Bot.
+# Beendet Bringup, Kamera und Magnet auf dem Bot.
 # Aufruf: bash bot-down.sh
 #
 # Noetig, weil bot-up.sh die Prozesse losgeloest startet -- ein Schliessen der
@@ -15,13 +15,19 @@ ssh "$BOT_USER@$BOT_IP" "bash -s" <<'EOF'
 # Erst freundlich, dann bestimmt: der Bringup soll seine Nodes selbst abraeumen koennen.
 pkill -f robot.launch.py    2>/dev/null && echo "  Bringup beendet"
 pkill -f camera_node        2>/dev/null && echo "  Kamera beendet"
+# Magnet nur per SIGTERM: die Node setzt den Pin dann selbst auf AUS (bei -9 nicht).
+pkill -f "magnet_controll|magnet_test.py" 2>/dev/null && echo "  Magnet beendet (Pin AUS)"
 sleep 3
 pkill -9 -f robot.launch.py 2>/dev/null
 pkill -9 -f camera_node     2>/dev/null
 pkill -9 -f turtlebot3_node 2>/dev/null
+if pgrep -f "magnet_controll|magnet_test.py" >/dev/null; then
+    echo "  WARNUNG: Magnet-Node reagiert nicht auf SIGTERM -- kill -9, Magnet kann AN bleiben!"
+    pkill -9 -f "magnet_controll|magnet_test.py" 2>/dev/null
+fi
 
 echo "--- verbliebene Prozesse ---"
-pgrep -fa "camera_node|robot.launch.py|turtlebot3_node" || echo "  keine"
+pgrep -fa "camera_node|robot.launch.py|turtlebot3_node|magnet_controll|magnet_test.py" || echo "  keine"
 EOF
 
 echo ""

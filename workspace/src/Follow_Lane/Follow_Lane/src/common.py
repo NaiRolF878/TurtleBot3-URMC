@@ -311,6 +311,128 @@ def ground_to_bev_pixels(bev, xs, ys):
     return (bev['y_half'] - ys) / bev['res'] - 0.5, (bev['x_max'] - xs) / bev['res'] - 0.5
 
 
+# Zonen im Debugbild: Kasten ab side_near_m (Abstand Spur -> Zonen) so tief in die Zone.
+ZONE_BOX_DEPTH_M = 0.25
+# Gesehene Querlinien eines Bildes: naeher als das (m, entlang der Fahrtrichtung) = dieselbe Linie
+# (beide Kanten eines Klebestreifens, zerrissene Segmente).
+SEEN_LINE_MERGE_M = 0.05
+SEEN_COLOR = (0, 200, 0)        # BGR: aus dem Bild gesehene Zone
+MODEL_COLOR = (0, 140, 255)     # BGR: Zonenmodell (Umriss)
+
+
+def _line_at(center, direction, lateral):
+    """Punkt der Querlinie (Mitte, Richtung) mit seitlichem Abstand lateral (Y, Bot-Frame)."""
+    (x, y), (dx, dy) = center, direction
+    if abs(dy) < 1e-6:
+        return x, lateral
+    t = (lateral - y) / dy
+    return x + t * dx, lateral
+
+
+def seen_zone_boxes(lines, near_m, side_sign, depth_m=ZONE_BOX_DEPTH_M):
+    """Zonen, wie sie in EINEM Bild zu sehen sind: Kasten zwischen je zwei benachbarten
+    Querlinien, ab near_m neben der Spur depth_m tief. lines: ((x, y), (dx, dy)) im Bot-Frame
+    (base_footprint) zum Bildzeitpunkt. Keine Odometrie, kein Modell. side_sign: Y-Vorzeichen
+    der Zonenseite. Liste von Ecken (4, 2) in m, nach x sortiert."""
+    merged = []
+    for (x, y), (dx, dy) in sorted(lines, key=lambda l: l[0][0]):
+        n = math.hypot(dx, dy) or 1.0
+        if merged and x - merged[-1][-1][0][0] <= SEEN_LINE_MERGE_M:
+            merged[-1].append(((x, y), (dx / n, dy / n)))
+        else:
+            merged.append([((x, y), (dx / n, dy / n))])
+    mids = []
+    for group in merged:
+        cx = sum(p[0][0] for p in group) / len(group)
+        cy = sum(p[0][1] for p in group) / len(group)
+        dx = sum(p[1][0] for p in group)
+        dy = sum(p[1][1] for p in group)
+        mids.append(((cx, cy), (dx, dy)))
+    near, far = side_sign * near_m, side_sign * (near_m + depth_m)
+    boxes = []
+    for a, b in zip(mids, mids[1:]):
+        boxes.append(np.array([_line_at(*a, near), _line_at(*a, far),
+                               _line_at(*b, far), _line_at(*b, near)]))
+    return boxes
+
+
+def zone_digit_at(zones, pose, xy):
+    """Ziffer der Modellzone, in der der Punkt xy (Bot-Frame) liegt; 0 ohne Modell/Treffer.
+    Die Modelllinien liegen auf der Spur, entlang der Spurrichtung wird verglichen."""
+    if zones is None or len(zones.lines) < 2 or pose is None:
+        return 0
+    p = transform_points(pose, np.array([xy]))[0]
+    pts = np.array([(l.position.x, l.position.y) for l in zones.lines])
+    u = pts[-1] - pts[0]
+    norm = np.linalg.norm(u)
+    if norm < 1e-6:
+        return 0
+    u /= norm
+    s = (pts - pts[0]) @ u
+    sp = float((p - pts[0]) @ u)
+    for k in range(len(s) - 1):
+        if s[k] <= sp < s[k + 1]:
+            return int(zones.digits[k]) if k < len(zones.digits) else 0
+    return 0
+
+
+def zone_boxes(zones, pose, near_m, depth_m=ZONE_BOX_DEPTH_M):
+    """Zonenmodell (StorageZones, odom) als Vierecke im Bot-Frame (base_footprint).
+    Je Zone: (Ecken (4, 2) in m, Mitte (x, y), Ziffer (0 = unbekannt), beide Linien gemessen)."""
+    if zones is None or len(zones.lines) < 2 or pose is None:
+        return []
+    pts = inverse_transform_points(
+        pose, np.array([(p.position.x, p.position.y) for p in zones.lines]))
+    yaws = [yaw_from_quaternion(p.orientation) - pose[2] for p in zones.lines]
+    boxes = []
+    for k in range(len(pts) - 1):
+        corners = np.array([
+            (pts[i][0] + d * math.cos(yaws[i]), pts[i][1] + d * math.sin(yaws[i]))
+            for i, d in ((k, near_m), (k, near_m + depth_m),
+                         (k + 1, near_m + depth_m), (k + 1, near_m))])
+        digit = zones.digits[k] if k < len(zones.digits) else 0
+        measured = bool(zones.measured[k] and zones.measured[k + 1])
+        boxes.append((corners, corners.mean(axis=0), int(digit), measured))
+    return boxes
+
+
+def _bev_poly(bev, corners):
+    u, v = ground_to_bev_pixels(bev, corners[:, 0], corners[:, 1])
+    return np.column_stack([u, v]).round().astype(np.int32)
+
+
+def _label(view, bev, center, text, scale, thickness):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+    u, v = ground_to_bev_pixels(bev, center[0], center[1])
+    org = (int(round(float(u))) - tw // 2, int(round(float(v))) + th // 2)
+    cv2.putText(view, text, org, font, scale, (0, 0, 0), thickness + 3, cv2.LINE_AA)
+    cv2.putText(view, text, org, font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def draw_seen_zones(view, bev, boxes):
+    """Aus dem Bild gesehene Zonen: gruener, halbdurchsichtiger Kasten, Ziffer in der Mitte.
+    boxes: (Ecken (4, 2) m, Ziffer (0 = ?))."""
+    if not boxes:
+        return
+    overlay = view.copy()
+    polys = [_bev_poly(bev, corners) for corners, _ in boxes]
+    for poly in polys:
+        cv2.fillPoly(overlay, [poly], SEEN_COLOR)
+    cv2.addWeighted(overlay, 0.3, view, 0.7, 0, dst=view)
+    for poly, (corners, digit) in zip(polys, boxes):
+        cv2.polylines(view, [poly], True, SEEN_COLOR, 2, cv2.LINE_AA)
+        _label(view, bev, corners.mean(axis=0), str(digit) if digit else '?', 1.4, 3)
+
+
+def draw_model_zones(view, bev, boxes):
+    """Zonenmodell nur als duenner Umriss (orange), kleine Ziffer -- zum Vergleich mit den
+    gesehenen Zonen. boxes aus zone_boxes()."""
+    for corners, center, digit, _ in boxes:
+        cv2.polylines(view, [_bev_poly(bev, corners)], True, MODEL_COLOR, 1, cv2.LINE_AA)
+        _label(view, bev, center, str(digit) if digit else '?', 0.5, 1)
+
+
 def stop_on_signals():
     """threading.Event, das SIGINT und SIGTERM setzen.
 

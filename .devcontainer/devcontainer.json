@@ -3,6 +3,11 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
+  // Node.js fuer die Hooks des Claude-Code-Plugins ponytail (.claude/settings.json).
+  // Nicht per apt: Ubuntu 22.04 liefert nur Node 12.
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "lts" }
+  },
   "runArgs": [
     "--network=host",
     "--privileged",
