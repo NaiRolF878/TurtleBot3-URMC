@@ -71,8 +71,8 @@ trap cleanup EXIT
 
 echo "Pipeline startet im Hintergrund (Log der Knoten: logs/$(basename "$NODE_LOG"))."
 echo ""
-echo "Tunnel von Hand: im Fenster rqt_image_view einmal \"Publish click location\""
-echo "anhaken, dann im Debugbild auf TUNNEL STARTEN klicken."
+echo "Tunnel von Hand: in einem der beiden rqt_image_view-Fenster (Debugbild oder Nav2-Draufsicht)"
+echo "einmal \"Publish click location\" anhaken, dann auf TUNNEL STARTEN klicken."
 echo "Das zweite Bildfenster zeigt die Nav2-Draufsicht mit Statuszeile (/nav2/view)."
 echo ""
 echo "Not-Aus: LEERTASTE = Fahren/Stopp, q = beenden."

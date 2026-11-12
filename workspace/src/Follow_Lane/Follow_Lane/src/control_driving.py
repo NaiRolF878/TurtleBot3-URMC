@@ -101,8 +101,11 @@ MANEUVER_WAYPOINT_TOL = 0.03
 # Liegt der naechste Pfadpunkt weiter als das neben der Fahrtrichtung, erst auf der Stelle drehen.
 MANEUVER_ROTATE_FIRST_DEG = 30.0
 # Sicherungen (Lauf 11.11.: Bot drehte sich endlos, die Odometrie meldete die Drehung nicht):
-# aendert sich die Pose so lange (s) nicht, ist sie veraltet -> anhalten.
+# aendert sich die Pose so lange (s) nicht, ist sie veraltet -> anhalten; fehlt sie so lange
+# (s) waehrend einer Grundbewegung, gilt diese als abgebrochen ("Pose veraltet"), damit der
+# Auftraggeber sofort reagiert statt auf die Zeitgrenze von switch_control zu warten.
 MANEUVER_POSE_STALE_S = 0.5
+MANEUVER_POSE_FAIL_S = 1.0
 # Drehung abbrechen, wenn der Bot so viel (Grad) mehr gedreht haette als geplant
 # (aufsummierte Drehbefehle, unabhaengig von der Odometrie).
 MANEUVER_ROTATE_EXTRA_DEG = 90.0
@@ -125,8 +128,8 @@ class control_driving(Node):
 
     Grundbewegung (nur in MANEUVER_MODES): switch_control sendet sie zyklisch auf
     /control/maneuver. Eine neue id startet sie ab der aktuellen Pose; solange sie laeuft,
-    zaehlt /nav2/cmd_vel nicht. Ist sie fertig oder abgebrochen (Sicherung, Waechter, kein
-    freier Ausweg), meldet dieser Node das auf /control/maneuver_status, sendet Null und folgt
+    zaehlt /nav2/cmd_vel nicht. Ist sie fertig oder abgebrochen (Sicherung, Waechter, Pose
+    veraltet, kein freier Ausweg), meldet dieser Node das auf /control/maneuver_status, sendet Null und folgt
     wieder Nav2. Ein Moduswechsel verwirft die laufende Bewegung. Freifahren (UNWEDGE) waehlt
     beim Start die freieste kleine Bewegung (robot_geometry.choose_unwedge) und faehrt sie.
     """
@@ -199,6 +202,7 @@ class control_driving(Node):
         self._turn_time = None
         self._pose_stamp = None         # letzter Zeitstempel der odom-TF ...
         self._pose_changed = None       # ... und wann (monotonic) er sich zuletzt geaendert hat
+        self._pose_lost_since = None    # Grundbewegung ohne gueltige Pose seit (monotonic)
         self._costmap = None            # (Zellen (H, W), Aufloesung, Ursprung, Empfang)
         self._guard_active = None       # zuletzt auf /control/guard gesendet
         self._guard_since = None        # Waechter haelt seit (monotonic)
@@ -295,6 +299,7 @@ class control_driving(Node):
         self._waypoint = 0
         self._turned = 0.0
         self._turn_time = None
+        self._pose_lost_since = None
 
     def cb_watchdog(self):
         read_params(self, self._param_names)
@@ -384,7 +389,14 @@ class control_driving(Node):
         pose = self._robot_pose()
         if pose is None:
             self._publish_stop()
+            now = time.monotonic()
+            if self._pose_lost_since is None:
+                self._pose_lost_since = now
+            elif now - self._pose_lost_since >= MANEUVER_POSE_FAIL_S:
+                self.get_logger().warn(f'Grundbewegung {m.id} abgebrochen: Pose veraltet.')
+                self._finish_maneuver(m, False, 'Pose veraltet (Odometrie?)')
             return
+        self._pose_lost_since = None
         if m.type == Maneuver.UNWEDGE:
             m = self._start_unwedge(m, pose)
             if m is None:

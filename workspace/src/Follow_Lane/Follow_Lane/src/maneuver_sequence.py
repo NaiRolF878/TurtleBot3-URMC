@@ -30,7 +30,7 @@ class ManeuverSequence:
     vor oder zurueck), auf der Stelle in Richtung Ende drehen, langsam geradeaus mit gehaltenem
     Kurs bis zum Ende. UNWEDGE: eine Freifahr-Bewegung, die control_driving selbst waehlt.
 
-    Meldet control_driving einen Abbruch (Waechter, Sicherung, kein freier Ausweg), endet der
+    Meldet control_driving einen Abbruch (Waechter, Sicherung, Pose veraltet, kein Ausweg), endet der
     Ablauf mit diesem Grund. Dauert ein Schritt laenger als STEP_TIMEOUT_S, haelt eine leere
     Grundbewegung den Bot an. Verlaesst der Bot die SEQUENCE_MODES, verwirft control_driving die
     Bewegung selbst."""

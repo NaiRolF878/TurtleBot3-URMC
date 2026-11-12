@@ -1,8 +1,9 @@
 """Draufsicht fuer den Nav2-Zweig: was Nav2 sieht und plant, als Bild.
 
 Ein:  /local_costmap/costmap bzw. im Tunnel /global_costmap/costmap, Footprint, Pfade,
-      Eingangssperre, /scan_corrected, /detect/lane_mask, /control/mode, /nav2/status, /rosout
-Aus:  /nav2/view (sensor_msgs/Image, z.B. in rqt_image_view)
+      Eingangssperre, /scan_corrected, /detect/lane_mask, /control/mode, /nav2/status, /rosout,
+      Klicks aus rqt_image_view (/nav2/view_mouse_left)
+Aus:  /nav2/view (sensor_msgs/Image, z.B. in rqt_image_view), /control/tunnel_request (Bool, Button)
 """
 import math
 import os
@@ -13,19 +14,20 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PolygonStamped
+from geometry_msgs.msg import Point, PolygonStamped
 from nav_msgs.msg import OccupancyGrid, Path
 from rcl_interfaces.msg import Log
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import String, UInt8
+from std_msgs.msg import Bool, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from follow_lane_msg.msg import LaneMask
 from Follow_Lane.src import bev_geometry
+from Follow_Lane.src.debug_view import draw_tunnel_button, tunnel_request
 from Follow_Lane.src.common import (
     ControlType, bev_pixels_to_ground, control_mode_from_msg, run_node,
     yaw_from_quaternion)
@@ -68,6 +70,11 @@ LANE_FRESH_S = 1.0
 
 HEADER_H = 52
 FOOTER_H = 26
+# Leiste ganz unten mit dem Tunnel-Button (wie im Debugbild), Rand um den Button (px).
+BUTTON_BAR_H = 48
+BUTTON_MARGIN = 6
+# Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
+CLICK_TOPIC = '/nav2/view_mouse_left'
 
 # Wie lange eine Warnung aus /rosout rot angezeigt wird, danach grau.
 REASON_FRESH_S = 10.0
@@ -107,6 +114,9 @@ class nav2_view(Node):
     FollowPath-Ergebnis meldet in Humble nur "abgebrochen", den Grund schreibt
     controller_server nur ins Log.
 
+    Unten der Tunnel-Button wie im Debugbild: im rqt_image_view-Fenster "Publish click
+    location" anhaken, dann Klick = Start bzw. im Tunnel Abbruch (/control/tunnel_request).
+
     Feste Ausrichtung: odom-X nach rechts, odom-Y nach oben. Die Karte liegt ohnehin
     in odom; so stehen Waende still und nur der Bot bewegt sich.
     """
@@ -133,11 +143,13 @@ class nav2_view(Node):
         self.create_subscription(String, '/nav2/status', self.cb_nav2_status, 1)
         self.create_subscription(Log, '/rosout', self.cb_rosout, 50)
         self.create_subscription(LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
+        self.create_subscription(Point, CLICK_TOPIC, self.cb_click, 1)
 
         # --- Publisher ---
         # Image statt CompressedImage: rqt_image_view bricht sonst mit "incompatible type" ab.
         # Beide laufen auf dem Laptop, das Bild geht nicht uebers Netz.
         self.pub_view = self.create_publisher(Image, '/nav2/view', 1)
+        self.pub_tunnel_request = self.create_publisher(Bool, '/control/tunnel_request', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(VIEW_PERIOD_S, self.cb_timer)
@@ -156,6 +168,7 @@ class nav2_view(Node):
         self.nav2_status = ''
         self.reason = None          # (Zeit, Knoten, Text)
         self.lane = None            # (Empfangszeit, gelb (N,2), weiss (N,2)) in base_footprint [m]
+        self._tunnel_button = None  # (x0, y0, x1, y1) im zuletzt gesendeten Bild
         try:
             self._bev = bev_geometry.load_bev_spec(
                 os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
@@ -201,6 +214,13 @@ class nav2_view(Node):
 
     def cb_tunnel_source(self, msg):
         self.tunnel_source = msg.data
+
+    def cb_click(self, point):
+        req = tunnel_request(self._tunnel_button, point, self.control_mode)
+        if req is None:
+            return
+        self.pub_tunnel_request.publish(req)
+        self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
 
     def cb_nav2_status(self, msg):
         self.nav2_status = msg.data
@@ -419,7 +439,13 @@ class nav2_view(Node):
             x += 22 + cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0]
             if x > w - 40:
                 break
-        return np.vstack([header, body, footer, legend])
+        buttons = np.full((BUTTON_BAR_H, w, 3), (40, 40, 40), np.uint8)
+        if self.control_mode is not None:
+            rect = (BUTTON_MARGIN, BUTTON_MARGIN, w - BUTTON_MARGIN, BUTTON_BAR_H - BUTTON_MARGIN)
+            draw_tunnel_button(buttons, rect, self.control_mode)
+            top = HEADER_H + body.shape[0] + 2 * FOOTER_H
+            self._tunnel_button = (rect[0], top + rect[1], rect[2], top + rect[3])
+        return np.vstack([header, body, footer, legend, buttons])
 
     @staticmethod
     def fit(text, width, scale=0.55):

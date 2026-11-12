@@ -54,6 +54,34 @@ MODE_COLOR = {
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
 
+
+def draw_tunnel_button(img, rect, control_mode):
+    """Button zum Starten/Abbrechen des Tunnelmodus an rect (x0, y0, x1, y1). Zeigt nur den
+    Modus, springt nach dem automatischen Austritt also von selbst zurueck. Auch in nav2_view."""
+    x0, y0, x1, y1 = rect
+    in_tunnel = control_mode in TUNNEL_MODES
+    fill = (60, 60, 200) if in_tunnel else MODE_COLOR[ControlType.Tunnel]
+    ink = (255, 255, 255) if in_tunnel else (0, 0, 0)
+    text = 'TUNNEL ABBRECHEN' if in_tunnel else 'TUNNEL STARTEN'
+
+    cv2.rectangle(img, (x0, y0), (x1, y1), fill, -1)
+    cv2.rectangle(img, (x0, y0), (x1, y1), (230, 230, 230), 1)
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+    cv2.putText(img, text, (x0 + (x1 - x0 - tw) // 2, y0 + (y1 - y0 + th) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, ink, 2, cv2.LINE_AA)
+
+
+def tunnel_request(rect, point, control_mode):
+    """Bool fuer /control/tunnel_request, wenn der Klick point (Bildpixel aus rqt_image_view)
+    in rect liegt, sonst None. Ausdruecklich Start oder Abbruch, kein Umschalten: ein doppelt
+    gezaehlter Klick darf den Tunnel nicht sofort wieder beenden."""
+    if rect is None or control_mode is None:
+        return None
+    x0, y0, x1, y1 = rect
+    if not (x0 <= point.x <= x1 and y0 <= point.y <= y1):
+        return None
+    return Bool(data=control_mode not in TUNNEL_MODES)
+
 # Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
 CLICK_TOPIC = '/lokal/debug_view_mouse_left'
 
@@ -155,14 +183,9 @@ class debug_view(Node):
         self.lane_obstacle_stamp = self.get_clock().now()
 
     def cb_click(self, point):
-        if self._tunnel_button is None or self.control_mode is None:
+        req = tunnel_request(self._tunnel_button, point, self.control_mode)
+        if req is None:
             return
-        x0, y0, x1, y1 = self._tunnel_button
-        if not (x0 <= point.x <= x1 and y0 <= point.y <= y1):
-            return
-        # Ausdruecklich Start oder Abbruch, kein Umschalten: ein doppelt gezaehlter
-        # Klick darf den Tunnel nicht sofort wieder beenden.
-        req = Bool(data=self.control_mode not in TUNNEL_MODES)
         self.pub_tunnel_request.publish(req)
         self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
 
@@ -320,23 +343,8 @@ class debug_view(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
         self.draw_lane_obstacle_status(panel)
-        self.draw_tunnel_button(panel)
+        draw_tunnel_button(panel, TUNNEL_BUTTON, self.control_mode)
         return panel
-
-    def draw_tunnel_button(self, panel):
-        """Button zum Starten/Abbrechen des Tunnelmodus. Zeigt nur den Modus, springt
-        nach dem automatischen Austritt also von selbst zurueck."""
-        x0, y0, x1, y1 = TUNNEL_BUTTON
-        in_tunnel = self.control_mode in TUNNEL_MODES
-        fill = (60, 60, 200) if in_tunnel else MODE_COLOR[ControlType.Tunnel]
-        ink = (255, 255, 255) if in_tunnel else (0, 0, 0)
-        text = 'TUNNEL ABBRECHEN' if in_tunnel else 'TUNNEL STARTEN'
-
-        cv2.rectangle(panel, (x0, y0), (x1, y1), fill, -1)
-        cv2.rectangle(panel, (x0, y0), (x1, y1), (230, 230, 230), 1)
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-        cv2.putText(panel, text, (x0 + (x1 - x0 - tw) // 2, y0 + (y1 - y0 + th) // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, ink, 2, cv2.LINE_AA)
 
     def draw_lane_obstacle_status(self, panel):
         cv2.putText(panel, 'Spur -> Costmap:', (8, 215),

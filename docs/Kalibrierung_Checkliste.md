@@ -141,9 +141,9 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
 
 ## Phase 6 — Tunnel (Enclosure)
 
-- [ ] In `rqt_image_view` (Debugbild) einmal **„Publish click location“**
+- [ ] In `rqt_image_view` (Debugbild oder Nav2-Draufsicht) einmal **„Publish click location“**
       anhaken.
-- [ ] Bot auf die Spur vor die Öffnung stellen, im Debugbild auf **TUNNEL STARTEN**
+- [ ] Bot auf die Spur vor die Öffnung stellen, im Debugbild oder in der Draufsicht auf **TUNNEL STARTEN**
       klicken. Es muss `TunnelEntry (manuell)` stehen, der Bot folgt mit
       Kamera und PID der Spur auf die Öffnung zu.
 - [ ] Enden beide Linien, wechselt es auf `Tunnel` und der Bot hält: statt des

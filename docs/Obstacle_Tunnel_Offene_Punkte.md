@@ -62,8 +62,8 @@ Zurück: Wert in `nav2_params.yaml` auf 0,05.
 
 ### 5. Starten
 
-- Von Hand: im `rqt_image_view` mit `/lokal/debug_view` „Publish click location“ anhaken, Knopf
-  **TUNNEL STARTEN** im Bild klicken.
+- Von Hand: im `rqt_image_view` mit `/lokal/debug_view` oder `/nav2/view` „Publish click location“
+  anhaken, Knopf **TUNNEL STARTEN** im Bild klicken.
 - Per Befehl: `ros2 topic pub --once /control/tunnel_request std_msgs/msg/Bool "{data: true}"`
 - Automatisch: Schild-Wert 6 auf `/detect/sign`.
 - Kontrolle: `ros2 topic echo /control/mode` → 7 (Einfahrt), dann 6. Not-Aus muss auf FAHREN stehen.
