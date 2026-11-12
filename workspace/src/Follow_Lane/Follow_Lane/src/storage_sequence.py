@@ -467,7 +467,10 @@ class StorageSequence:
             self._gripped = False
             self._set_magnet(False)
         elif state == S.VERLASSEN:
-            self._queue = [self._path_to(self._target_zone.track_xy, reverse=True)]
+            self._queue = [self._path_to(self._target_zone.track_xy, reverse=True),
+                           self._rotate(self._track_yaw)]
+        elif state == S.FERTIG:
+            mode = ControlType.Lane
         elif state == S.ZURUECK_ZUM_START:
             self._queue = [self._path_to(self._start_xy, reverse=True),
                            self._rotate(self._track_yaw)]

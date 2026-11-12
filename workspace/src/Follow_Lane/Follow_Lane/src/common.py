@@ -72,8 +72,8 @@ class StorageState(Enum):
     TRANSPORT = 12           # auf der Spur vor die Zielzone, zur Zone drehen
     ABLAGE_ANFAHREN = 13     # bis zur Zonenmitte
     ABLEGEN = 14             # Magnet aus, warten
-    VERLASSEN = 15           # rueckwaerts auf die Spur
-    FERTIG = 16
+    VERLASSEN = 15           # rueckwaerts auf die Spur, in Fahrtrichtung drehen
+    FERTIG = 16              # Follow Lane
     FEHLER = 17
     AUSRICHTEN = 18          # rechtwinklig vor die Palette (Vor-Andock-Pose)
     ZURUECK_ZUM_START = 19   # Zonen falsch zugeordnet: rueckwaerts zum Start, neu erkunden

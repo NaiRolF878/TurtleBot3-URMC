@@ -105,7 +105,8 @@ Das Konzept kommt ohne feste Streckenwerte aus:
    Unterschied verschoben. Palettenmasse braucht es dafuer nicht.
    Magnet aus, warten: „Palette abgelegt“. Die Ausrichtung der Palette entspricht der beim
    Aufnehmen, weil der Bot wieder frontal in die Zone schaut.
-9. **Verlassen**: rueckwaerts auf die Spur, anhalten.
+9. **Verlassen**: rueckwaerts auf die Spur, in Fahrtrichtung drehen, weiter mit Follow Lane
+   (`Lane`, unabhaengig von `initial_mode`).
 
 Die Rueckmeldungen stehen im Log und im Debugbild (`/control/storage_info`).
 
@@ -219,7 +220,7 @@ stateDiagram-v2
     state "ABLEGEN (Stop, Magnet aus)" as ABLEGEN
     state "VERLASSEN (Maneuver)" as VERLASSEN
     state "ZURUECK_ZUM_START (Maneuver)" as ZURUECK_ZUM_START
-    state "FERTIG (Stop)" as FERTIG
+    state "FERTIG (Lane)" as FERTIG
     state "FEHLER (Stop, Magnet aus -- an, wenn Palette gegriffen)" as FEHLER
 
     ERKUNDEN --> ZUR_ZONE_DREHEN : Zonenmitte erreicht oder Rueckfall
@@ -244,7 +245,7 @@ stateDiagram-v2
     TRANSPORT --> ABLAGE_ANFAHREN : vor der Zielzone, zur Zone gedreht
     ABLAGE_ANFAHREN --> ABLEGEN : Zonenmitte erreicht
     ABLEGEN --> VERLASSEN : Wartezeit vorbei
-    VERLASSEN --> FERTIG : auf der Spur
+    VERLASSEN --> FERTIG : auf der Spur, in Fahrtrichtung
 
     ERKUNDEN --> FEHLER : Zone nicht gefunden
     NEU_ANSETZEN --> FEHLER : dritter Fehlversuch
