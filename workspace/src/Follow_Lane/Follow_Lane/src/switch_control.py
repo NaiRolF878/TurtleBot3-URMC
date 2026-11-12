@@ -1,10 +1,10 @@
 """Zustandsmaschine fuer den Fahrmodus, einziger Publisher von /control/mode.
 
-Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request,
+Ein:  /scan_corrected, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request,
       /detect/lines_lost, /tunnel/outside
 Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String)
-Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier. Die Durchfahrt einer
-Engstelle im Tunnel (Grundbewegungen) steuert TunnelPassage (tunnel_passage.py).
+Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier. Ablaeufe aus
+Grundbewegungen (Engstelle, Freifahren) steuert ManeuverSequence (maneuver_sequence.py).
 """
 import math
 import time
@@ -23,7 +23,7 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 from Follow_Lane.src.common import (
     ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, require_params,
     run_node, scan_points, transform_points)
-from Follow_Lane.src.tunnel_passage import TunnelPassage
+from Follow_Lane.src.maneuver_sequence import SEQUENCE_MODES, ManeuverSequence
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als MODE_TIMEOUT nichts hoert.
@@ -87,8 +87,9 @@ class switch_control(Node):
     Tunnel -> Modus von vor dem Tunnel, sobald tunnel_explorer_node meldet, dass der Bot
     ausserhalb der Wand-Huelle ist. Beides jederzeit von Hand abbrechbar (False).
 
-    Im Tunnel faehrt TunnelPassage auf Anfrage von tunnel_explorer_node eine Engstelle mit
-    Grundbewegungen; der Modus bleibt Tunnel, damit die Kamera aus bleibt.
+    In Obstacle und Tunnel faehrt ManeuverSequence auf Anfrage (tunnel_explorer_node bzw.
+    nav2_goal_publisher) Grundbewegungen: Engstelle ausgerichtet durchfahren, freifahren. Der
+    Modus bleibt dabei, im Tunnel also die Kamera aus.
     """
 
     def __init__(self):
@@ -111,7 +112,7 @@ class switch_control(Node):
 
         # --- Subscriber ---
         self.sub_scan = self.create_subscription(
-            LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
+            LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
         self.sub_lane_obstacles = self.create_subscription(
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         # Noch ohne Publisher: der Schild-Detektor ist nicht gebaut.
@@ -147,7 +148,7 @@ class switch_control(Node):
         self._lane_frame = None
         self._lane_time = None
         self._scanner_poses = {}          # (Ziel-Frame, Scanner-Frame) -> (x, y, yaw)
-        self.passage = TunnelPassage(self)
+        self.maneuvers = ManeuverSequence(self)
 
         self.get_logger().info('Started switch_control Node.')
 
@@ -217,8 +218,8 @@ class switch_control(Node):
         if new_mode == self.control_mode:
             return
         self.get_logger().info(f'{reason} -> {self.control_mode.name} => {new_mode.name}.')
-        if self.control_mode == ControlType.Tunnel:
-            self.passage.cancel()
+        if self.control_mode in SEQUENCE_MODES and new_mode not in SEQUENCE_MODES:
+            self.maneuvers.cancel()
         self.control_mode = new_mode
         # Entprell-Zeitstempel gelten nur fuer den Modus, in dem sie gesetzt wurden.
         self._obstacle_clear_since = None

@@ -1,6 +1,6 @@
 """Spurgedaechtnis: Spurlinien als virtuelle Waende fuer Nav2, Spurmitte als Pfad.
 
-Ein:  /detect/lane_mask (LaneMask, BEV-Pixel), /lokal/bev_view (Sichtmaske), /scan,
+Ein:  /detect/lane_mask (LaneMask, BEV-Pixel), /lokal/bev_view (Sichtmaske), /scan_corrected,
       /control/mode, /control/clear_maps (Empty, Taste L im Not-Aus)
 Aus:  /detect/lane_obstacles (PointCloud2 aller gemerkten Linienzellen, fuer die
       lane_layer der Costmaps und den Linienfilter von switch_control),
@@ -410,7 +410,7 @@ class lane_costmap_node(Node):
         self.sub_bev_view = self.create_subscription(
             Image, '/lokal/bev_view', self.cb_bev_view, latched)
         self.sub_scan = self.create_subscription(
-            LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
+            LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
 
         # --- Publisher ---
         self.pub_lane_obstacles = self.create_publisher(

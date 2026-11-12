@@ -120,10 +120,10 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
       (z. B. „faehrt: Bahnplaner (Spurmitte)“ oder „kein Weg gefunden“), und
       den letzten Abbruchgrund von `controller_server`. Rot heißt jünger als
       10 s. Der cyan Pfad muss um das Hindernis herum zwischen den Linien
-      liegen; im Lane-Modus ist kein Pfad zu sehen. Er bleibt stabil und wechselt nur,
-      wenn etwas ihn blockiert, er fast abgefahren ist oder der Regler abbricht.
+      liegen; im Lane-Modus ist kein Pfad zu sehen. Er wird jede Sekunde neu geplant,
+      wechselt aber nur bei gleicher Richtung oder wenn der alte blockiert ist.
 - [ ] Im Debugbild muss `Spur -> Costmap` eine Punktzahl in Grün zeigen. Steht
-      dort `still`, kommt nichts an. Dann die Ursache suchen und nicht an MPPI
+      dort `still`, kommt nichts an. Dann die Ursache suchen und nicht an RPP
       drehen.
 - [ ] Weicht er falsch oder gar nicht aus, in dieser Reihenfolge prüfen:
       1. Liegen die Spurwände auf den echten Linien und bleiben sie beim
@@ -131,10 +131,11 @@ Bot und Hindernis liegt. Zurück zu Lane geht es, wenn 1 s lang nichts näher al
       2. Steht in der Statuszeile „Bahnplaner (Spurmitte)“? Bei „geradeaus“
          fehlt die Spurmitte, bei „kein Weg gefunden“ sperren Linien oder
          Hindernisse den Korridor für NavFn (Kreis mit 0,09 m Radius plus Padding).
-      3. Meldet die Statuszeile, dass die Regelschleife zu langsam ist?
-         Die Prüfung mit dem echten Umriss (`consider_footprint`) kostet
-         Rechenzeit.
-      4. Erst dann MPPI-Gewichte (`CostCritic` hoch, `PathAlignCritic` runter).
+      3. Meldet die Statuszeile „Waechter“ oder „detected collision ahead“?
+         Dann stößt der Umriss an: Abstand der Hindernisse und den LiDAR-Fehler
+         (`Scan_Correct.yaml`) prüfen.
+      4. Meldet die Statuszeile, dass die Regelschleife zu langsam ist?
+         RPP-Kollisionsprüfung und Wächter kosten Rechenzeit.
 
 ---
 

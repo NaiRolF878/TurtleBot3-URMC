@@ -30,7 +30,7 @@ class ControlType(Enum):
     Obstacle = 2
     Stop = 3            # noch ohne Ausloeser
     Intersection = 4    # noch ohne Ausloeser
-    Align = 5           # noch ohne Ausloeser
+    Align = 5           # nach Obstacle auf die Spurrichtung drehen
     Tunnel = 6          # im Tunnel: Kamera verboten (Reglement)
     TunnelEntry = 7     # Einfahrt bis kurz vor die Oeffnung, Kamera noch erlaubt
 

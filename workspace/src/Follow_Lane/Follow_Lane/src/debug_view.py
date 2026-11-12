@@ -61,9 +61,10 @@ CLICK_TOPIC = '/lokal/debug_view_mouse_left'
 # anderen Modi sendet er Null.
 MODE_SOURCE = {
     ControlType.Lane:     'PID',
-    ControlType.Obstacle: 'Nav2/MPPI',
+    ControlType.Obstacle: 'Nav2/RPP',
+    ControlType.Align:    'Ausrichten',
     ControlType.TunnelEntry: 'PID',
-    ControlType.Tunnel:   'Nav2/MPPI',
+    ControlType.Tunnel:   'Nav2/RPP',
 }
 
 

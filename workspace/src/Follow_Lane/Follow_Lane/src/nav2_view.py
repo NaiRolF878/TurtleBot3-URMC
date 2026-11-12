@@ -1,7 +1,7 @@
 """Draufsicht fuer den Nav2-Zweig: was Nav2 sieht und plant, als Bild.
 
 Ein:  /local_costmap/costmap bzw. im Tunnel /global_costmap/costmap, Footprint, Pfade,
-      Eingangssperre, /scan, /detect/lane_mask, /control/mode, /nav2/status, /rosout
+      Eingangssperre, /scan_corrected, /detect/lane_mask, /control/mode, /nav2/status, /rosout
 Aus:  /nav2/view (sensor_msgs/Image, z.B. in rqt_image_view)
 """
 import math
@@ -50,8 +50,8 @@ ROBOT_FRAME = 'base_footprint'
 VIEW_PERIOD_S = 0.2
 # Groesse der laengeren Kartenkante im Bild (px).
 CANVAS_SIZE_PX = 600
-# Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot, 1.2 m je Richtung. Deckt die
-# MPPI-Vorausschau (~1 m) mit Rand. Zentriert, nicht in Fahrtrichtung verschoben, sonst springt
+# Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot, 1.2 m je Richtung. Deckt das Planziel
+# im Obstacle-Modus (~1 m) mit Rand. Zentriert, nicht in Fahrtrichtung verschoben, sonst springt
 # das Bild bei jedem Lenkausschlag.
 LOCAL_VIEW_SIZE_M = 2.4
 # Im Tunnel: nur die schon gesehene Flaeche plus dieser Rand, damit das Bild anfangs gross ist
@@ -60,7 +60,8 @@ TUNNEL_VIEW_MARGIN_M = 0.3
 # Nur Warnungen dieser Knoten zaehlen als Abbruchgrund. nav2_goal_publisher fehlt: was er tut,
 # kommt ueber /nav2/status.
 REASON_NODES = ('controller_server', 'planner_server', 'local_costmap', 'global_costmap',
-                'tunnel_explorer_node', 'lane_costmap_node', 'keepout_zone_node')
+                'tunnel_explorer_node', 'lane_costmap_node', 'keepout_zone_node',
+                'control_driving', 'switch_control')
 
 # Spurlinien aelter als das werden nicht mehr gezeichnet.
 LANE_FRESH_S = 1.0
@@ -126,7 +127,7 @@ class nav2_view(Node):
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(PointCloud2, '/detect/tunnel_entrance_obstacle',
                                  self.cb_entrance, 1)
-        self.create_subscription(LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
+        self.create_subscription(LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
         self.create_subscription(UInt8, '/control/mode', self.cb_control_mode, 1)
         self.create_subscription(String, '/control/tunnel_source', self.cb_tunnel_source, 1)
         self.create_subscription(String, '/nav2/status', self.cb_nav2_status, 1)

@@ -12,6 +12,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FollowLaneDebug.msg"
   "msg/LaneMask.msg"
   "msg/Maneuver.msg"
+  "msg/ManeuverRequest.msg"
+  "msg/ManeuverStatus.msg"
   DEPENDENCIES sensor_msgs std_msgs geometry_msgs nav_msgs
 )
 

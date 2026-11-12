@@ -56,7 +56,7 @@ def generate_launch_description():
         # Draufsicht: Karte, Bot, Pfad, Statuszeile mit Abbruchgrund (/nav2/view)
         Node(package='Follow_Lane', executable='nav2_view', name='nav2_view'),
 
-        # Local Costmap + MPPI. Sendet nicht direkt an den Bot: control_driving reicht
+        # Local Costmap + RPP. Sendet nicht direkt an den Bot: control_driving reicht
         # /nav2/cmd_vel nur in Obstacle und Tunnel weiter.
         Node(
             package='nav2_controller', executable='controller_server', name='controller_server',

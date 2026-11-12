@@ -49,6 +49,7 @@ setup(
             'nav2_view            = Follow_Lane.src.nav2_view:main',
             'notaus               = Follow_Lane.src.notaus:main',
             'odom_filter          = Follow_Lane.src.odom_filter:main',
+            'scan_correct         = Follow_Lane.src.scan_correct:main',
             'switch_control       = Follow_Lane.src.switch_control:main',
             'tunnel_explorer_node = Follow_Lane.src.tunnel_explorer_node:main',
         ],

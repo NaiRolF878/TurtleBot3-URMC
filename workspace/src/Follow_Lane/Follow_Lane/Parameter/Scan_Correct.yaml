@@ -1,0 +1,5 @@
+/scan_correct:
+  ros__parameters:
+    # So viel (m) misst der LiDAR zu kurz; wird auf jede Entfernung addiert. Messen: Brett in
+    # bekanntem Abstand vor, neben und hinter den Bot, mit /scan vergleichen.
+    range_offset_m: 0.0

@@ -1,39 +1,55 @@
 """Einzige Quelle fuer Fahrbefehle: waehlt je nach /control/mode den Regler.
 
 Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist),
-      /control/maneuver (Maneuver), TF odom -> base_footprint
+      /control/maneuver (Maneuver), /local_costmap/costmap (Waechter), TF odom -> base_footprint
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel,
-      /control/maneuver_status (UInt32, id der zuletzt beendeten Grundbewegung)
+      /control/maneuver_status (ManeuverStatus, zuletzt beendete Grundbewegung),
+      /control/guard (Bool, latched: Waechter haelt gerade an)
 Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel.
-Tunnel mit laufender Grundbewegung in odom (Durchfahrt einer Engstelle): nur diese.
+Obstacle/Tunnel mit laufender Grundbewegung in odom (Engstelle, Freifahren): nur diese.
 Alles ausser dem PID wird auf die Radgrenze skaliert, der PID begrenzt selbst.
 Align: auf der Stelle zum Kurs /control/align_yaw (switch_control), Ist-Kurs aus
 /odom_filtered.
+Waechter (Obstacle, Tunnel, Align): jeder Befehl wird GUARD_HORIZON_S voraus mit dem Umriss
+gegen die local_costmap geprueft; stoesst er an, geht Null hinaus.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 """
 import math
 import time
 
+import numpy as np
+
 import rclpy
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from std_msgs.msg import Float64, UInt8, UInt32
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, Float64, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
-from follow_lane_msg.msg import Maneuver
+from follow_lane_msg.msg import Maneuver, ManeuverStatus
 from Follow_Lane.src.common import (
     ControlType, control_mode_from_msg, frange, pose2d_from_transform, read_params,
     require_params, run_node, wrap_angle, yaw_from_quaternion)
+from Follow_Lane.src.robot_geometry import choose_unwedge, motion_collides, simulate
 
 # TunnelEntry mit PID: auf der 20-cm-Spur vor dem Tunnel passt der Bot fuer Nav2
 # nicht zwischen die Spurwaende.
 PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
 # Hier hat eine laufende Grundbewegung Vorrang vor Nav2; der Modus bleibt (im Tunnel keine Kamera).
-MANEUVER_MODES = (ControlType.Tunnel,)
+MANEUVER_MODES = (ControlType.Obstacle, ControlType.Tunnel)
+
+# Waechter: so weit (s) voraus wird jeder Befehl geprueft (wie HKA). Nur in diesen Modi: im Lane-
+# Modus hielte er an Dingen hinter der Spurlinie. Eine Karte aelter als GUARD_MAP_MAX_AGE_S
+# taugt nicht, dann Null. Haelt er eine Grundbewegung GUARD_MANEUVER_FAIL_S lang an, gilt sie
+# als abgebrochen.
+GUARD_MODES = (ControlType.Obstacle, ControlType.Tunnel, ControlType.Align)
+GUARD_HORIZON_S = 0.6
+GUARD_MAP_MAX_AGE_S = 1.0
+GUARD_MANEUVER_FAIL_S = 1.0
 
 # Align (nach Obstacle): auf der Stelle zum Zielkurs von switch_control (/control/align_yaw,
 # odom) drehen, Ist-Kurs aus /odom_filtered. P-Regler, mindestens ALIGN_MIN_VEL (sonst
@@ -59,7 +75,7 @@ INTEGRAL_LIMIT = 1.0
 # Begrenzung der PID-Lenkung (rad/s); der Burger schafft ~2,84 rad/s.
 MAX_ANGULAR_VEL = 2.0
 # Hoechstgeschwindigkeit des Burger; das aeussere Rad (v + |omega| * WHEEL_SEPARATION / 2)
-# bleibt darunter. Gleicher Wert wie vx_max in nav2_params.yaml.
+# bleibt darunter.
 MAX_WHEEL_VEL = 0.22
 WHEEL_SEPARATION = 0.160
 
@@ -109,9 +125,10 @@ class control_driving(Node):
 
     Grundbewegung (nur in MANEUVER_MODES): switch_control sendet sie zyklisch auf
     /control/maneuver. Eine neue id startet sie ab der aktuellen Pose; solange sie laeuft,
-    zaehlt /nav2/cmd_vel nicht. Ist sie fertig, meldet dieser Node die id auf
-    /control/maneuver_status, sendet Null und folgt wieder Nav2. Ein Moduswechsel verwirft
-    die laufende Bewegung.
+    zaehlt /nav2/cmd_vel nicht. Ist sie fertig oder abgebrochen (Sicherung, Waechter, kein
+    freier Ausweg), meldet dieser Node das auf /control/maneuver_status, sendet Null und folgt
+    wieder Nav2. Ein Moduswechsel verwirft die laufende Bewegung. Freifahren (UNWEDGE) waehlt
+    beim Start die freieste kleine Bewegung (robot_geometry.choose_unwedge) und faehrt sie.
     """
 
     def __init__(self):
@@ -150,10 +167,15 @@ class control_driving(Node):
             Odometry, '/odom_filtered', self.cb_odom, 1)
         self.sub_maneuver = self.create_subscription(
             Maneuver, '/control/maneuver', self.cb_maneuver, 1)
+        self.sub_costmap = self.create_subscription(
+            OccupancyGrid, '/local_costmap/costmap', self.cb_costmap, 1)
 
         # --- Publisher ---
         self.pub_cmd_vel = self.create_publisher(Twist, '/control/cmd_vel', 1)
-        self.pub_maneuver_status = self.create_publisher(UInt32, '/control/maneuver_status', 1)
+        self.pub_maneuver_status = self.create_publisher(
+            ManeuverStatus, '/control/maneuver_status', 1)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_guard = self.create_publisher(Bool, '/control/guard', latched)
 
         # --- Timer ---
         self.timer = self.create_timer(1.0 / WATCHDOG_RATE_HZ, self.cb_watchdog)
@@ -172,13 +194,16 @@ class control_driving(Node):
         self._maneuver = None           # laufende Grundbewegung (Maneuver-Nachricht)
         self._maneuver_start = None     # (x, y, yaw) in odom beim Start
         self._waypoint = 0              # PATH: Index des naechsten Punkts
-        self._maneuver_done_id = None
-        self._maneuver_failed_id = None  # abgebrochen (Sicherung): nicht neu starten
+        self._last_status = None        # ManeuverStatus der zuletzt beendeten Bewegung
         self._turned = 0.0              # ROTATE: aufsummierte Drehbefehle (rad)
         self._turn_time = None
         self._pose_stamp = None         # letzter Zeitstempel der odom-TF ...
         self._pose_changed = None       # ... und wann (monotonic) er sich zuletzt geaendert hat
+        self._costmap = None            # (Zellen (H, W), Aufloesung, Ursprung, Empfang)
+        self._guard_active = None       # zuletzt auf /control/guard gesendet
+        self._guard_since = None        # Waechter haelt seit (monotonic)
         self._reset_pid()
+        self._set_guard(False)
 
         self.get_logger().info('Started control_driving Node.')
 
@@ -228,7 +253,13 @@ class control_driving(Node):
         if now < self._nav2_blocked_until or self._maneuver is not None:
             return
         self._nav2_time = now
-        self.pub_cmd_vel.publish(self._limit_wheels(msg))
+        self._publish_guarded(self._limit_wheels(msg))
+
+    def cb_costmap(self, grid):
+        info = grid.info
+        cells = np.asarray(grid.data, dtype=np.int16).reshape(info.height, info.width)
+        self._costmap = (cells, info.resolution,
+                         (info.origin.position.x, info.origin.position.y), time.monotonic())
 
     def cb_align_yaw(self, msg):
         self._align_yaw = (msg.data, time.monotonic())
@@ -255,7 +286,7 @@ class control_driving(Node):
             return
         # Zyklisch wiederholt: nur eine neue id (oder die erste nach einem
         # Moduswechsel) startet die Bewegung, eine beendete nie erneut.
-        if msg.id in (self._maneuver_done_id, self._maneuver_failed_id):
+        if self._last_status is not None and msg.id == self._last_status.id:
             return
         if self._maneuver is not None and msg.id == self._maneuver.id:
             return
@@ -267,8 +298,9 @@ class control_driving(Node):
 
     def cb_watchdog(self):
         read_params(self, self._param_names)
-        if self._maneuver_done_id is not None:
-            self.pub_maneuver_status.publish(UInt32(data=self._maneuver_done_id))
+        # Zyklisch, falls switch_control die Meldung verpasst hat.
+        if self._last_status is not None:
+            self.pub_maneuver_status.publish(self._last_status)
 
         now = time.monotonic()
         if self._mode_is(ControlType.Align):
@@ -278,7 +310,7 @@ class control_driving(Node):
                                        throttle_duration_sec=2.0)
                 self._publish_stop()
             else:
-                self.pub_cmd_vel.publish(twist)
+                self._publish_guarded(twist)
             return
         if self._maneuver is not None and self._mode_is(*MANEUVER_MODES):
             self._drive_maneuver()
@@ -291,6 +323,9 @@ class control_driving(Node):
             fresh = False
         if not fresh:
             self._publish_stop()
+        # Ohne geprueften Befehl haelt der Waechter auch nichts an.
+        if not fresh or not self._mode_is(*GUARD_MODES):
+            self._set_guard(False)
 
     # --- Hilfsmethoden ---
 
@@ -350,6 +385,10 @@ class control_driving(Node):
         if pose is None:
             self._publish_stop()
             return
+        if m.type == Maneuver.UNWEDGE:
+            m = self._start_unwedge(m, pose)
+            if m is None:
+                return
         if self._maneuver_start is None:
             self._maneuver_start = pose
 
@@ -371,12 +410,35 @@ class control_driving(Node):
 
         if done:
             self.get_logger().info(f'Grundbewegung {m.id} fertig.')
-            self._maneuver_done_id = m.id
-            self._maneuver = None
-            self.pub_maneuver_status.publish(UInt32(data=m.id))
-            self._publish_stop()
+            self._finish_maneuver(m, True, '')
             return
-        self.pub_cmd_vel.publish(self._limit_wheels(twist))
+        if not self._publish_guarded(self._limit_wheels(twist))                 and time.monotonic() - self._guard_since >= GUARD_MANEUVER_FAIL_S:
+            self.get_logger().warn(f'Grundbewegung {m.id} abgebrochen: Waechter haelt an.')
+            self._finish_maneuver(m, False, 'Waechter: Kollision voraus')
+
+    def _start_unwedge(self, m, pose):
+        """Freifahren: freieste kleine Bewegung als STRAIGHT/ROTATE mit derselben id, None (und
+        abgebrochen), wenn es keine gibt."""
+        grid = self._fresh_costmap()
+        move = choose_unwedge(grid[0], grid[1], grid[2], pose) if grid else None
+        if move is None:
+            reason = 'kein freier Ausweg' if grid else 'keine aktuelle local_costmap'
+            self.get_logger().warn(f'Freifahren nicht moeglich: {reason}.')
+            self._finish_maneuver(m, False, reason)
+            return None
+        kind, amount = move
+        m.type = Maneuver.STRAIGHT if kind == 'straight' else Maneuver.ROTATE
+        m.distance = float(amount) if kind == 'straight' else 0.0
+        m.yaw = float(wrap_angle(pose[2] + amount)) if kind == 'rotate' else 0.0
+        self.get_logger().info(f'Freifahren: {"geradeaus" if kind == "straight" else "drehen"} '
+                               f'{amount:+.2f}.')
+        return m
+
+    def _finish_maneuver(self, m, success, reason):
+        self._last_status = ManeuverStatus(id=m.id, active=False, success=success, reason=reason)
+        self._maneuver = None
+        self.pub_maneuver_status.publish(self._last_status)
+        self._publish_stop()
 
     def _rotation_runaway(self, m, twist, planned):
         """True (und Grundbewegung abgebrochen), wenn die Drehbefehle schon deutlich mehr als
@@ -390,10 +452,56 @@ class control_driving(Node):
         self.get_logger().error(
             f'Grundbewegung {m.id} abgebrochen: {math.degrees(self._turned):.0f} Grad gedreht, '
             f'geplant hoechstens {math.degrees(planned):.0f} -- dreht sich im Kreis. Bot steht.')
-        self._maneuver_failed_id = m.id
-        self._maneuver = None
-        self._publish_stop()
+        self._finish_maneuver(m, False, 'dreht sich im Kreis (Odometrie?)')
         return True
+
+    # --- Waechter ---
+
+    def _publish_guarded(self, twist):
+        """Sendet twist, wenn der Umriss GUARD_HORIZON_S voraus nirgends neu anstoesst, sonst
+        Null. True, wenn twist hinausging."""
+        if not self._mode_is(*GUARD_MODES) or (twist.linear.x == 0.0 and twist.angular.z == 0.0):
+            self._set_guard(False)
+            self.pub_cmd_vel.publish(twist)
+            return True
+        grid = self._fresh_costmap()
+        pose = self._guard_pose()
+        if grid is None or pose is None:
+            self.get_logger().warn('Waechter ohne aktuelle local_costmap oder Pose -- Null.',
+                                   throttle_duration_sec=2.0)
+            blocked = True
+        else:
+            cells, res, origin, _ = grid
+            poses = simulate(pose, twist.linear.x, twist.angular.z, GUARD_HORIZON_S, res)
+            blocked = motion_collides(cells, res, origin, poses)
+        self._set_guard(blocked)
+        if blocked:
+            self.get_logger().warn('Waechter: Umriss stiesse an -- Null.', throttle_duration_sec=1.0)
+            self._publish_stop()
+            return False
+        self.pub_cmd_vel.publish(twist)
+        return True
+
+    def _set_guard(self, active):
+        if active and self._guard_since is None:
+            self._guard_since = time.monotonic()
+        elif not active:
+            self._guard_since = None
+        if active != self._guard_active:
+            self._guard_active = active
+            self.pub_guard.publish(Bool(data=active))
+
+    def _fresh_costmap(self):
+        if self._costmap is None or time.monotonic() - self._costmap[3] > GUARD_MAP_MAX_AGE_S:
+            return None
+        return self._costmap
+
+    def _guard_pose(self):
+        try:
+            tf = self.tf_buffer.lookup_transform(ODOM_FRAME, ROBOT_FRAME, rclpy.time.Time())
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            return None
+        return pose2d_from_transform(tf)
 
     def _max_vel(self, m):
         return m.max_vel if m.max_vel > 0.0 else self.maneuver_max_vel
