@@ -1,5 +1,5 @@
 #!/bin/bash
-# Aufruf: keine Argumente
+# Aufruf: ohne Argumente; weitere werden an ros2 launch durchgereicht (nav2_params:=...)
 # Startet den Nav2-Zweig fuer Hindernisse und Tunnel -- inklusive der Spurverfolgung,
 # auf die er angewiesen ist -- im Hintergrund und den NOT-AUS (notaus) im Vordergrund
 # dieses Terminals. Nur Spurverfolgung ohne Nav2: follow_lane.sh
@@ -47,7 +47,8 @@ ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/nav2_obstacle-latest.log"
 
 # set -m: eigene Prozessgruppe, sonst ignoriert der Hintergrundjob SIGINT (siehe follow_lane.sh).
 set -m
-ros2 launch Follow_Lane nav2_obstacle.launch.py > "$NODE_LOG" 2>&1 &
+# "$@": zusaetzliche Launch-Argumente, z.B. nav2_params:=... (nav2_obstacle_rpp_test.sh).
+ros2 launch Follow_Lane nav2_obstacle.launch.py "$@" > "$NODE_LOG" 2>&1 &
 LAUNCH_PID=$!
 set +m
 cleanup() {

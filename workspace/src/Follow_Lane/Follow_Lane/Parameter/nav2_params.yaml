@@ -38,7 +38,9 @@ controller_server:
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       primary_controller: "nav2_mppi_controller::MPPIController"
-      angular_dist_threshold: 0.785
+      # 0.785 (45 Grad) -> 0.35 (20 Grad), 12.11.: darunter fuhr MPPI Boegen statt auf der
+      # Stelle zu drehen, der Bot nutzte das Drehen auf der Stelle kaum.
+      angular_dist_threshold: 0.35
       forward_sampling_distance: 0.3
       rotate_to_heading_angular_vel: 1.2
       max_angular_accel: 3.2
@@ -137,7 +139,9 @@ planner_server:
     GridBased:
       # Humble: mit "/", mit "::" startet planner_server nicht.
       plugin: "nav2_navfn_planner/NavfnPlanner"
-      use_astar: true
+      # true -> false (12.11.): mit A* liefen die Wege dicht an Hindernissen entlang; Dijkstra
+      # rechnet die ganze Umgebung durch, Wege glatter und mittiger, etwas mehr Rechenzeit.
+      use_astar: false
       # Nie durch Unbekanntes.
       allow_unknown: false
       tolerance: 0.3
@@ -146,8 +150,9 @@ global_costmap:
   global_costmap:
     ros__parameters:
       use_sim_time: false
-      update_frequency: 2.0
-      publish_frequency: 1.0
+      # 2/1 -> 5/2 Hz (12.11.): Hindernisse kamen bis ~1 s spaet in die Karte.
+      update_frequency: 5.0
+      publish_frequency: 2.0
       global_frame: odom
       robot_base_frame: base_footprint
       # Mitfahrend: kein Odometrie-Reset vor der Fahrt noetig.
@@ -157,8 +162,12 @@ global_costmap:
       # Ab ~0,6 m liegen die LiDAR-Strahlen weiter als 1 cm auseinander, dazwischen bleibt
       # es unbekannt und fuer NavFn gesperrt.
       resolution: 0.01
-      # Kreis fuer NavFn, das nur einen Punkt plant. Mit footprint_padding 0,01 sperrt die
-      # Inflation 0,098 m um jedes Hindernis: Luecken ab etwa 0,20 m sind planbar.
+      # Kreis fuer NavFn, das nur einen Punkt plant; mit footprint_padding 0,01 gesperrt bis
+      # ~0,10 m um jeden LiDAR-Treffer. Der Kreis gilt in alle Richtungen: seitlich ist der Bot
+      # nur 0,089 breit, nur die hinteren Ecken reichen 0,105. Der LiDAR misst auf kurze
+      # Distanz ~1,7 cm zu kurz (12.11.: Flasche 11,2 cm laut Scan, 12,9 cm echt) -> 0,10 im
+      # Scan sind ~0,117 echt, das deckt auch das Heck beim Drehen. 0.105 war zu gross: Bot mit
+      # 4 cm Luft stand fuer NavFn in der Sperrzone, kein Plan.
       robot_radius: 0.09
       # Der Tunnel-Explorer sucht die Grenze frei/unbekannt.
       track_unknown_space: true
@@ -168,6 +177,10 @@ global_costmap:
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
+        # Nicht unter dem Kreis robot_radius loeschen (12.11.): der Kreis (~0,10 m) reicht weit
+        # ueber die Bot-Front (0,037 m) hinaus, Hindernisse direkt vor dem Bot verschwanden aus
+        # der Karte und NavFn plante hindurch. Der LiDAR sieht den eigenen Bot nicht.
+        footprint_clearing_enabled: false
         observation_sources: "scan"
         scan:
           topic: /scan
@@ -221,12 +234,16 @@ global_costmap:
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
 
-      # Nur ueber die Inflation kennt NavFn die Bot-Groesse: bis 0,098 m (robot_radius +
-      # footprint_padding) gesperrt, danach steil fallend. inflation_radius >= 0,098.
+      # Nur ueber die Inflation kennt NavFn die Bot-Groesse: bis ~0,10 m (robot_radius +
+      # footprint_padding) gesperrt, danach fallend. inflation_radius >= 0,10.
+      # 0.12/20 -> 0.25/6 (12.11.): die Kosten endeten 1,5 cm hinter der Sperrzone, NavFn plante
+      # direkt an ihrer Kante entlang (null Abstand, Anfahren im Tunnel). Jetzt bevorzugt er die
+      # Mitte von Luecken; gesperrt bleibt nur robot_radius + Padding. Wie HKA (INFLATION_M 0.25).
+      # Faktor 6 -> 3 (12.11.): Kosten fallen langsamer ab, mehr Abstand bevorzugt.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 20.0
-        inflation_radius: 0.12
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.25
 
 local_costmap:
   local_costmap:
