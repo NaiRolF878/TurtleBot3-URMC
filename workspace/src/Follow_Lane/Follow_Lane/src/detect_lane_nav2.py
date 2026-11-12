@@ -92,6 +92,9 @@ FAR_BAND_PX = 16
 FAR_ROW_STEP_PX = 16
 FAR_MIN_ROWS = 8
 FAR_MAX_LANE_WIDTH_M = 0.30
+# Nach der Kreuzung hoechstens so lange (s) auf das ferne Paar regeln, bis die Suchzeile
+# wieder beide Linien hat.
+EXIT_FAR_S = 5.0
 # Schranken-Debugbild (Rohbild) hoechstens so oft (s).
 BARRIER_DEBUG_PERIOD_S = 0.1
 # YOLO (Schilder, andere Bots, Startlinie) auf dem Rohbild: TensorRT-Engine relativ zum
@@ -210,6 +213,8 @@ class detect_lane(Node):
         self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
         self._intersection_hits = deque(maxlen=INTERSECTION_CONFIRM[1])
         self._intersection_seen = False
+        # Nach der Kreuzung bis zu diesem Zeitpunkt (monotonic) PID auf das ferne Paar, None = aus.
+        self._exit_far_until = None
         # Zuletzt erkannte Kreuzung: Flaechen am Boden (m, base_footprint), Odometrie-Pose
         # dazu, Zeitpunkt (monotonic); None = keine.
         self._held = None
@@ -266,6 +271,11 @@ class detect_lane(Node):
             self.get_logger().info('Tunnel -- Spurerkennung pausiert.')
         elif self.control_mode == ControlType.Tunnel:
             self.get_logger().info('Tunnel verlassen -- Spurerkennung laeuft wieder.')
+        if self.control_mode == ControlType.Intersection and new_mode == ControlType.Lane:
+            self._exit_far_until = time.monotonic() + EXIT_FAR_S
+            self.get_logger().info('Nach Kreuzung: PID auf fernes Paar, bis die Suchzeile Linien hat.')
+        elif new_mode != ControlType.Lane:
+            self._exit_far_until = None
         self.control_mode = new_mode
 
     def cb_bev(self, img):
@@ -349,11 +359,33 @@ class detect_lane(Node):
         lane_center = (center_white_x + center_yellow_x) / 2
         lane_error = 1 - (lane_center / width * 2)
 
+        # Direkt nach der Kreuzung (intersection_node hat an Lane zurueckgegeben, sobald das
+        # Paar dahinter sicher war): solange an der Suchzeile noch eine Linie fehlt, regelt der
+        # PID auf das ferne Paar. Endet, sobald beide Linien an der Suchzeile gefunden sind.
+        if self._exit_far_until is not None:
+            if raw_yellow is not None and raw_white is not None:
+                self.get_logger().info('Nach Kreuzung: Linien an der Suchzeile -- normal weiter.')
+                self._exit_far_until = None
+            elif now > self._exit_far_until:
+                self.get_logger().warn('Nach Kreuzung: Suchzeile nach '
+                                       f'{EXIT_FAR_S:.0f} s noch leer -- normal weiter.')
+                self._exit_far_until = None
+            else:
+                _, pair = self.far_lane_pair(mask_yellow, mask_white)
+                if pair is not None:
+                    center_yellow_x, center_white_x, row = pair
+                    center_yellow_y = center_white_y = row
+                    # Anker setzen: die Linien laufen von dort in die Suchzeile hinein.
+                    self._anchor['Gelb'] = (center_yellow_x, now)
+                    self._anchor['Weiss'] = (center_white_x, now)
+                    lane_center = (center_white_x + center_yellow_x) / 2
+                    lane_error = 1 - (lane_center / width * 2)
+
         polies, horizontal, vertical = self.detect_intersection(
             mask_white, mask_yellow, (center_yellow_x, center_yellow_y),
             (center_white_x, center_white_y), img.header.stamp)
         if self.control_mode == ControlType.Intersection:
-            self.pub_lane_far.publish(self.far_lane_pair(mask_yellow, mask_white))
+            self.pub_lane_far.publish(self.far_lane_pair(mask_yellow, mask_white)[0])
 
         self.pub_lane_error.publish(Float64(data=lane_error))
         # Alter beim Senden an den PID (control_driving rechnet sofort, < 1 ms).
@@ -496,7 +528,8 @@ class detect_lane(Node):
         fern auf): je Band die rechte Kante von gelb (die rechteste) und die linke Kante
         von weiss (die linkeste rechts von gelb + min_lane_width), Median ueber die Zeilen.
         Das erste Band mit plausibler Spurbreite gewinnt. Querlinien der Kreuzung haben
-        kaum senkrechte Kanten und stoeren deshalb wenig."""
+        kaum senkrechte Kanten und stoeren deshalb wenig.
+        Rueckgabe: (Nachricht fuer /detect/lane_far, (Spalte gelb, Spalte weiss, Zeile) oder None)."""
         out = Float64MultiArray()
         res = self._res()
         x_max = self._bev['x_max'] if self._bev is not None else 0.60
@@ -524,8 +557,8 @@ class detect_lane(Node):
             lane_error = 1 - ((yx + wx) / 2 / self.img_width * 2)
             out.data = [float(lane_error), x_max - (row + 0.5) * res,
                         x_max - (start + 0.5) * res]
-            break
-        return out
+            return out, (int(yx), int(wx), row)
+        return out, None
 
     def detect_intersection(self, img_white, img_yellow, yellow_point, white_point, stamp):
         """Kreuzung vor dem Bot: Polygone, Quer- und Laengsgeraden fuers Debugbild.

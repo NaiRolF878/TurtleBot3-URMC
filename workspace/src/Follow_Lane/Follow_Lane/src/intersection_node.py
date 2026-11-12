@@ -17,11 +17,13 @@ Ablauf (Phasen):
   Queren   Geradeaus mit cross_speed. Ist das Spurpaar hinter der Kreuzung zu sehen, wird
            darauf geregelt (far_kp), sonst Kurs gehalten (heading_kp, odom): senkrecht zur
            Haltelinie, also gerade ueber die Kreuzung, auch wenn der Bot schraeg steht.
-           Erreicht das Paar die Suchzeile des normalen PID -> active False -> Lane.
-           Spaetestens nach max_cross_distance.
+           Ist das Paar sicher (FAR_CONFIRM Bilder hintereinander hinter der Mitte der
+           Querstrasse, Spurfehler stabil) -> active False -> Lane; detect_lane regelt dann
+           auf das ferne Paar, bis die Suchzeile Linien hat. Spaetestens nach max_cross_distance.
   Nachlauf COOLDOWN_M lang keine neue Kreuzung annehmen                   -> Frei
 """
 import math
+from collections import deque
 import os
 import time
 
@@ -66,19 +68,22 @@ OBJECTS_MAX_AGE_S = 1.0
 # So lange (s) muss die Kreuzung frei sein, bevor der Bot losfaehrt.
 CLEAR_DEBOUNCE_S = 0.5
 
-# Fernes Spurpaar: hoechstens so alt (s); es zaehlt erst hinter der Querstrasse (abzueglich
-# FAR_PAST_MARGIN_M), damit Linienenden in der Kreuzung oder die Spur vor der Haltelinie
-# nicht als Ziel genommen werden.
+# Fernes Spurpaar: hoechstens so alt (s); es zaehlt erst hinter diesem Anteil der
+# geschaetzten Querstrassen-Tiefe ab Haltelinie, damit die Eckboegen an der eigenen
+# Haltelinie nicht als Ziel genommen werden.
 FAR_MAX_AGE_S = 0.3
-FAR_PAST_MARGIN_M = 0.10
-# Paar liegt bis auf so viel (m) an der Suchzeile -> der normale PID uebernimmt.
-ROW_TOL_M = 0.02
+FAR_PAST_FRACTION = 0.5
+# "Sicher": so viele gueltige Paare hintereinander, Spurfehler darin hoechstens so weit
+# auseinander -> zurueck an Lane, der normale PID uebernimmt.
+FAR_CONFIRM = 3
+FAR_MAX_SPREAD = 0.15
 MAX_ANGULAR_VEL = 1.0
 # Kurs beim Queren = senkrecht zur Haltelinie, sofern das hoechstens so weit (Grad) vom
 # eigenen Kurs abweicht; sonst gilt die Haltelinie als schief erkannt.
 MAX_LINE_YAW_DIFF_DEG = 10.0
-# Nach dem Queren so weit (m) keine neue Kreuzung annehmen.
-COOLDOWN_M = 0.30
+# Nach dem Queren so weit (m) keine neue Kreuzung annehmen. Die Uebergabe an Lane kommt
+# jetzt schon am Anfang der Kreuzung, daher die ganze Querstrasse plus Rest abdecken.
+COOLDOWN_M = 0.60
 
 FREE, APPROACH, WAIT, CROSS, COOLDOWN = 'Frei', 'Anfahrt', 'Halt', 'Queren', 'Nachlauf'
 
@@ -156,6 +161,8 @@ class intersection_node(Node):
         self._last_block = None
         self._start_pose = None     # Pose beim Losfahren (Queren) bzw. Ende (Nachlauf)
         self._yaw_ref = None
+        self._stats = None          # Messung einer Querung (_start_stats), Log in _finish
+        self._far_ok = deque(maxlen=FAR_CONFIRM)   # lane_error der letzten gueltigen Paare
         self._state = phase
 
     # --- Callbacks ---
@@ -177,6 +184,8 @@ class intersection_node(Node):
     def cb_lane_far(self, msg):
         self._far = list(msg.data) if len(msg.data) == 3 else None
         self._far_time = time.monotonic()
+        if self.phase == CROSS and self._stats is not None:
+            self._count_far()
 
     def cb_intersection(self, msg):
         if len(msg.polygon.points) < 4 or self.phase not in (FREE, APPROACH, WAIT):
@@ -250,6 +259,7 @@ class intersection_node(Node):
         self.phase = CROSS
         self._start_pose = pose
         self._yaw_ref = self._crossing_yaw(pose)
+        self._start_stats(pose)
         self.get_logger().info(
             f'Kreuzung frei nach {waited:.1f} s -- quere geradeaus '
             f'(Kurs {math.degrees(wrap(self._yaw_ref - pose[2])):+.1f} Grad zur Haltelage).')
@@ -262,14 +272,20 @@ class intersection_node(Node):
         far = self._fresh_far(pose)
         twist = Twist()
         twist.linear.x = float(self.cross_speed)
+        if far is not None and len(self._far_ok) >= FAR_CONFIRM \
+                and max(self._far_ok) - min(self._far_ok) <= FAR_MAX_SPREAD:
+            # Paar hinter der Kreuzung sicher: der normale PID uebernimmt (detect_lane regelt
+            # auf das ferne Paar, bis die Suchzeile Linien hat).
+            if self._stats is not None:
+                self._stats['spur_ab_m'] = travelled
+            self._finish(pose, f'Spur dahinter sicher nach {travelled * 100:.0f} cm '
+                               f'(Paar {far[1] * 100:.0f} cm voraus) -- PID uebernimmt')
+            return
         if far is not None:
             angular = self.far_kp * far[0]
             # Ohne Paar im naechsten Bild den Kurs von jetzt halten, nicht den vom Halt.
             self._yaw_ref = pose[2]
             self._state = f'{CROSS} (Spur {far[1] * 100:.0f} cm)'
-            if far[1] <= far[2] + ROW_TOL_M:
-                self._finish(pose, f'Spur hinter der Kreuzung erreicht ({travelled * 100:.0f} cm)')
-                return
         else:
             angular = self.heading_kp * wrap(self._yaw_ref - pose[2])
             self._state = f'{CROSS} (Kurs)'
@@ -284,6 +300,7 @@ class intersection_node(Node):
 
     def _finish(self, pose, reason):
         self.get_logger().info(f'Kreuzung gequert: {reason}.')
+        self._log_stats(pose)
         self.pub_cmd_vel.publish(Twist())
         self._reset(COOLDOWN)
         self._start_pose = pose
@@ -381,8 +398,51 @@ class intersection_node(Node):
         oder noch vor dem Ende der Querstrasse."""
         if self._far is None or time.monotonic() - self._far_time > FAR_MAX_AGE_S:
             return None
-        beyond = self._line_distance(pose) + self._depth - FAR_PAST_MARGIN_M
-        return self._far if self._far[1] >= beyond else None
+        return self._far if self._far[1] >= self._far_needed(pose) else None
+
+    def _far_needed(self, pose):
+        """So weit (m, ab Radachse) muss ein fernes Paar mindestens liegen: hinter der Mitte
+        der Querstrasse, also nicht mehr die Eckboegen an der eigenen Haltelinie. Die volle
+        geschaetzte Tiefe (2W + 3 Linien) war auf der Strecke zu gross -- alle echten Paare
+        wurden verworfen (12.11.)."""
+        return self._line_distance(pose) + self._depth * FAR_PAST_FRACTION
+
+    # --- Messung einer Querung (nur Log) ---
+
+    def _start_stats(self, pose):
+        self._stats = {'t0': time.monotonic(), 'frames': 0, 'empty': 0, 'near': [],
+                       'ok': 0, 'spur_ab_m': None,
+                       'needed_m': self._far_needed(pose)}
+
+    def _count_far(self):
+        """Jede /detect/lane_far-Meldung beim Queren: leer, zu nah (verworfen) oder gueltig."""
+        s = self._stats
+        s['frames'] += 1
+        pose = self._pose()
+        if self._far is None:
+            s['empty'] += 1
+            self._far_ok.clear()
+        elif pose is not None and self._far[1] < self._far_needed(pose):
+            s['near'].append(self._far[1])
+            self._far_ok.clear()
+        else:
+            s['ok'] += 1
+            self._far_ok.append(self._far[0])
+
+    def _log_stats(self, pose):
+        s = self._stats
+        if s is None or pose is None:
+            return
+        total = math.hypot(pose[0] - self._start_pose[0], pose[1] - self._start_pose[1])
+        kurs = total if s['spur_ab_m'] is None else s['spur_ab_m']
+        near = s['near']
+        near_txt = (f'{len(near)} zu nah verworfen ({min(near) * 100:.0f}-{max(near) * 100:.0f} cm '
+                    f'voraus)' if near else '0 zu nah verworfen')
+        self.get_logger().info(
+            f'Messung Queren: {total * 100:.0f} cm in {time.monotonic() - s["t0"]:.1f} s, '
+            f'davon nur Kurs {kurs * 100:.0f} cm, auf ferne Spur {(total - kurs) * 100:.0f} cm. '
+            f'lane_far: {s["frames"]} Bilder, {s["empty"]} ohne Paar, {near_txt}, {s["ok"]} gueltig '
+            f'(gefordert ab Start: >= {s["needed_m"] * 100:.0f} cm voraus).')
 
     # --- Beenden ---
 
