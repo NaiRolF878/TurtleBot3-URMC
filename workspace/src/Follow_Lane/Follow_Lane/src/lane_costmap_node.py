@@ -87,6 +87,11 @@ SEED_HINT_MAX_AGE_S = 0.5
 # Verfolgt wird auf einem ausgeduennten Raster (schneller, Median bleibt gleich).
 TRACE_THIN_CELL = 0.01
 TRACE_MIN_POINTS = 5
+# Anfangsrichtung aus den Linienpunkten in diesem Umkreis (m) um den Startpunkt.
+TRACE_START_RADIUS = 0.10
+# ... aber nur, wenn die Punkte dort so viel laenger als breit sind (Verhaeltnis der
+# Eigenwerte); sonst geradeaus.
+TRACE_START_ELONGATION = 4.0
 TRACE_MAX_LENGTH = 1.5
 NEAR_RES = 0.005
 # Winkelraster (rad) der Sichtschatten-Tabelle: 0,25 Grad, an der Sichtgrenze (0,6 m)
@@ -241,6 +246,24 @@ def line_seed(pts, outer_sign, inner_limit=None, hint_y=None):
     return np.median(group, axis=0)
 
 
+def _start_direction(pts, seed):
+    """Anfangsrichtung der Verfolgung: Hauptachse der Linienpunkte bis TRACE_START_RADIUS um
+    den Startpunkt, nach vorn (+X) zeigend. Fest geradeaus brach die Verfolgung ab, wenn der
+    Bot schraeg zur Spur stand (Obstacle, Linie 47 Grad zur Fahrtrichtung: 3 cm statt der
+    ganzen Linie, Aufnahme 12.11.). Zu wenig Punkte: geradeaus wie bisher."""
+    near = pts[np.hypot(pts[:, 0] - seed[0], pts[:, 1] - seed[1]) < TRACE_START_RADIUS]
+    if len(near) < TRACE_MIN_POINTS:
+        return np.array([1.0, 0.0])
+    c = near - near.mean(axis=0)
+    values, vectors = np.linalg.eigh(c.T @ c)
+    # Nur bei deutlich laenglicher Punktwolke: haengt eine Querlinie am Startpunkt (L-Form an
+    # der Kreuzung), ist die Achse unklar -- dann geradeaus wie bisher.
+    if values[1] < TRACE_START_ELONGATION * max(values[0], 1e-12):
+        return np.array([1.0, 0.0])
+    axis = vectors[:, -1]
+    return axis if axis[0] >= 0.0 else -axis
+
+
 def trace_line(pts, seed, step, max_turn, max_gap):
     """Linienmitte ab seed in beide Richtungen verfolgen.
 
@@ -252,8 +275,9 @@ def trace_line(pts, seed, step, max_turn, max_gap):
     """
     radius = step * 4.0 / 3.0
     max_gap_steps = int(round(max_gap / step))
+    start = _start_direction(pts, seed)
     halves = []
-    for direction in (np.array([1.0, 0.0]), np.array([-1.0, 0.0])):
+    for direction in (start, -start):
         p, d, path, missed = seed, direction, [], 0
         for _ in range(int(TRACE_MAX_LENGTH / step)):
             q = p + step * d
