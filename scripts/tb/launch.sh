@@ -11,7 +11,16 @@ source "$SCRIPT_DIR/tb-env.sh"
 # sonst neue Programme oder Nachrichten. --symlink-install: Python und YAML wirken sofort.
 echo "Baue Workspace (colcon build --symlink-install) ..."
 BUILD_LOG=$(cd "$REPO_ROOT/workspace" && colcon build --symlink-install 2>&1)
-if [ $? -ne 0 ]; then
+BUILD_RC=$?
+if [ $BUILD_RC -ne 0 ]; then
+    # Meist Reste eines anderen Branches: --symlink-install-Verweise auf Dateien, die es hier
+    # nicht gibt ("can't copy ... not a regular file"), oder geaenderte .msg. Sauber neu (~8 s).
+    echo "Build fehlgeschlagen -- raeume workspace/build und install auf und baue neu ..."
+    rm -rf "$REPO_ROOT/workspace/build" "$REPO_ROOT/workspace/install"
+    BUILD_LOG=$(cd "$REPO_ROOT/workspace" && colcon build --symlink-install 2>&1)
+    BUILD_RC=$?
+fi
+if [ $BUILD_RC -ne 0 ]; then
     echo "$BUILD_LOG" | tail -30
     echo ""
     echo "Build fehlgeschlagen -- es wird nichts gestartet. Fehler siehe oben."

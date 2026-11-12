@@ -13,6 +13,14 @@ letzten gueltigen schneller waere als MAX_WHEEL_SPEED; die naechste wird wieder 
 letzte gueltige gerechnet. Ebenso ein IMU-Sprung ueber MAX_YAW_RATE, dann gilt die Drehung
 aus den Raedern.
 
+IMU-Versatz (Lauf 11.11.: Kreisel meldete im Stand -0,70 bzw. +0,11 rad/s, die Odometrie
+drehte weg, Zonen und Drehungen lagen daneben): Stehen beide Raeder STILL_MIN_MSGS Nachrichten
+lang still, ist die echte Drehung 0 -- was die IMU dann meldet, ist ihr Versatz. Er wird
+gemittelt und beim Fahren abgezogen; im Stand gilt Drehung 0. Kein Vergleich IMU <-> Raeder
+je Nachricht: IMU und Raeder kommen nicht zeitgleich, der Vergleich schlug bei fast jeder
+Drehung an, die dann aus den (beim Drehen rutschenden) Raedern kam -- Drehungen und Zonen lagen
+daneben (Lauf 11.11.).
+
 Voraussetzung: der Bot sendet die TF nicht selbst (bot-up.sh, BOT_ODOM_TF=false). Tut er
 es doch, haette base_footprint zwei Eltern-Sender; dann sendet dieser Node keine TF und
 meldet das.
@@ -48,6 +56,19 @@ RESYNC_AFTER = 10
 FOREIGN_TF_HOLD_S = 2.0
 # Annahme fuer dt, wenn zwei Nachrichten denselben Zeitstempel tragen.
 DEFAULT_DT_S = 0.05
+# Stillstand: beide Raeder je Nachricht hoechstens so viel (rad), so viele Nachrichten in Folge
+# (~0,5 s bei 18 Hz). Dann wird der IMU-Versatz gelernt (gleitender Mittelwert, Anteil
+# BIAS_ALPHA je Nachricht; erster Wert direkt).
+STILL_WHEEL_RAD = 0.002
+STILL_MIN_MSGS = 9
+BIAS_ALPHA = 0.3
+# Gelernt wird nur aus einem ruhigen Fenster: so viele Nachrichten (~1 s) im Stand, Streuung der
+# IMU-Rate hoechstens BIAS_MAX_STD (rad/s). Ein echter Versatz ist konstant; wird der Bot von Hand
+# gedreht (Raeder stehen), schwankt die Rate und es wird nichts gelernt.
+BIAS_WINDOW = 18
+BIAS_MAX_STD = 0.03
+# Gelernten Versatz ins Log, wenn er sich um so viel (rad/s) geaendert hat.
+BIAS_LOG_STEP = 0.02
 
 
 def wrap(angle):
@@ -75,6 +96,10 @@ class odom_filter(Node):
         self._imu_yaw = None             # neuester IMU-Gierwinkel
         self._last_imu_yaw = None        # IMU-Gierwinkel bei der letzten gueltigen Nachricht
         self._rejected = 0
+        self._still = 0                  # Nachrichten in Folge mit stehenden Raedern
+        self._bias = None                # gelernter IMU-Versatz (rad/s)
+        self._bias_logged = None
+        self._still_rates = deque(maxlen=BIAS_WINDOW)
         self._own_stamps = deque(maxlen=50)
         self._foreign_tf_time = None
 
@@ -128,15 +153,8 @@ class odom_filter(Node):
             return
 
         d_s = WHEEL_RADIUS * (d_left + d_right) / 2.0
-        d_yaw = WHEEL_RADIUS * (d_right - d_left) / WHEEL_SEPARATION
-        if imu_yaw is not None and self._last_imu_yaw is not None:
-            d_imu = wrap(imu_yaw - self._last_imu_yaw)
-            if abs(d_imu) <= MAX_YAW_RATE * dt:
-                d_yaw = d_imu
-            else:
-                self.get_logger().warn(
-                    f'IMU-Sprung {math.degrees(d_imu):+.1f} Grad in {dt * 1000:.0f} ms verworfen, '
-                    'Drehung aus den Raedern.', throttle_duration_sec=1.0)
+        d_wheel = WHEEL_RADIUS * (d_right - d_left) / WHEEL_SEPARATION
+        d_yaw = self._yaw_step(d_left, d_right, d_wheel, imu_yaw, dt)
 
         x, y, yaw = self.pose
         mid = yaw + d_yaw / 2.0
@@ -145,6 +163,44 @@ class odom_filter(Node):
         self._publish(msg.header.stamp, d_s / dt, d_yaw / dt)
 
     # --- Hilfsmethoden ---
+
+    def _yaw_step(self, d_left, d_right, d_wheel, imu_yaw, dt):
+        """Drehung (rad) seit der letzten gueltigen Nachricht: IMU minus gelernter Versatz; im
+        Stand 0; ohne IMU oder bei einem IMU-Sprung aus den Raedern."""
+        still = max(abs(d_left), abs(d_right)) <= STILL_WHEEL_RAD
+        self._still = self._still + 1 if still else 0
+        if not still:
+            self._still_rates.clear()
+        if imu_yaw is None or self._last_imu_yaw is None:
+            return 0.0 if still else d_wheel
+        d_imu = wrap(imu_yaw - self._last_imu_yaw)
+        if abs(d_imu) > MAX_YAW_RATE * dt:
+            self.get_logger().warn(
+                f'IMU-Sprung {math.degrees(d_imu):+.1f} Grad in {dt * 1000:.0f} ms verworfen, '
+                'Drehung aus den Raedern.', throttle_duration_sec=1.0)
+            return d_wheel
+        if self._still >= STILL_MIN_MSGS:
+            # Raeder stehen: echte Drehung 0, was die IMU meldet, ist ihr Versatz.
+            self._still_rates.append(d_imu / dt)
+            if len(self._still_rates) == BIAS_WINDOW:
+                rates = list(self._still_rates)
+                mean = sum(rates) / len(rates)
+                std = math.sqrt(sum((r - mean) ** 2 for r in rates) / len(rates))
+                if std <= BIAS_MAX_STD:
+                    self._bias = mean if self._bias is None \
+                        else self._bias + BIAS_ALPHA * (mean - self._bias)
+                    self._log_bias()
+            return 0.0
+        if still:
+            return 0.0
+        return d_imu - (self._bias or 0.0) * dt
+
+    def _log_bias(self):
+        if self._bias_logged is None or abs(self._bias - self._bias_logged) >= BIAS_LOG_STEP:
+            self._bias_logged = self._bias
+            self.get_logger().info(
+                f'IMU-Versatz im Stand gelernt: {self._bias:+.3f} rad/s '
+                f'({math.degrees(self._bias):+.1f} Grad/s), wird abgezogen.')
 
     def _accept(self, now, left, right, imu_yaw):
         self._last_wheels = (now, left, right)

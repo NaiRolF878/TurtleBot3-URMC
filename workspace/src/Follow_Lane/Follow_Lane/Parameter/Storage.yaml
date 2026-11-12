@@ -1,0 +1,28 @@
+# Storage-Aufgabe (Palette), gelesen von storage.launch.py. Ablauf:
+# docs/Storage_Retrieval_Konzept.md.
+
+/switch_control:
+  ros__parameters:
+    initial_mode: Stop
+
+/storage_zone_node:
+  ros__parameters:
+    # Weiss, CLAHE: von detect_lane (Follow_Lane_ROI_LAB.yaml). Boden: lernt der Node selbst.
+    # Querlinien ab diesem Abstand (m) von der Bot-Mitte, rechts der gestrichelten Spurlinie.
+    side_near_m: 0.14
+    # Querlinie: hoechstens so viel Grad von der Querrichtung.
+    max_angle_deg: 15.0
+
+/storage_sign_node:
+  ros__parameters:
+    # auch ausserhalb SCHILD_LESEN
+    always_on: false
+    # Blau in LAB nach CLAHE.
+    lab_l_blue_l: 10
+    lab_l_blue_h: 255
+    lab_a_blue_l: 135
+    lab_a_blue_h: 200
+    lab_b_blue_l: 0
+    lab_b_blue_h: 105
+    # Ziffer, deren Vorlage aus dem naechsten Bild aufgenommen wird; 0 = keine.
+    capture_digit: 0

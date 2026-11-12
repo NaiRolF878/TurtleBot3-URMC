@@ -1,18 +1,23 @@
 """Gemeinsame Bausteine der Follow_Lane-Nodes.
 
-Fahrmodi (ControlType), Parameter-Helfer, Geometrie (Gierwinkel, BEV-Pixel ->
-Meter) und der einheitliche Ablauf von main(): starten, spinnen, bei
-SIGINT/SIGTERM shut_down().
+Fahrmodi (ControlType), Storage-Zustaende (StorageState), Parameter-Helfer (auch
+Parameter eines anderen Nodes live mitlesen: SharedParams), CLAHE,
+Geometrie (Gierwinkel, BEV-Pixel -> Meter) und der einheitliche Ablauf von main():
+starten, spinnen, bei SIGINT/SIGTERM shut_down().
 """
 import math
 import signal
 import threading
 from enum import Enum
 
+import cv2
 import numpy as np
 import rclpy
-from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor
+from rcl_interfaces.msg import (
+    FloatingPointRange, IntegerRange, ParameterDescriptor, ParameterEvent)
+from rcl_interfaces.srv import GetParameters
 from rclpy.exceptions import ParameterUninitializedException
+from rclpy.parameter import parameter_value_to_python
 from rclpy.signals import SignalHandlerOptions
 
 # Wartezeit von spin_once; so schnell reagiert ein Node auf Strg+C.
@@ -22,17 +27,56 @@ COSTMAP_BLOCKED = 99
 # Groesser als robot_radius + footprint_padding der global_costmap (0,10 m): so weit reicht
 # der Sperrsaum der Wand, an der der Bot steht.
 PATH_CHECK_SKIP_M = 0.125
+# Eigener Bot vorn im Bild (Magnet, Halter), wie er in der BEV erscheint: bis SELF_MASK_X_M vor
+# der Radachse und +-SELF_MASK_Y_M nie Linie oder Palette (detect_lane, storage_zone_node). In der
+# BEV wirkt der Magnet weiter vorn, als er ist (er sitzt 7,5 cm hoch, die BEV gilt fuer den Boden).
+SELF_MASK_X_M = 0.11
+SELF_MASK_Y_M = 0.05
+# Magnet (gemessen): Radachse bis Magnetende 7,5 cm, Magnetmitte 7,5 cm ueber dem Boden.
+MAGNET_FRONT_M = 0.075
+MAGNET_HEIGHT_M = 0.075
+# Breite des Burger ueber die Raeder (m), wie der Footprint in nav2_params.yaml; gemeinsam
+# fuer Tunnel (Durchfahrt) und Storage (kleinste moegliche Zone).
+BOT_WIDTH = 0.178
 
 
 class ControlType(Enum):
     """Fahrmodus auf /control/mode (std_msgs/UInt8), gesetzt nur von switch_control."""
     Lane = 1
     Obstacle = 2
-    Stop = 3            # Schranke (switch_control)
+    Stop = 3            # Nullbefehl: Schranke (switch_control); Storage beim Lesen, Greifen, Ablegen
     Intersection = 4    # Halt an der Haltelinie + Queren (intersection_node)
-    Align = 5           # noch ohne Ausloeser
+    Align = 5           # nach Obstacle auf der Stelle zur Spur drehen (switch_control)
     Tunnel = 6          # im Tunnel: Kamera verboten (Reglement)
     TunnelEntry = 7     # Einfahrt bis kurz vor die Oeffnung, Kamera noch erlaubt
+    # 8 war Dock (Storage-Feinanfahrt im Kamerabild), ersetzt durch Maneuver geradeaus
+    Maneuver = 9        # Storage: Grundbewegung in odom (/control/maneuver)
+
+
+class StorageState(Enum):
+    """Unterzustand der Storage-Aufgabe auf /control/storage_state (std_msgs/String,
+    Name des Werts), gesetzt nur von switch_control. Die Detektoren arbeiten nur in
+    den Zustaenden, die sie brauchen."""
+    IDLE = 0
+    ERKUNDEN = 1             # an der Spur entlang, Zonengrenzen sammeln
+    ZUR_ZONE_DREHEN = 2      # zur Zonenmitte auf der Spur, dann zur Zone drehen
+    SCHILD_LESEN = 3         # stehen, Schild, Palette und Zonentiefe abstimmen
+    ZURUECKDREHEN = 4        # zurueck in Fahrtrichtung der Spur
+    ZUR_PALETTENZONE = 5     # auf der Spur vor die Palettenzone, zur Zone drehen
+    POSITIONIERT = 6         # anhalten vor der Palettenzone (Wertung), Palette vermessen
+    ANDOCKEN = 7             # rechtwinklig und gerade bis an die Palette
+    GREIFEN = 8              # Magnet an, warten
+    GRIFF_PRUEFEN = 9        # kurz zuruecksetzen, kommt die Palette mit?
+    NEU_ANSETZEN = 10        # zurueck auf die Spur, erneut ausrichten
+    HERAUSFAHREN = 11        # mit Palette rueckwaerts auf die Spur
+    TRANSPORT = 12           # auf der Spur vor die Zielzone, zur Zone drehen
+    ABLAGE_ANFAHREN = 13     # bis zur Zonenmitte
+    ABLEGEN = 14             # Magnet aus, warten
+    VERLASSEN = 15           # rueckwaerts auf die Spur, in Fahrtrichtung drehen
+    FERTIG = 16              # Follow Lane
+    FEHLER = 17
+    AUSRICHTEN = 18          # rechtwinklig vor die Palette (Vor-Andock-Pose)
+    ZURUECK_ZUM_START = 19   # Zonen falsch zugeordnet: rueckwaerts zum Start, neu erkunden
 
 
 class SignType(Enum):
@@ -85,6 +129,89 @@ def require_params(node, names):
         raise SystemExit(1)
 
 
+# Farben gibt es nur einmal: detect_lane haelt sie (Follow_Lane_ROI_LAB.yaml, rqt), andere
+# Nodes lesen sie mit SharedParams mit.
+COLOR_SOURCE = 'detect_lane'
+WHITE_PARAMS = ['lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',
+                'lab_b_white_l', 'lab_b_white_h']
+CLAHE_PARAMS = ['clahe_clip_limit', 'clahe_tile_grid_size']
+
+
+class SharedParams:
+    """Parameter eines anderen Nodes live mitlesen: einmal per get_parameters holen (bis es
+    klappt, alle RETRY_S), danach jede Aenderung aus /parameter_events uebernehmen. So gibt
+    es jeden Wert nur an einer Stelle; was in rqt beim Quell-Node eingestellt wird, gilt
+    sofort auch hier. Werte: shared.values[name]; erst verwenden, wenn shared.ready."""
+
+    RETRY_S = 1.0
+
+    def __init__(self, node, source, names):
+        self.node = node
+        self.source = source.strip('/')
+        self.names = list(names)
+        self.values = {}
+        self._future = None
+        self._client = node.create_client(GetParameters, f'/{self.source}/get_parameters')
+        node.create_subscription(ParameterEvent, '/parameter_events', self._on_event, 10)
+        self._timer = node.create_timer(self.RETRY_S, self._request)
+        self._request()
+
+    @property
+    def ready(self):
+        return all(n in self.values for n in self.names)
+
+    def __getitem__(self, name):
+        return self.values[name]
+
+    def _request(self):
+        if self.ready:
+            self._timer.cancel()
+            return
+        if self._future is not None and not self._future.done():
+            return
+        if not self._client.service_is_ready():
+            self.node.get_logger().warn(f'Warte auf die Parameter von /{self.source} ...',
+                                        throttle_duration_sec=5.0)
+            return
+        self._future = self._client.call_async(GetParameters.Request(names=self.names))
+        self._future.add_done_callback(self._on_response)
+
+    def _on_response(self, future):
+        for name, value in zip(self.names, future.result().values):
+            value = parameter_value_to_python(value)
+            if value is not None:
+                self.values[name] = value
+        if self.ready:
+            self.node.get_logger().info(f'Parameter von /{self.source} uebernommen: '
+                                        + ', '.join(f'{n}={self.values[n]}' for n in self.names))
+
+    def _on_event(self, event):
+        if event.node.strip('/') != self.source:
+            return
+        was_ready = self.ready
+        for p in list(event.new_parameters) + list(event.changed_parameters):
+            if p.name in self.names:
+                self.values[p.name] = parameter_value_to_python(p.value)
+                if was_ready:   # beim Start des Quell-Nodes kommen alle einzeln -- nicht melden
+                    self.node.get_logger().info(f'{p.name}={self.values[p.name]} von /{self.source}')
+        if not was_ready and self.ready:
+            self.node.get_logger().info(f'Parameter von /{self.source} uebernommen.')
+
+
+def lab_clahe(image, clip_limit, tile_grid_size):
+    """BGR -> LAB, CLAHE auf dem L-Kanal (gleicht ueber- und unterbelichtete Bereiche an)."""
+    l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2LAB))
+    tile = max(1, int(tile_grid_size))
+    clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=(tile, tile))
+    return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
+
+
+def white_in(lab, shared):
+    """Weiss-Maske aus einem LAB-Bild mit den gemeinsamen Weiss-Werten (SharedParams)."""
+    return cv2.inRange(lab, tuple(int(shared[n]) for n in WHITE_PARAMS[0::2]),
+                       tuple(int(shared[n]) for n in WHITE_PARAMS[1::2]))
+
+
 def control_mode_from_msg(node, msg):
     """UInt8 von /control/mode -> ControlType, None bei unbekanntem Wert."""
     try:
@@ -93,6 +220,11 @@ def control_mode_from_msg(node, msg):
         node.get_logger().warn(f'Unbekannter Control-Mode empfangen: {msg.data}',
                                throttle_duration_sec=5.0)
         return None
+
+
+def storage_state_from_msg(msg):
+    """String von /control/storage_state -> StorageState, IDLE bei unbekanntem Namen."""
+    return StorageState.__members__.get(msg.data, StorageState.IDLE)
 
 
 def yaw_from_quaternion(q):
@@ -171,6 +303,135 @@ def bev_pixels_to_ground(bev, us, vs):
     us = np.asarray(us, dtype=np.float64)
     vs = np.asarray(vs, dtype=np.float64)
     return bev['x_max'] - (vs + 0.5) * bev['res'], bev['y_half'] - (us + 0.5) * bev['res']
+
+
+def ground_to_bev_pixels(bev, xs, ys):
+    """Gegenstueck zu bev_pixels_to_ground: Boden (base_footprint) -> (u, v) als float."""
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    return (bev['y_half'] - ys) / bev['res'] - 0.5, (bev['x_max'] - xs) / bev['res'] - 0.5
+
+
+# Zonen im Debugbild: Kasten ab side_near_m (Abstand Spur -> Zonen) so tief in die Zone.
+ZONE_BOX_DEPTH_M = 0.25
+# Gesehene Querlinien eines Bildes: naeher als das (m, entlang der Fahrtrichtung) = dieselbe Linie
+# (beide Kanten eines Klebestreifens, zerrissene Segmente).
+SEEN_LINE_MERGE_M = 0.05
+SEEN_COLOR = (0, 200, 0)        # BGR: aus dem Bild gesehene Zone
+MODEL_COLOR = (0, 140, 255)     # BGR: Zonenmodell (Umriss)
+
+
+def _line_at(center, direction, lateral):
+    """Punkt der Querlinie (Mitte, Richtung) mit seitlichem Abstand lateral (Y, Bot-Frame)."""
+    (x, y), (dx, dy) = center, direction
+    if abs(dy) < 1e-6:
+        return x, lateral
+    t = (lateral - y) / dy
+    return x + t * dx, lateral
+
+
+def seen_zone_boxes(lines, near_m, side_sign, depth_m=ZONE_BOX_DEPTH_M):
+    """Zonen, wie sie in EINEM Bild zu sehen sind: Kasten zwischen je zwei benachbarten
+    Querlinien, ab near_m neben der Spur depth_m tief. lines: ((x, y), (dx, dy)) im Bot-Frame
+    (base_footprint) zum Bildzeitpunkt. Keine Odometrie, kein Modell. side_sign: Y-Vorzeichen
+    der Zonenseite. Liste von Ecken (4, 2) in m, nach x sortiert."""
+    merged = []
+    for (x, y), (dx, dy) in sorted(lines, key=lambda l: l[0][0]):
+        n = math.hypot(dx, dy) or 1.0
+        if merged and x - merged[-1][-1][0][0] <= SEEN_LINE_MERGE_M:
+            merged[-1].append(((x, y), (dx / n, dy / n)))
+        else:
+            merged.append([((x, y), (dx / n, dy / n))])
+    mids = []
+    for group in merged:
+        cx = sum(p[0][0] for p in group) / len(group)
+        cy = sum(p[0][1] for p in group) / len(group)
+        dx = sum(p[1][0] for p in group)
+        dy = sum(p[1][1] for p in group)
+        mids.append(((cx, cy), (dx, dy)))
+    near, far = side_sign * near_m, side_sign * (near_m + depth_m)
+    boxes = []
+    for a, b in zip(mids, mids[1:]):
+        boxes.append(np.array([_line_at(*a, near), _line_at(*a, far),
+                               _line_at(*b, far), _line_at(*b, near)]))
+    return boxes
+
+
+def zone_digit_at(zones, pose, xy):
+    """Ziffer der Modellzone, in der der Punkt xy (Bot-Frame) liegt; 0 ohne Modell/Treffer.
+    Die Modelllinien liegen auf der Spur, entlang der Spurrichtung wird verglichen."""
+    if zones is None or len(zones.lines) < 2 or pose is None:
+        return 0
+    p = transform_points(pose, np.array([xy]))[0]
+    pts = np.array([(l.position.x, l.position.y) for l in zones.lines])
+    u = pts[-1] - pts[0]
+    norm = np.linalg.norm(u)
+    if norm < 1e-6:
+        return 0
+    u /= norm
+    s = (pts - pts[0]) @ u
+    sp = float((p - pts[0]) @ u)
+    for k in range(len(s) - 1):
+        if s[k] <= sp < s[k + 1]:
+            return int(zones.digits[k]) if k < len(zones.digits) else 0
+    return 0
+
+
+def zone_boxes(zones, pose, near_m, depth_m=ZONE_BOX_DEPTH_M):
+    """Zonenmodell (StorageZones, odom) als Vierecke im Bot-Frame (base_footprint).
+    Je Zone: (Ecken (4, 2) in m, Mitte (x, y), Ziffer (0 = unbekannt), beide Linien gemessen)."""
+    if zones is None or len(zones.lines) < 2 or pose is None:
+        return []
+    pts = inverse_transform_points(
+        pose, np.array([(p.position.x, p.position.y) for p in zones.lines]))
+    yaws = [yaw_from_quaternion(p.orientation) - pose[2] for p in zones.lines]
+    boxes = []
+    for k in range(len(pts) - 1):
+        corners = np.array([
+            (pts[i][0] + d * math.cos(yaws[i]), pts[i][1] + d * math.sin(yaws[i]))
+            for i, d in ((k, near_m), (k, near_m + depth_m),
+                         (k + 1, near_m + depth_m), (k + 1, near_m))])
+        digit = zones.digits[k] if k < len(zones.digits) else 0
+        measured = bool(zones.measured[k] and zones.measured[k + 1])
+        boxes.append((corners, corners.mean(axis=0), int(digit), measured))
+    return boxes
+
+
+def _bev_poly(bev, corners):
+    u, v = ground_to_bev_pixels(bev, corners[:, 0], corners[:, 1])
+    return np.column_stack([u, v]).round().astype(np.int32)
+
+
+def _label(view, bev, center, text, scale, thickness):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+    u, v = ground_to_bev_pixels(bev, center[0], center[1])
+    org = (int(round(float(u))) - tw // 2, int(round(float(v))) + th // 2)
+    cv2.putText(view, text, org, font, scale, (0, 0, 0), thickness + 3, cv2.LINE_AA)
+    cv2.putText(view, text, org, font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def draw_seen_zones(view, bev, boxes):
+    """Aus dem Bild gesehene Zonen: gruener, halbdurchsichtiger Kasten, Ziffer in der Mitte.
+    boxes: (Ecken (4, 2) m, Ziffer (0 = ?))."""
+    if not boxes:
+        return
+    overlay = view.copy()
+    polys = [_bev_poly(bev, corners) for corners, _ in boxes]
+    for poly in polys:
+        cv2.fillPoly(overlay, [poly], SEEN_COLOR)
+    cv2.addWeighted(overlay, 0.3, view, 0.7, 0, dst=view)
+    for poly, (corners, digit) in zip(polys, boxes):
+        cv2.polylines(view, [poly], True, SEEN_COLOR, 2, cv2.LINE_AA)
+        _label(view, bev, corners.mean(axis=0), str(digit) if digit else '?', 1.4, 3)
+
+
+def draw_model_zones(view, bev, boxes):
+    """Zonenmodell nur als duenner Umriss (orange), kleine Ziffer -- zum Vergleich mit den
+    gesehenen Zonen. boxes aus zone_boxes()."""
+    for corners, center, digit, _ in boxes:
+        cv2.polylines(view, [_bev_poly(bev, corners)], True, MODEL_COLOR, 1, cv2.LINE_AA)
+        _label(view, bev, center, str(digit) if digit else '?', 0.5, 1)
 
 
 def stop_on_signals():

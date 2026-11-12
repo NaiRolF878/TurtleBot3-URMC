@@ -35,8 +35,9 @@ from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithP
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    ControlType, bev_pixels_to_ground, control_mode_from_msg, frange, inverse_transform_points,
-    irange, read_params, require_params, run_node, transform_points, yaw_from_quaternion)
+    SELF_MASK_X_M, SELF_MASK_Y_M, ControlType, bev_pixels_to_ground, control_mode_from_msg,
+    frange, inverse_transform_points, irange, read_params, require_params, run_node,
+    transform_points, yaw_from_quaternion)
 
 # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
 LANE_MASK_STRIDE = 2
@@ -49,12 +50,15 @@ LINE_MIN_AREA_CM2 = 3.0
 # Eigener Bot vorn im Bild (Magnet, Halter): bis SELF_MASK_X_CM vor der Radachse und
 # +-SELF_MASK_Y_CM in beiden Farbmasken schwarz. Der Magnet reicht laut Debugbild bis
 # ~10,5 cm vor die Achse und +-4,5 cm.
-SELF_MASK_X_CM = 11.0
-SELF_MASK_Y_CM = 5.0
+SELF_MASK_X_CM = SELF_MASK_X_M * 100.0
+SELF_MASK_Y_CM = SELF_MASK_Y_M * 100.0
 # Linien-Tracking: hoechstens so weit (cm) darf sich eine Linie von Bild zu Bild bewegen.
 LINE_MAX_JUMP_CM = 5.0
 # So lange (s) wird die letzte Position einer verlorenen Linie gehalten.
 LINE_HOLD_TIME_S = 1.0
+# In diesen Modi laeuft die Spurfolge schon; ein Wechsel zu Lane aus einem anderen Modus loescht
+# die Linienanker.
+LINE_TRACK_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 # Kantenlaenge des Erosionskerns (px), entfernt Einzelpixel aus den Farbmasken.
 ERODE_KERNEL = 5
 # Ersatzspalte als Anteil der Bildbreite, wenn eine Linie weder gefunden noch
@@ -271,6 +275,13 @@ class detect_lane(Node):
             self.get_logger().info('Tunnel -- Spurerkennung pausiert.')
         elif self.control_mode == ControlType.Tunnel:
             self.get_logger().info('Tunnel verlassen -- Spurerkennung laeuft wieder.')
+        if new_mode == ControlType.Lane and self.control_mode not in LINE_TRACK_MODES:
+            # Zurueck in die Spurfolge (nach Maneuver, Stop ...): Linien neu suchen statt der
+            # letzten Position zu folgen. Beim Drehen wandern die Linien durchs Bild, die
+            # Verfolgung rastete auf der rechten Kante des LINKEN gelben Streifens ein (Lauf 11.11.).
+            # Ohne Anker nimmt get_x_for_driving die aeusserste Kante zur Spur hin.
+            self._anchor = {name: None for name in self._anchor}
+            self.get_logger().info('Spurfolge (wieder) aktiv -- Linien neu gesucht.')
         if self.control_mode == ControlType.Intersection and new_mode == ControlType.Lane:
             self._exit_far_until = time.monotonic() + EXIT_FAR_S
             self.get_logger().info('Nach Kreuzung: PID auf fernes Paar, bis die Suchzeile Linien hat.')

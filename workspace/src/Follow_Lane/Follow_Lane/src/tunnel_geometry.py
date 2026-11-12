@@ -7,14 +7,13 @@ import math
 import cv2
 import numpy as np
 
-from Follow_Lane.src.common import COSTMAP_BLOCKED
+from Follow_Lane.src.common import BOT_WIDTH, COSTMAP_BLOCKED  # noqa: F401 (BOT_WIDTH auch von hier importiert)
 
 # Umriss wie local_costmap.footprint in nav2_params.yaml (base_footprint).
 FOOTPRINT = np.array([[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089],
                       [-0.079, 0.069], [-0.092, 0.05], [-0.101, 0.028], [-0.101, -0.028],
                       [-0.092, -0.05], [-0.079, -0.069], [-0.033, -0.089], [0.033, -0.089]])
 BOT_LENGTH = 0.138
-BOT_WIDTH = 0.178
 LETHAL_COST = 100
 # Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar: einzelne Strahlen ins
 # Unbekannte. Die Waende sind schon um robot_radius aufgeblasen, die Bot-Mitte darf schmal fahren.

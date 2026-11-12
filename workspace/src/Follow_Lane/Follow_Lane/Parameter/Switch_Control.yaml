@@ -1,5 +1,8 @@
 /switch_control:
   ros__parameters:
+    # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop.
+    initial_mode: Lane
+
     # --- Eintritt Lane -> Obstacle ---
     # Halbwinkel: 45.0 heisst 90 Grad Gesamtkegel.
     obstacle_check_angle_deg: 45.0
@@ -10,3 +13,18 @@
     # --- Austritt Obstacle -> Lane ---
     # Im Bereich vorn, seitlich und schraeg hinten (270 Grad) nichts naeher als das (m).
     obstacle_clear_distance: 0.40
+
+    # --- Storage (storage_sequence.py) ---
+    # Zielzone sagt die Jury an.
+    target_zone: 2
+    # Ziffern der Zonen in Fahrtrichtung; leer = Schilder entscheiden.
+    zone_order: '1,2,3'
+    # Zone innen (m, zwischen den Linien) und Breite der Linien; vor Ort messen.
+    zone_width: 0.235
+    zone_depth: 0.17
+    line_width: 0.05
+    # Ohne Zonenmodell: so weit (m) hinter der letzten Querlinie zur Seite drehen; 0 = aus.
+    fallback_step: 0.35
+    # Nach so viel Strecke (m) endet die Erkundung.
+    explore_max_distance: 2.5
+    carry_max_vel: 0.05

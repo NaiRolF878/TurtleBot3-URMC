@@ -29,7 +29,7 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='felix.faass@web.de',
-    description='TODO: Package description',
+    description='URMRC 2026: Spurfolge, Hindernis, Tunnel und Storage',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -47,10 +47,14 @@ setup(
             'intersection_node    = Follow_Lane.src.intersection_node:main',
             'keepout_zone_node    = Follow_Lane.src.keepout_zone_node:main',
             'lane_costmap_node    = Follow_Lane.src.lane_costmap_node:main',
+            'magnet_controll      = Follow_Lane.src.magnet_controll:main',
             'nav2_goal_publisher  = Follow_Lane.src.nav2_goal_publisher:main',
             'nav2_view            = Follow_Lane.src.nav2_view:main',
             'notaus               = Follow_Lane.src.notaus:main',
             'odom_filter          = Follow_Lane.src.odom_filter:main',
+            'pallet_node          = Follow_Lane.src.pallet_node:main',
+            'storage_sign_node    = Follow_Lane.src.storage_sign_node:main',
+            'storage_zone_node    = Follow_Lane.src.storage_zone_node:main',
             'switch_control       = Follow_Lane.src.switch_control:main',
             'tunnel_explorer_node = Follow_Lane.src.tunnel_explorer_node:main',
         ],

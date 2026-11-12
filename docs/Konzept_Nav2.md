@@ -20,6 +20,8 @@ Variante mit Zonenaufteilung fuer den Obstacle-Modus liegt auf `LDS03-Doku`.
 | `Obstacle`    | LiDAR-Punkt im Kegel voraus naeher als `obstacle_trigger_distance`, keine Spurlinie dazwischen | Nav2 (`/nav2/cmd_vel`) |
 | `TunnelEntry` | Button im Debugbild oder Tunnelschild                              | PID auf den Spurfehler       |
 | `Tunnel`      | Beide Spurlinien enden kurz vor dem Bot                            | Nav2 (`/nav2/cmd_vel`); Engstelle: Grundbewegungen von switch_control |
+| `Stop`        | Storage: Start mit `storage.launch.py`, Schild lesen, Greifen, Ablegen | Null                     |
+| `Maneuver`    | Storage: Drehen, Strecke, Punkt anfahren, Andocken                 | Regler in odom (`/control/maneuver`) |
 
 Jeder andere Modus, veraltete Eingangsdaten oder ein fehlendes `/control/mode`
 fuehren zu einem Nullbefehl.
@@ -58,6 +60,10 @@ switch_control (tunnel_passage.py) faehrt sie mit Grundbewegungen: zum Start, au
 drehen, langsam geradeaus hindurch. Der Modus bleibt Tunnel, die Kamera also aus. Schmalere
 Engstellen und gescheiterte Durchfahrten werden gesperrt.
 
+**Storage (Palette, Stop/Maneuver).** Nur Kamera und Odometrie: Erkundung entlang
+der Spur mit Zonenmodell, leere Zonen erkennen, rechtwinklig an die Palette andocken und
+greifen, per odom in die Zielzone. Eigenes Konzept: `Storage_Retrieval_Konzept.md`.
+
 ## Detaildoku
 
 | Datei | Inhalt |
@@ -66,6 +72,7 @@ Engstellen und gescheiterte Durchfahrten werden gesperrt.
 | `Nav2_Costmap_Werte.md` | Herkunft und Abhaengigkeiten der Costmap- und MPPI-Werte |
 | `Obstacle_Tunnel_Offene_Punkte.md` | Testbeobachtungen und offene Punkte |
 | `Kalibrierung_Checkliste.md` | Kamera, BEV und Live-Test Schritt fuer Schritt |
+| `Storage_Retrieval_Konzept.md` | Storage-Aufgabe: Ablauf, Zustaende, Topics, Entscheidungen |
 | `Befehle.md` | Start, Not-Aus, Topics, Werkzeuge |
 | `challenges.md` (auf `main`) | Ueberblick ueber die Wettbewerbsaufgaben |
 
@@ -74,4 +81,5 @@ Engstellen und gescheiterte Durchfahrten werden gesperrt.
 ```bash
 bash scripts/tb/launchers/nav2_obstacle.sh   # alles inkl. Nav2, Not-Aus im Vordergrund
 bash scripts/tb/launchers/follow_lane.sh     # nur Spurfolge, ohne Nav2
+bash scripts/tb/launchers/storage.sh         # Storage-Aufgabe, Start per Button im Debugbild
 ```

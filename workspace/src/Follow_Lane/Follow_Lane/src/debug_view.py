@@ -1,9 +1,13 @@
-"""Debugbild mit Spurerkennung, Fahrmodus und Tunnel-Button.
+"""Debugbild mit Spurerkennung, Fahrmodus, Tunnel- und Storage-Button.
 
 Ein:  /detect/lane_debug, /control/mode, /control/tunnel_source, /control/cmd_vel, /odom,
       /battery_state, /detect/lane_obstacles, /detect/timing, /control/obstacle_enabled,
+      /control/storage_state, /control/storage_info,
+      /detect/zones_seen (Zonen, wie sie im Bild gesehen werden: gruene Kaesten mit Ziffer),
+      /control/storage_zones (Zonenmodell, duenner Umriss), TF odom -> base_footprint,
       Klicks aus rqt_image_view
-Aus:  /lokal/debug_view (Image), /control/tunnel_request (Bool, Button)
+Aus:  /lokal/debug_view (Image), /control/tunnel_request (Bool, Button),
+      /control/storage_request (Bool, Button)
 """
 import datetime as dt
 import json
@@ -20,26 +24,37 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, PolygonStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
-from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import BatteryState, CompressedImage, Image, PointCloud2
 from std_msgs.msg import Bool, Int32, String, UInt8
+from tf2_ros import Buffer, TransformListener
+from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 from vision_msgs.msg import Detection2DArray
+from visualization_msgs.msg import MarkerArray
 
-from follow_lane_msg.msg import FollowLaneDebug
+from follow_lane_msg.msg import FollowLaneDebug, StorageZones
 from Follow_Lane.src import bev_geometry
-from Follow_Lane.src.common import ControlType, control_mode_from_msg, run_node
+from Follow_Lane.src.common import (
+    ControlType, SharedParams, StorageState, control_mode_from_msg, draw_model_zones,
+    draw_seen_zones, pose2d_from_transform, run_node, storage_state_from_msg, zone_boxes)
 from Follow_Lane.src.ingress_node_nav2 import CALIBRATION, EXTRINSICS, FISHEYE_BALANCE
 
+# Gesehene Zonen gelten nur zu einem Spurbild mit hoechstens so viel (s) Zeitunterschied.
+ZONES_SEEN_MAX_AGE_S = 0.3
 BATT_FULL_V = 12.6    # 4.2 V/Zelle
 BATT_EMPTY_V = 11.0
 
 # Kopfzeile ueber dem Kamerabild und Breite der beiden Panels daneben; daraus
-# ergibt sich, wo der Tunnel-Button im fertigen Bild liegt.
+# ergibt sich, wo die Buttons im fertigen Bild liegen.
 HEAD_H = 40
 PANEL_W = 230
-# Tunnel-Button im Mode-Panel (Panel-Koordinaten: x0, y0, x1, y1).
+# Buttons im Mode-Panel (Panel-Koordinaten: x0, y0, x1, y1).
 TUNNEL_BUTTON = (8, 290, PANEL_W - 10, 345)
+STORAGE_BUTTON = (8, 360, PANEL_W - 10, 415)
+STORAGE_IDLE = (StorageState.IDLE, StorageState.FERTIG, StorageState.FEHLER)
+# Zeichen pro Zeile fuer den Storage-Klartext im linken Panel (Schrift 0.45).
+INFO_LINE_CHARS = 24
 
 # Groesse (h, w) der Kameraflaeche, solange noch kein Bild kam: /lokal/bev, 640x440.
 DEFAULT_CAMERA_SIZE = (440, 640)
@@ -58,6 +73,7 @@ MODE_COLOR = {
     ControlType.Stop:         (60, 60, 255),     # rot
     ControlType.Intersection: (255, 0, 255),     # magenta
     ControlType.Align:        (200, 200, 200),
+    ControlType.Maneuver:     (255, 150, 100),   # hellblau
 }
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
@@ -100,6 +116,7 @@ MODE_SOURCE = {
     ControlType.TunnelEntry: 'PID',
     ControlType.Tunnel:   'Nav2/MPPI',
     ControlType.Intersection: 'Kreuzung',
+    ControlType.Maneuver: 'odom',
 }
 
 
@@ -107,7 +124,7 @@ class debug_view(Node):
     """Im Tunnel kein Kamerabild (Reglement): detect_lane pausiert dort, und ein
     zwischengespeichertes Bild wird beim Eintritt verworfen.
 
-    Der Tunnel-Button kommt als Klickposition von rqt_image_view ("Publish click
+    Die Buttons kommen als Klickposition von rqt_image_view ("Publish click
     location" anhaken, Topic <Bildtopic>_mouse_left).
     """
 
@@ -153,11 +170,21 @@ class debug_view(Node):
         # Obstacle erlaubt (Taste O / rqt) -- Schild in der Kopfzeile.
         self.sub_obstacle_enabled = self.create_subscription(
             Bool, '/control/obstacle_enabled', self.cb_obstacle_enabled, 1)
+        self.sub_storage_state = self.create_subscription(
+            String, '/control/storage_state', self.cb_storage_state, 1)
+        self.sub_storage_info = self.create_subscription(
+            String, '/control/storage_info', self.cb_storage_info, 1)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.sub_storage_zones = self.create_subscription(
+            StorageZones, '/control/storage_zones', self.cb_storage_zones, latched)
+        self.sub_zones_seen = self.create_subscription(
+            MarkerArray, '/detect/zones_seen', self.cb_zones_seen, 1)
 
         # --- Publisher ---
         self.pub_debug_image = self.create_publisher(Image, '/lokal/debug_view', 1)
         self.pub_debug_raw = self.create_publisher(Image, '/lokal/debug_view_raw', 1)
         self.pub_tunnel_request = self.create_publisher(Bool, '/control/tunnel_request', 1)
+        self.pub_storage_request = self.create_publisher(Bool, '/control/storage_request', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(REDRAW_PERIOD_S, self.cb_timer)
@@ -198,8 +225,18 @@ class debug_view(Node):
                 os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
         except Exception:  # noqa: BLE001 -- ohne bev.yaml kein Abstand zur Kreuzung
             self._bev_spec = None
-        # Lage des Tunnel-Buttons im zuletzt gesendeten Bild (x0, y0, x1, y1).
+        self.storage_state = StorageState.IDLE
+        self.storage_info = ''
+        self.storage_zones = None
+        self.zones_seen = None          # letzte MarkerArray von storage_zone_node
+        self.zone_params = None         # side_near_m von storage_zone_node, erst bei Bedarf
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.bev = bev_geometry.load_bev_spec(
+            os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
+        # Lage der Buttons im zuletzt gesendeten Bild (x0, y0, x1, y1).
         self._tunnel_button = None
+        self._storage_button = None
         self.battery_icons = self._load_battery_icons()
 
         self.get_logger().info('Started debug_view Node.')
@@ -284,17 +321,41 @@ class debug_view(Node):
         self.lane_obstacle_points = cloud.width * cloud.height
         self.lane_obstacle_stamp = self.get_clock().now()
 
+    def cb_storage_state(self, msg):
+        self.storage_state = storage_state_from_msg(msg)
+
+    def cb_storage_info(self, msg):
+        self.storage_info = msg.data
+
+    def cb_zones_seen(self, msg):
+        self.zones_seen = msg
+
+    def cb_storage_zones(self, msg):
+        self.storage_zones = msg
+        if self.zone_params is None:
+            # Erst jetzt: ohne Storage gibt es storage_zone_node nicht (sonst Warnungen).
+            self.zone_params = SharedParams(self, 'storage_zone_node', ['side_near_m'])
+
     def cb_click(self, point):
-        if self._tunnel_button is None or self.control_mode is None:
-            return
-        x0, y0, x1, y1 = self._tunnel_button
-        if not (x0 <= point.x <= x1 and y0 <= point.y <= y1):
+        if self.control_mode is None:
             return
         # Ausdruecklich Start oder Abbruch, kein Umschalten: ein doppelt gezaehlter
-        # Klick darf den Tunnel nicht sofort wieder beenden.
-        req = Bool(data=self.control_mode not in TUNNEL_MODES)
-        self.pub_tunnel_request.publish(req)
-        self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
+        # Klick darf den Ablauf nicht sofort wieder beenden.
+        if self._inside(self._tunnel_button, point):
+            req = Bool(data=self.control_mode not in TUNNEL_MODES)
+            self.pub_tunnel_request.publish(req)
+            self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
+        elif self._inside(self._storage_button, point):
+            req = Bool(data=self.storage_state in STORAGE_IDLE)
+            self.pub_storage_request.publish(req)
+            self.get_logger().info('Storage-Button: ' + ('Start' if req.data else 'Abbruch'))
+
+    @staticmethod
+    def _inside(button, point):
+        if button is None:
+            return False
+        x0, y0, x1, y1 = button
+        return x0 <= point.x <= x1 and y0 <= point.y <= y1
 
     def cb_timer(self):
         age = self.lane_debug_age()
@@ -318,9 +379,10 @@ class debug_view(Node):
             self.note_view('view', self.follow_lane_debug.raw_image.header.stamp)
         final_debug_image = self.compose(camera, 'view')
         if self.control_mode is not None:
-            bx0, by0, bx1, by1 = TUNNEL_BUTTON
             off_x, off_y = camera.shape[1] + PANEL_W, HEAD_H
-            self._tunnel_button = (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1)
+            for name, (bx0, by0, bx1, by1) in (('_tunnel_button', TUNNEL_BUTTON),
+                                               ('_storage_button', STORAGE_BUTTON)):
+                setattr(self, name, (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1))
 
         msg = self.bridge.cv2_to_imgmsg(final_debug_image, encoding='bgr8')
         age = self.lane_debug_age()
@@ -594,7 +656,40 @@ class debug_view(Node):
             for line in lines:
                 a, b = line.points[0], line.points[1]
                 cv2.line(raw, (int(a.x), int(a.y)), (int(b.x), int(b.y)), color, 3, cv2.LINE_AA)
+        self.draw_storage_zones(raw, d.raw_image.header.stamp)
         return raw
+
+    def draw_storage_zones(self, raw, stamp):
+        """Zonen ins Spurbild (BEV): gruen gefuellt mit Ziffer = so, wie storage_zone_node sie im
+        Bild sieht (ohne Odometrie); orange Umriss = Zonenmodell (in odom, solange Storage laeuft).
+        Liegen beide auseinander, stimmt das Modell oder die Odometrie nicht."""
+        if raw.shape[:2] != (self.bev['height'], self.bev['width']):
+            return
+        t_img = stamp.sec + stamp.nanosec * 1e-9
+        if self.storage_state != StorageState.IDLE and self.storage_zones is not None \
+                and self.zone_params is not None and self.zone_params.ready:
+            pose = None
+            for t in (Time.from_msg(stamp), Time()):
+                try:
+                    pose = pose2d_from_transform(
+                        self.tf_buffer.lookup_transform('odom', 'base_footprint', t))
+                    break
+                except ExtrapolationException:
+                    continue
+                except (LookupException, ConnectivityException):
+                    break
+            draw_model_zones(raw, self.bev, zone_boxes(
+                self.storage_zones, pose, self.zone_params['side_near_m']))
+        seen = []
+        for m in (self.zones_seen.markers if self.zones_seen is not None else []):
+            if len(m.points) < 4:
+                continue
+            t_m = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+            if abs(t_m - t_img) > ZONES_SEEN_MAX_AGE_S:
+                continue
+            corners = np.array([(p.x, p.y) for p in m.points[:4]])
+            seen.append((corners, int(m.text) if m.text.isdigit() else 0))
+        draw_seen_zones(raw, self.bev, seen)
 
     def build_generic_panel(self, height):
         def speed(v):
@@ -614,11 +709,32 @@ class debug_view(Node):
         lane_error = '--' if self.follow_lane_debug is None \
             else f'{self.follow_lane_debug.lane_error:+.3f}'
         cv2.putText(panel, lane_error, (8, 315), font, 1, (80, 80, 255), 2, cv2.LINE_AA)
-        cv2.putText(panel, 'Blaue Pixel:', (8, 365), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
-        blue = '--' if self.barrier_pixels is None else str(self.barrier_pixels)
-        blue_color = (80, 80, 255) if self.barrier else (255, 160, 60)
-        cv2.putText(panel, blue, (8, 400), font, 1, blue_color, 2, cv2.LINE_AA)
+        if self.storage_state != StorageState.IDLE:
+            self.draw_storage_info(panel)
+        else:
+            cv2.putText(panel, 'Blaue Pixel:', (8, 365), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+            blue = '--' if self.barrier_pixels is None else str(self.barrier_pixels)
+            blue_color = (80, 80, 255) if self.barrier else (255, 160, 60)
+            cv2.putText(panel, blue, (8, 400), font, 1, blue_color, 2, cv2.LINE_AA)
         return panel
+
+    def draw_storage_info(self, panel):
+        """Storage-Klartext von switch_control (Zonen, Ziel, Fehlergrund), umgebrochen."""
+        if self.storage_state == StorageState.IDLE and not self.storage_info:
+            return
+        lines, line = [], ''
+        for word in self.storage_info.split():
+            if line and len(line) + 1 + len(word) > INFO_LINE_CHARS:
+                lines.append(line)
+                line = word
+            else:
+                line = f'{line} {word}'.strip()
+        if line:
+            lines.append(line)
+        color = (60, 60, 255) if self.storage_state == StorageState.FEHLER else (200, 200, 200)
+        for i, text in enumerate(lines[:5]):
+            cv2.putText(panel, text, (8, 345 + 18 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
+                        cv2.LINE_AA)
 
     def build_mode_panel(self, height, width):
         panel = np.zeros((height, width, 3), dtype=np.uint8)
@@ -646,26 +762,41 @@ class debug_view(Node):
         cv2.putText(panel, source, (8, 160),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
+        if self.storage_state != StorageState.IDLE:
+            cv2.putText(panel, self.storage_state.name, (8, 188),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
         self.draw_lane_obstacle_status(panel)
         self.draw_tunnel_button(panel)
-        cv2.putText(panel, 'Kreuzung:', (8, 375),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+        self.draw_storage_button(panel)
+        # Kreuzung: eine Zeile unter dem Storage-Button (Abstand zur Haltelinie, Phase).
         dist = self.intersection_distance()
-        text, ink = ('--', (120, 120, 120)) if dist is None else (f'{dist * 100:.0f} cm', (0, 255, 0))
-        cv2.putText(panel, text, (8, 410), cv2.FONT_HERSHEY_SIMPLEX, 1, ink, 2, cv2.LINE_AA)
+        text = 'Kreuzung ' + ('--' if dist is None else f'{dist * 100:.0f} cm')
         if self.intersection_state and self.intersection_state != 'Frei':
-            cv2.putText(panel, self.intersection_state, (8, 432), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, MODE_COLOR[ControlType.Intersection], 1, cv2.LINE_AA)
+            text += f' | {self.intersection_state}'
+        ink = MODE_COLOR[ControlType.Intersection] if dist is not None or \
+            (self.intersection_state and self.intersection_state != 'Frei') else (120, 120, 120)
+        cv2.putText(panel, text, (8, 433), cv2.FONT_HERSHEY_SIMPLEX, 0.45, ink, 1, cv2.LINE_AA)
         return panel
 
     def draw_tunnel_button(self, panel):
         """Button zum Starten/Abbrechen des Tunnelmodus. Zeigt nur den Modus, springt
         nach dem automatischen Austritt also von selbst zurueck."""
-        x0, y0, x1, y1 = TUNNEL_BUTTON
         in_tunnel = self.control_mode in TUNNEL_MODES
-        fill = (60, 60, 200) if in_tunnel else MODE_COLOR[ControlType.Tunnel]
-        ink = (255, 255, 255) if in_tunnel else (0, 0, 0)
         text = 'TUNNEL ABBRECHEN' if in_tunnel else 'TUNNEL STARTEN'
+        self.draw_button(panel, TUNNEL_BUTTON, text, in_tunnel, MODE_COLOR[ControlType.Tunnel])
+
+    def draw_storage_button(self, panel):
+        """Button zum Starten/Abbrechen der Storage-Aufgabe; nach FERTIG oder FEHLER
+        startet er neu."""
+        running = self.storage_state not in STORAGE_IDLE
+        text = 'STORAGE ABBRECHEN' if running else 'STORAGE STARTEN'
+        self.draw_button(panel, STORAGE_BUTTON, text, running, MODE_COLOR[ControlType.Maneuver])
+
+    def draw_button(self, panel, rect, text, active, idle_fill):
+        x0, y0, x1, y1 = rect
+        fill = (60, 60, 200) if active else idle_fill
+        ink = (255, 255, 255) if active else (0, 0, 0)
 
         cv2.rectangle(panel, (x0, y0), (x1, y1), fill, -1)
         cv2.rectangle(panel, (x0, y0), (x1, y1), (230, 230, 230), 1)

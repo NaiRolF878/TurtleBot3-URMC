@@ -51,6 +51,10 @@ def launch_setup(context, *args, **kwargs):
     # in Obstacle kein Fahrbefehl, der Bot bliebe stehen. Live umschaltbar in rqt.
     switch_params['obstacle_enabled'] = \
         LaunchConfiguration('obstacle').perform(context).lower() == 'true'
+    # Zusaetzliche Datei mit Node-Bloecken (storage.launch.py: Storage.yaml); ueberschreibt
+    # die Werte davor, weil sie spaeter in der Liste steht.
+    storage_params = LaunchConfiguration('storage_params').perform(context)
+    extra = [storage_params] if storage_params else []
 
     # Die *_nav2-Nodes pausieren im Tunnel. Sie laufen als ingress_node/detect_lane,
     # damit rqt, save-params.sh und ros2 param gleich funktionieren.
@@ -65,11 +69,11 @@ def launch_setup(context, *args, **kwargs):
         ),
         Node(
             package='Follow_Lane', executable='control_driving', name='control_driving',
-            parameters=[control_params],
+            parameters=[control_params] + extra,
         ),
         Node(
             package='Follow_Lane', executable='switch_control', name='switch_control',
-            parameters=[switch_params],
+            parameters=[switch_params] + extra,
         ),
         # Kreuzung: an der Haltelinie halten, Vorfahrt (YOLO) pruefen, geradeaus queren.
         Node(
@@ -93,6 +97,7 @@ def generate_launch_description():
         DeclareLaunchArgument('intersection_params',
             default_value=os.path.join(PARAM_DIR, 'Intersection.yaml')),
         DeclareLaunchArgument('obstacle', default_value='false'),
+        DeclareLaunchArgument('storage_params', default_value=''),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
     ])

@@ -6,6 +6,7 @@ Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel,
       /control/maneuver_status (UInt32, id der zuletzt beendeten Grundbewegung)
 Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel. Intersection:
 /intersection/cmd_vel (intersection_node: halten, queren).
+Maneuver: Grundbewegung in odom (auch das Andocken an die Palette, geradeaus).
 Tunnel mit laufender Grundbewegung in odom (Durchfahrt einer Engstelle): nur diese.
 Alles ausser dem PID wird auf die Radgrenze skaliert, der PID begrenzt selbst.
 Align: auf der Stelle zum Kurs /control/align_yaw (switch_control), Ist-Kurs aus
@@ -33,8 +34,9 @@ from Follow_Lane.src.common import (
 # nicht zwischen die Spurwaende.
 PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
-# Hier hat eine laufende Grundbewegung Vorrang vor Nav2; der Modus bleibt (im Tunnel keine Kamera).
-MANEUVER_MODES = (ControlType.Tunnel,)
+# Hier werden Grundbewegungen angenommen: in Maneuver nur sie (ohne Auftrag Null), im Tunnel hat
+# eine laufende Vorrang vor Nav2, der Modus bleibt (im Tunnel keine Kamera).
+MANEUVER_MODES = (ControlType.Maneuver, ControlType.Tunnel)
 INTERSECTION_MODES = (ControlType.Intersection,)
 
 # Align (nach Obstacle): auf der Stelle zum Zielkurs von switch_control (/control/align_yaw,
@@ -50,7 +52,7 @@ ALIGN_INPUT_TIMEOUT = 1.0
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
 
-# Prueft, ob die aktive Quelle noch liefert, und regelt Grundbewegungen; = controller_frequency
+# Prueft, ob die aktive Quelle noch liefert, und regelt Maneuver; = controller_frequency
 # in nav2_params.yaml.
 WATCHDOG_RATE_HZ = 20.0
 
@@ -78,7 +80,7 @@ MODE_SWITCH_HOLD = 0.3
 STOP_REPEAT = 10
 STOP_REPEAT_PERIOD_S = 0.05
 
-# Grundbewegung: darunter bewegt sich der Burger nicht sicher (m/s, rad/s).
+# Maneuver: darunter bewegt sich der Burger nicht sicher (m/s, rad/s).
 MANEUVER_MIN_VEL = 0.02
 MANEUVER_MIN_ANG = 0.3
 # Fertig, wenn so nah am Ziel; Zwischenpunkte eines Pfads gelten ab MANEUVER_WAYPOINT_TOL als
@@ -111,11 +113,12 @@ class control_driving(Node):
     der alten Quelle weiterfaehrt. Lane <-> TunnelEntry behaelt den PID ohne Halt.
     Nach dem Wechsel in den Tunnel bleibt die Nav2-Quelle MODE_SWITCH_HOLD lang gesperrt.
 
-    Grundbewegung (nur in MANEUVER_MODES): switch_control sendet sie zyklisch auf
-    /control/maneuver. Eine neue id startet sie ab der aktuellen Pose; solange sie laeuft,
-    zaehlt /nav2/cmd_vel nicht. Ist sie fertig, meldet dieser Node die id auf
-    /control/maneuver_status, sendet Null und folgt wieder Nav2. Ein Moduswechsel verwirft
-    die laufende Bewegung.
+    Maneuver: switch_control sendet die Grundbewegung zyklisch auf /control/maneuver.
+    Eine neue id startet sie ab der aktuellen Pose; ist sie fertig, meldet dieser
+    Node die id auf /control/maneuver_status und sendet Null, bis eine neue kommt.
+    Im Tunnel zaehlt /nav2/cmd_vel nicht, solange sie laeuft; danach wieder Nav2.
+    Ein Moduswechsel verwirft die laufende Bewegung.
+
     """
 
     def __init__(self):
@@ -129,7 +132,7 @@ class control_driving(Node):
         self.declare_parameter('MAX_VEL',            Parameter.Type.DOUBLE, frange(0.0, 10.0))
         self.declare_parameter('speed_curve_factor', Parameter.Type.DOUBLE, frange(0.0, 5.0))
         self.declare_parameter('min_speed_factor',   Parameter.Type.DOUBLE, frange(0.0, 10.0))
-        # Grundbewegung: Geschwindigkeit proportional zum Rest (k_lin, k_ang), nach oben begrenzt.
+        # Maneuver: Geschwindigkeit proportional zum Rest (k_lin, k_ang), nach oben begrenzt.
         self.declare_parameter('maneuver_max_vel',   Parameter.Type.DOUBLE, frange(0.01, 0.22))
         self.declare_parameter('maneuver_max_ang',   Parameter.Type.DOUBLE, frange(0.1, 2.8))
         self.declare_parameter('maneuver_k_lin',     Parameter.Type.DOUBLE, frange(0.1, 10.0))
@@ -293,7 +296,8 @@ class control_driving(Node):
             else:
                 self.pub_cmd_vel.publish(twist)
             return
-        if self._maneuver is not None and self._mode_is(*MANEUVER_MODES):
+        if self._mode_is(ControlType.Maneuver) or \
+                (self._maneuver is not None and self._mode_is(ControlType.Tunnel)):
             self._drive_maneuver()
             return
         if self._mode_is(*PID_MODES):
@@ -492,7 +496,7 @@ class control_driving(Node):
         try:
             tf = self.tf_buffer.lookup_transform(ODOM_FRAME, ROBOT_FRAME, rclpy.time.Time())
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
-            self.get_logger().warn(f'Keine Roboterpose fuer die Grundbewegung: {e}', throttle_duration_sec=5.0)
+            self.get_logger().warn(f'Keine Roboterpose fuer Maneuver: {e}', throttle_duration_sec=5.0)
             return None
         # Veraltet? Am lokalen Empfang gemessen, nicht an der Bot-Uhr (die kann abweichen).
         now = time.monotonic()

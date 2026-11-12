@@ -51,6 +51,7 @@ tb             # Menü mit allen Launchern
 | `follow_lane.sh` | komplette Spurverfolgung + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
 | `follow_lane_record.sh` | wie `follow_lane.sh`, dazu während der Fahrt jede Sekunde ein YOLO-Trainingsbild, abwechselnd Original (`_roh`) und entzerrt (`_entzerrt`), nach `dataset/fahrt_<datum>_<zeit>/` (nicht im Stand/Tunnel) |
 | `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel), RViz und Draufsicht `/nav2/view` |
+| `storage.sh` | Storage-Aufgabe (Palette): Spurverfolgung + Storage-Detektoren, ohne Nav2. Bot steht, bis im Debugbild **STORAGE STARTEN** geklickt wird |
 | `extrinsik_view.sh` | Kamerabild mit 10-cm-Bodengitter + Vogelperspektive, Brett wird live vermessen |
 | `rqt_debug.sh` | Bildanzeige (`/lokal/raw_image`, `/lokal/bev`, Debug-Bilder) |
 | `rqt_params.sh` | Parameter von `detect_lane` / `control_driving` live einstellen |
@@ -94,6 +95,7 @@ bash scripts/tb/load-params.sh detect_lane     # Datei in den laufenden Node lad
 | `logs/kalibrierung/` | Bilder und Aufnahmen der Kamerakalibrierung (Intrinsik-Archive, Vogelperspektive, Rasterbilder) |
 | `logs/bilder/` | Screenshots und Skizzen |
 | `logs/notizen/` | lose Notizen |
+| `logs/storage-<Zeit>.log` / `storage-latest.log` | Ausgaben der Pipeline bei `storage.sh` |
 
 Zeiten in Dateinamen sind UTC (Winterzeit 1 h, Sommerzeit 2 h hinter deutscher Zeit).
 
@@ -105,7 +107,11 @@ Zeiten in Dateinamen sind UTC (Winterzeit 1 h, Sommerzeit 2 h hinter deutscher Z
 | `/lokal/raw_image` | entzerrtes Bild (ingress_node) |
 | `/lokal/bev` | **Vogelperspektive**, 5–60 cm vor der Radachse, ±40 cm, 1,25 mm/px (640x440) |
 | `/detect/lane` | Spurfehler für den Regler |
-| `/control/mode` | Fahrmodus von `switch_control` (1 Lane, 2 Obstacle, 7 TunnelEntry, 6 Tunnel) |
+| `/control/mode` | Fahrmodus von `switch_control` (1 Lane, 2 Obstacle, 3 Stop, 7 TunnelEntry, 6 Tunnel, 8 Dock, 9 Maneuver) |
+| `/control/storage_state`, `/control/storage_info` | Storage: Ablaufschritt und Klartext (Zonen, Ziel, Rueckmeldungen, Fehlergrund) |
+| `/detect/pallet`, `/detect/pallet_grip` | Storage: Fuellung der Zone und Vorderkante der Palette; Korrelation beim Griff |
+| `/detect/zone_debug/compressed` | Storage: Zonenlinien, Zonenmodell, Boden, Vorderkante der Palette mit Rahmen und Abstand |
+| `/detect/pallet_debug/compressed`, `/detect/storage_sign_debug/compressed` | Storage: Magnetlage und Griff; Schilder |
 | `/nav2/cmd_vel` | Fahrbefehle von Nav2 (`controller_server`) an `control_driving` |
 | `/control/cmd_vel` | Fahrbefehle von `control_driving` an den Not-Aus |
 | `/control/clear_maps` | Taste L: `lane_costmap_node` leert Spurgedächtnis und Costmaps |
