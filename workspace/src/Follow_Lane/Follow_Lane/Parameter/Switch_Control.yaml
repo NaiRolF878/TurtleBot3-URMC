@@ -19,6 +19,10 @@
     target_zone: 2
     # Ziffern der Zonen in Fahrtrichtung; leer = Schilder entscheiden.
     zone_order: '1,2,3'
+    # Zone innen (m, zwischen den Linien) und Breite der Linien; vor Ort messen.
+    zone_width: 0.235
+    zone_depth: 0.17
+    line_width: 0.05
     # Ohne Zonenmodell: so weit (m) hinter der letzten Querlinie zur Seite drehen; 0 = aus.
     fallback_step: 0.35
     # Nach so viel Strecke (m) endet die Erkundung.

@@ -75,8 +75,10 @@ Das Konzept kommt ohne feste Streckenwerte aus:
    Zone, liest Schild, Fuellung und Zonentiefe (vordere und hintere Querlinie), speichert die Pose
    und dreht zurueck. Belegt ist die Zone, wenn genug Bilder zwischen ihren Linien genug
    Flaeche zeigen, die weder dunkler Boden noch weisse Linie ist: „Palette in Zone X gefunden“.
-   Ohne Modell (weniger als zwei Linien) dreht er `fallback_step` hinter der letzten Querlinie
-   zur Seite und liest nur das Schild; ohne lesbares Schild wird die Stelle verworfen.
+   Ohne Modell (noch keine bestaetigte Querlinie) dreht er `fallback_step` hinter dem letzten
+   Halt zur Seite und liest nur das Schild; ohne lesbares Schild wird die Stelle verworfen.
+   Verschiebt sich das Modell, nachdem er schon Zonen besucht hat (die erste Linie war keine
+   Grenze), faehrt er rueckwaerts zum Start und erkundet neu (hoechstens zweimal, siehe unten).
    Die Erkundung endet, sobald Paletten- und Zielzone bekannt sind, nach drei Zonen oder nach
    `explore_max_distance`. Ohne gesehene Palette: „keine Palette gefunden“, Abbruch (nicht raten).
 3. **Zur Palettenzone** per Odometrie auf die gespeicherte Pose (vor- oder rueckwaerts), zur
@@ -152,14 +154,27 @@ BEV, und dort erscheint er wegen der Hoehe viel weiter vorn.
   `EXPLORE_MIN_LINE_M` 0,10 m Laenge (storage_zone_node). Weiter weg ist die BEV verzerrt (dieselbe
   Linie 5-6 cm zu weit hinten, ~10 Grad gedreht -> Doppellinien), kurze Stuecke am Streifenrand
   waren Scheinlinien. Nachgerechnet mit der Aufnahme vom 11.11. (logs/bags).
-- Nur aus den bestaetigten Querlinien (je drei Bilder), ohne Streckenmasse: Jede Querlinie darf
-  L0 sein, jede spaetere mit 1-3 Zonen dazwischen gibt die Breite vor. Es gewinnt das Raster,
-  das die meisten Linien erklaert. Dagegen zaehlen Linien innerhalb des Rasters, die nicht
-  passen (Schatten, Palette, Markierungen), und fehlende Linien, wo der Bot schon hingesehen
-  hat. Eine Zone ist mindestens so breit wie der Bot (`BOT_WIDTH`).
+- Linienabstand bekannt: `zone_width` + `line_width` (Switch_Control.yaml, Zone innen und
+  Klebeband, vor Ort messen; 0,235 + 0,05 = 0,285 m passt zu den Laeufen vom 10.11. mit
+  0,27-0,30 m). Aus den bestaetigten Querlinien (je drei Bilder): Jede darf jede Grenzlinie
+  sein, es gewinnt die Lage, die die meisten Linien erklaert. Dagegen zaehlen Linien innerhalb
+  des Rasters, die nicht passen (Schatten, Palette, Markierungen), und fehlende Linien, wo der
+  Bot schon hingesehen hat. Die Lage wird aus allen passenden Linien gemittelt.
+- **Schon die erste Linie legt alle Zonen fest** (sie gilt als Grenze vor Zone 1), spaetere
+  pruefen gegen. Von der Palette verdeckte Linien schaden nicht.
+- **Neustart:** Liegt eine besuchte Zone im Modell spaeter mehr als eine halbe Zonenbreite
+  woanders, war die erste Linie keine Grenze, Schild und Fuellung gehoeren zu einer anderen
+  Zone. Der Bot vergisst die Besuche, faehrt rueckwaerts per Odometrie zum Start (Spurfolge
+  ginge nur mit einer Wende auf der 20-cm-Spur) und erkundet neu; die Linien bleiben, das Modell
+  ist also schon korrigiert. Hoechstens `MAX_RESTARTS` = 2, danach FEHLER.
+- **Grenze:** Ist die Grenze vor Zone 1 nie zu sehen (verdeckt oder nicht erkannt), sind die
+  folgenden Linien nicht eindeutig zu zaehlen: das Modell nimmt die fruehere Lage, alle Zonen
+  liegen dann um eine verschoben. Dann widerspricht das Schild (Warnung im Log).
 - Keine Strichel-Erkennung mehr (bis 10.11.): Sie meldete bei langen Strichen weitere Anfaenge
   und Enden mitten in der Strichelung, das Raster wurde zu schmal und jede Zone um eine
-  verschoben. Mit den Laeufen vom 10.11. getestet: alle Raster 0,27-0,30 m.
+  verschoben.
+- Ist beim Schild-Lesen nur die Vorderkante der Zone zu sehen, endet sie fuer die Fuellung
+  `zone_depth` + `line_width` dahinter (storage_zone_node liest die Werte bei switch_control).
 - Die **Zielzone wird beim Erkunden nicht angefahren** (laut Aufgabe immer frei): Ihre Lage kommt
   aus dem Zonenmodell (Mitte, auf der Spurpunkt-Linie der besuchten Palettenzone), die Richtung in
   die Zone wie dort gemessen. Nur mit `zone_order`; ohne Reihenfolge entscheidet das Schild, dann
@@ -203,6 +218,7 @@ stateDiagram-v2
     state "ABLAGE_ANFAHREN (Maneuver)" as ABLAGE_ANFAHREN
     state "ABLEGEN (Stop, Magnet aus)" as ABLEGEN
     state "VERLASSEN (Maneuver)" as VERLASSEN
+    state "ZURUECK_ZUM_START (Maneuver)" as ZURUECK_ZUM_START
     state "FERTIG (Stop)" as FERTIG
     state "FEHLER (Stop, Magnet aus -- an, wenn Palette gegriffen)" as FEHLER
 
@@ -212,6 +228,8 @@ stateDiagram-v2
     ZURUECKDREHEN --> ERKUNDEN : Paletten- oder Zielzone noch unbekannt
     ZURUECKDREHEN --> ZUR_PALETTENZONE : beide bekannt
     ERKUNDEN --> ZUR_PALETTENZONE : explore_max_distance, beide bekannt
+    ERKUNDEN --> ZURUECK_ZUM_START : Modell verschoben, besuchte Zone falsch
+    ZURUECK_ZUM_START --> ERKUNDEN : rueckwaerts am Start, in Startrichtung
     ZUR_PALETTENZONE --> POSITIONIERT : vor der Zone, zur Zone gedreht
     POSITIONIERT --> AUSRICHTEN : Haltezeit vorbei, Vorderkante vermessen
     POSITIONIERT --> NEU_ANSETZEN : keine Vorderkante gefunden
@@ -302,7 +320,7 @@ und `nav2_obstacle.launch.py` ohne `Storage.yaml` starten.
 | Magnet | schaltet switch_control | An/aus ist eine Entscheidung, kein Fahrbefehl |
 | Start | Button STORAGE STARTEN (sendet `/control/storage_request`) | Start per ROS-Befehl von Hand ist erlaubt; gleiches Muster wie beim Tunnel |
 | Lagebild | Erst Erkundung, Posen in `odom` speichern, danach Palette holen | Liefert die Erkennung (Bonus) und die Ziele fuer den Transport; unabhaengig von der Zonengroesse |
-| Zone erkennen | Zonenmodell aus Querlinien (gleichmaessigstes Raster), Ziffer aus der Reihenfolge; Rueckfall ohne Modell: zur Seite drehen und Schild lesen | Keine festen Abstaende; eine uebersehene Linie verschiebt die Zaehlung nicht |
+| Zone erkennen | Zonenmodell aus Querlinien mit bekanntem Linienabstand (YAML), ab der ersten Linie; Ziffer aus der Reihenfolge; Neustart bei falscher Zuordnung; Rueckfall ohne Modell: zur Seite drehen und Schild lesen | Masse vor Ort einstellbar; eine verdeckte Linie verschiebt die Zaehlung nicht |
 | Schilder | Blau-Maske (LAB) + Ellipse + Ziffern-Vorlagen; parallel ein trainiertes Modell | Aussehen bekannt; die Kreisform trennt das Schild von der blauen Schranke (Balken, auch beim Oeffnen) |
 | Zusammenfuehrung | Beide Detektoren stimmen ueber mehrere Bilder ab, waehrend der Bot steht; jeder per Parameter abschaltbar | Robust; faellt einer aus, arbeitet der andere weiter |
 | Manuelle Eingabe | `target_zone` (Jury), `zone_order` (Ziffern in Fahrtrichtung) | Die Jury bestimmt die Zielzone; die Palettenzone erkennt der Bot selbst (Wertung) |

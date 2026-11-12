@@ -76,6 +76,7 @@ class StorageState(Enum):
     FERTIG = 16
     FEHLER = 17
     AUSRICHTEN = 18          # rechtwinklig vor die Palette (Vor-Andock-Pose)
+    ZURUECK_ZUM_START = 19   # Zonen falsch zugeordnet: rueckwaerts zum Start, neu erkunden
 
 
 class SignType(Enum):

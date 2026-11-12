@@ -64,6 +64,8 @@ PALLET_STATES = (StorageState.SCHILD_LESEN, StorageState.POSITIONIERT, StorageSt
                  StorageState.GREIFEN)
 # Weisse Linien und ihr Rand (px) zaehlen nie als Palette.
 WHITE_DILATE_PX = 5
+# Zonenmasse (zone_depth, line_width) stehen nur bei switch_control.
+ZONE_SOURCE = 'switch_control'
 # Abstand (m) zu den Zonenlinien, der beim Vermessen frei bleibt.
 ZONE_MARGIN_M = 0.02
 # Ohne Zonenmodell wird je Seite so breit (m) vor dem Bot gesucht.
@@ -130,6 +132,7 @@ class storage_zone_node(Node):
         require_params(self, self._param_names)
         read_params(self, self._param_names)
         self.colors = SharedParams(self, COLOR_SOURCE, WHITE_PARAMS + CLAHE_PARAMS)
+        self.zone_size = SharedParams(self, ZONE_SOURCE, ['zone_depth', 'line_width'])
 
         # --- Subscriber ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -177,6 +180,10 @@ class storage_zone_node(Node):
             return
         if not self.colors.ready:
             self.get_logger().warn(f'Noch keine Farben von /{COLOR_SOURCE}.', throttle_duration_sec=5.0)
+            return
+        if not self.zone_size.ready:
+            self.get_logger().warn(f'Noch keine Zonenmasse von /{ZONE_SOURCE}.',
+                                   throttle_duration_sec=5.0)
             return
         read_params(self, self._param_names)
         try:
@@ -269,7 +276,7 @@ class storage_zone_node(Node):
         x_row = bev_pixels_to_ground(self.bev, 0, np.arange(h))[0]
         y_col = bev_pixels_to_ground(self.bev, np.arange(w), 0)[1]
         obj &= ~((x_row < SELF_MASK_X_M)[:, None] & (np.abs(y_col) < SELF_MASK_Y_M)[None, :])
-        left, right, width = self.zone_bounds(x_row, pose)
+        left, right = self.zone_bounds(x_row, pose)
         inside = (y_col[None, :] <= (left - ZONE_MARGIN_M)[:, None]) & \
                  (y_col[None, :] >= (right + ZONE_MARGIN_M)[:, None])
 
@@ -279,7 +286,8 @@ class storage_zone_node(Node):
             front = near[0]
         if cross_x:
             far = [x for x in cross_x if x > front + ZONE_MIN_DEPTH_M]
-            back = max(far) if far else front + width
+            back = max(far) if far else \
+                front + self.zone_size['zone_depth'] + self.zone_size['line_width']
         rows = (x_row > front + ZONE_MARGIN_M) & (x_row < back - ZONE_MARGIN_M)
 
         fill = -1.0
@@ -367,13 +375,13 @@ class storage_zone_node(Node):
         return float(a + b * lateral), lateral, float(-math.atan(b))
 
     def zone_bounds(self, x_row, pose):
-        """Linke und rechte Grenze (Y je Zeile) und Breite der Zone vor dem Bot: die
+        """Linke und rechte Grenze (Y je Zeile) der Zone vor dem Bot: die
         naechsten Linien des Zonenmodells links und rechts, sonst +-DEFAULT_HALF_M."""
         left = np.full_like(x_row, DEFAULT_HALF_M)
         right = np.full_like(x_row, -DEFAULT_HALF_M)
         z = self.zones
         if z is None or pose is None or len(z.lines) < 2:
-            return left, right, 2 * DEFAULT_HALF_M
+            return left, right
         ref = int(np.argmin(np.abs(x_row - ZONE_REF_X_M)))
         pts = inverse_transform_points(
             pose, np.array([(p.position.x, p.position.y) for p in z.lines]))
@@ -390,7 +398,7 @@ class storage_zone_node(Node):
             left = min(lefts, key=lambda c: c[ref])
         if rights:
             right = max(rights, key=lambda c: c[ref])
-        return left, right, float(left[ref] - right[ref])
+        return left, right
 
     def publish_pallet(self, stamp, pallet):
         msg = PalletDetection()

@@ -25,7 +25,7 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 
 from follow_lane_msg.msg import Maneuver, PalletDetection, StorageSign, StorageZones
 from Follow_Lane.src.common import (
-    BOT_WIDTH, MAGNET_FRONT_M, ControlType, StorageState, frange, irange, pose2d_from_transform, require_params,
+    MAGNET_FRONT_M, ControlType, StorageState, frange, irange, pose2d_from_transform, require_params,
     wrap_angle, yaw_from_quaternion)
 
 S = StorageState
@@ -37,7 +37,7 @@ STATE_PUBLISH_PERIOD_S = 0.5
 # Zustaende, die eine Folge von Grundbewegungen abfahren und dann weiterschalten.
 MANEUVER_STATES = (S.ZUR_ZONE_DREHEN, S.ZURUECKDREHEN, S.ZUR_PALETTENZONE, S.AUSRICHTEN,
                    S.ANDOCKEN, S.GRIFF_PRUEFEN, S.NEU_ANSETZEN, S.HERAUSFAHREN, S.TRANSPORT,
-                   S.ABLAGE_ANFAHREN, S.VERLASSEN)
+                   S.ABLAGE_ANFAHREN, S.VERLASSEN, S.ZURUECK_ZUM_START)
 # Mit Palette am Magneten: verschwindet sie aus dem Bild, ist sie verloren.
 INACTIVE_STATES = (S.IDLE, S.FERTIG, S.FEHLER)
 # Zwei Querlinien naeher als das (m) zaehlen bei der Zonentiefe als eine.
@@ -50,6 +50,8 @@ MAGNET_TOPIC = '/lokal/magnet_control'
 # Reglement: drei Zonen rechts der Spur.
 ZONE_COUNT = 3
 ZONES_RIGHT = True
+# So oft darf die Erkundung nach falscher Zuordnung der Zonen neu beginnen.
+MAX_RESTARTS = 2
 # Treffer naeher als BOUNDARY_MERGE_M (entlang der Spur) sind dieselbe Linie, bestaetigt
 # nach BOUNDARY_CONFIRM Bildern.
 BOUNDARY_MERGE_M = 0.05
@@ -58,7 +60,6 @@ BOUNDARY_CONFIRM = 3
 ZONE_WIDTH_TOL = 0.25
 # Schmaler als der Bot kann eine Zone nicht sein (er faehrt hinein); schliesst Raster aus
 # Schein-Linien im Abstand weniger Zentimeter aus.
-ZONE_MIN_WIDTH = BOT_WIDTH
 ZONE_MIN_DEPTH = 0.08
 # Weicht die gemessene Linienrichtung mehr ab, gilt quer zur Spur.
 YAW_IN_MAX_DEG = 30.0
@@ -179,9 +180,12 @@ class StorageSequence:
         p('fallback_step', Parameter.Type.DOUBLE, frange(0.0, 3.0))
         p('explore_max_distance', Parameter.Type.DOUBLE, frange(0.2, 10.0))
         p('carry_max_vel', Parameter.Type.DOUBLE, frange(0.01, 0.22))
+        p('zone_width', Parameter.Type.DOUBLE, frange(0.10, 1.0))
+        p('zone_depth', Parameter.Type.DOUBLE, frange(0.05, 1.0))
+        p('line_width', Parameter.Type.DOUBLE, frange(0.0, 0.10))
         self._param_names = [
             'target_zone', 'zone_order', 'fallback_step', 'explore_max_distance',
-            'carry_max_vel',
+            'carry_max_vel', 'zone_width', 'zone_depth', 'line_width',
         ]
         require_params(node, self._param_names)
         self._read_params()
@@ -464,6 +468,9 @@ class StorageSequence:
             self._set_magnet(False)
         elif state == S.VERLASSEN:
             self._queue = [self._path_to(self._target_zone.track_xy, reverse=True)]
+        elif state == S.ZURUECK_ZUM_START:
+            self._queue = [self._path_to(self._start_xy, reverse=True),
+                           self._rotate(self._track_yaw)]
         elif state == S.FEHLER:
             self._release_unless_gripped()
 
@@ -513,6 +520,8 @@ class StorageSequence:
         elif self.state == S.VERLASSEN:
             self.node.get_logger().info('Storage fertig.')
             self._enter(S.FERTIG)
+        elif self.state == S.ZURUECK_ZUM_START:
+            self._enter(S.ERKUNDEN)
 
     # --- Erkundung ---
 
@@ -523,6 +532,9 @@ class StorageSequence:
         s = self._s_of(robot)
         self._model = self._zone_model()
         self._log_model()
+        if self._model_moved():
+            self._restart_exploration()
+            return
 
         nxt = self._next_model_zone(s)
         if nxt is not None:
@@ -568,27 +580,24 @@ class StorageSequence:
         return None
 
     def _zone_model(self):
-        """ZONE_COUNT + 1 Linien im gleichen Abstand aus den bestaetigten Querlinien, oder None.
-        Dict: s (Linien), measured, hits (Anzahl gemessener Linien), width, yaw_in.
+        """ZONE_COUNT + 1 Linien im Abstand zone_width + line_width (Linienmitte zu
+        Linienmitte) aus den bestaetigten Querlinien, oder None. Dict: s (Linien), measured,
+        hits (Anzahl gemessener Linien), width, yaw_in.
 
-        Jede Querlinie darf L0 sein, jede spaetere mit 1..ZONE_COUNT Zonen dazwischen gibt die
-        Breite vor. Es gewinnt das Raster, das die meisten Linien erklaert; Linien innerhalb des
-        Rasters, die nicht passen, und fehlende Linien, wo schon hingesehen wurde, zaehlen
-        dagegen. Keine Strichel-Erkennung und keine Streckenmasse: die echten Grenzen haben
-        gleichen Abstand, Schein-Linien (Schatten, Palette, Markierungen vor den Zonen) nicht.
-        Mit den Laeufen vom 10.11. getestet (alle Raster 0,27-0,30 m)."""
+        Jede Querlinie darf jede Grenzlinie sein; es gewinnt die Lage, die die meisten Linien
+        erklaert. Linien innerhalb des Rasters, die nicht passen, und fehlende Linien, wo schon
+        hingesehen wurde, zaehlen dagegen. Schon eine Linie legt alle Zonen fest (sie gilt dann
+        als Grenze vor Zone 1); spaetere pruefen gegen und duerfen die Lage verschieben. Von der
+        Palette verdeckte Linien schaden nicht."""
         lines = [c for c in self._boundaries if c['n'] >= BOUNDARY_CONFIRM]
         marks = sorted(c['s'] for c in lines)
+        pitch = self.zone_width + self.line_width
         best = None
-        for j, a in enumerate(marks):
-            for m in marks[j + 1:]:
-                for i in range(1, ZONE_COUNT + 1):
-                    width = (m - a) / i
-                    if width < ZONE_MIN_WIDTH:
-                        continue
-                    fit = self._fit_grid(a, width, marks)
-                    if best is None or self._score(fit) > self._score(best):
-                        best = fit
+        for a in marks:
+            for i in range(ZONE_COUNT + 1):
+                fit = self._fit_grid(a - i * pitch, pitch, marks)
+                if best is None or self._score(fit) > self._score(best):
+                    best = fit
         if best is None:
             return None
 
@@ -602,7 +611,7 @@ class StorageSequence:
 
     @staticmethod
     def _fit_grid(a, width, marks):
-        """Raster a + i * width (i = 0..ZONE_COUNT): Treffer zuordnen, Breite ausgleichen."""
+        """Raster a + i * width (i = 0..ZONE_COUNT): Treffer zuordnen, Lage ausgleichen."""
         tol = ZONE_WIDTH_TOL * width
         hits = {}
         extra = 0           # Linien im Raster, die zu keiner Rasterlinie passen
@@ -612,10 +621,9 @@ class StorageSequence:
                 hits.setdefault(i, []).append(m)
             elif a - tol < m < a + ZONE_COUNT * width + tol:
                 extra += 1
-        num = sum(i * (m - a) for i, ms in hits.items() for m in ms)
-        den = sum(i * i for i, ms in hits.items() for m in ms)
-        if den > 0:
-            width = num / den
+        if hits:
+            offsets = [m - i * width for i, ms in hits.items() for m in ms]
+            a = sum(offsets) / len(offsets)
         err = sum((m - (a + i * width)) ** 2 for i, ms in hits.items() for m in ms)
         lines = [a + i * width for i in range(ZONE_COUNT + 1)]
         measured = [i in hits for i in range(ZONE_COUNT + 1)]
@@ -647,6 +655,32 @@ class StorageSequence:
             # Schon hinter der Zone: weiter kommt nichts mehr dazu.
             return (k, s_center) if sure or s_robot >= s[k + 1] else None
         return None
+
+    def _model_moved(self):
+        """True, wenn eine besuchte Zone im Modell mehr als eine halbe Zonenbreite weiter
+        liegt als beim Besuch: die erste Linie war keine Grenze, Schild und Palette gehoeren
+        zu einer anderen Zone."""
+        m = self._model
+        if m is None:
+            return False
+        half = (self.zone_width + self.line_width) / 2.0
+        return any(abs((m['s'][z.index] + m['s'][z.index + 1]) / 2.0 - z.s_center) > half
+                   for z in self._zones if z.index is not None)
+
+    def _restart_exploration(self):
+        """Rueckwaerts zum Start und neu erkunden; die Linien bleiben, das Modell ist also
+        schon korrigiert. Hoechstens MAX_RESTARTS-mal."""
+        if self._restarts >= MAX_RESTARTS:
+            self._fail(f'Zonen nach {MAX_RESTARTS} Neustarts nicht zuzuordnen')
+            return
+        self._restarts += 1
+        self._report(f'Zonen falsch zugeordnet -- zurueck zum Start ({self._restarts}/'
+                     f'{MAX_RESTARTS})')
+        self._zones = []
+        self._pallet_zone = self._target_zone = None
+        self._last_stop_xy = None
+        self._last_stop_s = 0.0
+        self._enter(S.ZURUECK_ZUM_START)
 
     def _log_model(self):
         """Zonenmodell ins Log, wenn es sich merklich aendert."""
@@ -962,6 +996,7 @@ class StorageSequence:
         self._last_boundary_s = 0.0
         self._pallet_zone = self._target_zone = None
         self._attempts = 0
+        self._restarts = 0
         self._contact = 0
         self._contact_xy = None
         self._lane_xy = None
