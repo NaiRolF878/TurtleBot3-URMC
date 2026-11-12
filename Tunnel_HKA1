@@ -1,0 +1,708 @@
+"""Tunnel behaviour: explores by LIDAR from the pose where mode TUNNEL starts and drives out
+of the exit, by its own planner or Nav2; missions are logged to record_dir/<time>/."""
+ 
+import array
+import bisect
+import json
+import math
+import os
+import threading
+import time
+from collections import deque
+ 
+import cv2
+import numpy as np
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
+from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from rclpy.action import ActionClient
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
+from rcl_interfaces.srv import SetParameters
+from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import CompressedImage, LaserScan
+from tf2_ros import StaticTransformBroadcaster
+from urmrc_msgs.msg import BehaviorStatus, ModeState
+from utils.images import as_message_data
+from utils.paramspec import Spec, SpecSet
+ 
+from control import tunnel as T
+from control.pure_pursuit import V_LIMIT
+ 
+from . import ros_params
+from .qos import LATEST
+from .run import run, steady_timer
+ 
+D = T.TunnelParams()
+TUNNEL = SpecSet((
+    Spec('robot.front', D.front, 'Footprint: how far the robot reaches ahead of the '
+         'wheel axle [m] (magnet tip included).', 0.02, 0.25),
+    Spec('robot.rear', D.rear, 'Footprint behind the axle [m].', 0.05, 0.25),
+    Spec('robot.half_width', D.half_width, 'Half the robot width over the wheels [m].',
+         0.05, 0.20),
+    Spec('robot.lidar_x', D.lidar_x, 'LIDAR centre ahead of the axle [m] (Burger: '
+         '-0.032, behind).', -0.15, 0.15),
+    Spec('safety.guard_margin', D.guard_margin, 'Never closer than this to anything, '
+         'whatever the plan says [m]. Every command is checked against it for the '
+         'next 0.6 s.', 0.005, 0.10),
+    Spec('safety.margin', D.margin, 'Free space the planner likes to keep beside the '
+         'robot [m]; less is a squeeze, taken only when there is no other way.',
+         0.0, 0.15),
+    Spec('safety.obstacle_grow', D.obstacle_grow, 'Obstacle size: added around every '
+         'small obstacle [m]. The LIDAR (18 cm up) sees a bottle\'s neck; its body is '
+         'this much wider. Walls are taken as seen.', 0.0, 0.10),
+    Spec('safety.comfort', D.comfort, 'Beyond the margin: distance the path likes to '
+         'keep from obstacles [m].', 0.0, 0.30),
+    Spec('drive.v_max', D.v_max, 'Top speed [m/s]; slower where it is tight.', 0.02, V_LIMIT),
+    Spec('drive.omega_max', D.omega_max, 'Top turn rate while driving [rad/s].', 0.2, 2.5),
+    Spec('drive.turn_speed', D.turn_speed, 'Turn rate on the spot [rad/s].', 0.2, 2.0),
+    Spec('drive.turn_in_place_deg', D.turn_in_place_deg, 'Turn on the spot first when '
+         'the path points further away than this [deg].', 10.0, 120.0),
+    Spec('drive.lookahead', D.lookahead, 'Pure-pursuit aim distance [m].', 0.08, 0.5),
+    Spec('drive.slow_band', D.slow_band, 'Slows down where less than this [m] is '
+         'left over the margin.', 0.0, 0.3),
+    Spec('map.resolution', D.resolution, 'Map cell size [m] (next start).', 0.01, 0.05),
+    Spec('map.size_m', D.size_m, 'Map side length [m] (next start).', 4.0, 20.0),
+    Spec('map.max_range', D.max_range, 'Use each LIDAR beam up to this range [m].',
+         1.0, 8.0),
+    Spec('tunnel.wall_min_len', D.wall_min_len, 'Obstacles at least this long are walls, '
+         'shorter ones obstacles [m].', 0.1, 1.0),
+    Spec('tunnel.wall_join', D.wall_join, 'Walls this close belong to one tunnel - half '
+         'the widest gap (entrance, exit, a stretch not seen yet) bridged [m].',
+         0.1, 0.6),
+    Spec('tunnel.enter_ahead', D.enter_ahead, 'With no entrance in sight it drives at '
+         'most this far straight on from the start [m] - never round the outside.',
+         0.3, 1.5),
+    Spec('tunnel.enter_depth', D.enter_depth, 'The robot is in once its centre is this '
+         'far inside the walls\' outline [m]; then the entrance is closed.', 0.1, 0.5),
+    Spec('tunnel.close_entrance', D.close_entrance, 'Wall off the entrance: the gate it '
+         'came through, and behind the start.'),
+    Spec('tunnel.entrance_width', D.entrance_width, 'Length of the virtual wall behind '
+         'the start [m].', 0.3, 3.0),
+    Spec('tunnel.entrance_depth', D.entrance_depth, 'If it found no entrance gate to '
+         'close: goals less than this far ahead of the start line are outside beside '
+         'the entrance [m].', 0.0, 1.0),
+    Spec('tunnel.exit_clear', D.exit_clear, 'Done once the robot centre is this far past '
+         'the exit gate (or outside the walls\' outline) [m].', 0.15, 1.0),
+    Spec('explore.gain_weight', D.gain_weight, 'How much detour [m] one m2 of unseen '
+         'space at the walls (where an exit can be) is worth.', 0.0, 10.0),
+    Spec('explore.gain_radius', D.gain_radius, 'Unknown space is counted this far '
+         'around a frontier [m].', 0.1, 1.5),
+    Spec('explore.wall_band', D.wall_band, 'Unknown space this close inside the walls '
+         'may hide the exit; deeper inside (behind a bottle) it cannot [m].', 0.1, 1.0),
+    Spec('explore.explore_radius', D.explore_radius, 'Frontiers farther from the start '
+         'are ignored [m].', 1.0, 10.0),
+    Spec('explore.frontier_min', D.frontier_min, 'Shorter frontier stretches are '
+         'shadow slivers, not openings [m].', 0.02, 0.5),
+    Spec('driver', 'own', 'Who drives: own (the built-in planner, turning on the spot, '
+         'and the guard) or nav2 (start_real.sh tunnel_nav:=true: Smac and RPP with the '
+         'real footprint, collision monitor; this node only picks the next point and '
+         'watches for the exit).', options=('own', 'nav2')),
+    Spec('resume_s', 60.0, 'Started again straight out of ERROR (LIDAR or odometry gone a '
+         'moment) within this many seconds, it continues the mission (same map, same '
+         'entrance); after Stop, or later, a new one begins [s]. 0 = always new.', 0.0, 600.0),
+    Spec('record', True, 'Log every mission to record_dir.'),
+))
+ 
+PLAN_HZ = 3.0
+CONTROL_HZ = 20.0
+STATUS_HZ = 10.0
+MAP_HZ = 3.0
+STALE_S = 0.6
+ODOM_HISTORY = 200
+STAMP_MATCH_S = 0.5
+MOTOR_CHECK_S = 3.0
+NAV_CMD_FRESH_S = 0.3   # a Nav2 velocity older than this is a stop
+GOAL_MOVE_M = 0.05      # a new goal goes to Nav2 when the pick moved this far
+GOAL_EVERY_S = 1.0      # and not more often than this
+GOAL_ANSWER_S = 5.0     # Nav2 has not answered a goal in this long: send it again
+NAV_MAP_HZ = 4.0        # the explorer's map to Nav2's costmaps
+WEDGE_S = 6.0           # two goals refused within this, from the same spot: wedged
+ESCAPE_S = 2.0          # then the explorer's guard frees it for at most this long
+ESCAPE_M = 0.06         # ... or this far
+START_FRAME = 'tunnel_start'   # odom -> here: the pose the mission started at
+NAV_SYNC = ('robot.front', 'robot.rear', 'robot.half_width', 'safety.guard_margin',
+            'drive.v_max')
+NAV_COSTMAPS = ('/local_costmap/local_costmap', '/global_costmap/global_costmap')
+INFLATION_M = 0.25      # config/nav/tunnel.yaml's, at least
+ 
+ 
+def params_from(cfg: dict) -> T.TunnelParams:
+    p = T.TunnelParams()
+    for name, value in cfg.items():
+        leaf = name.split('.', 1)[-1]
+        if hasattr(p, leaf):
+            setattr(p, leaf, value)
+    return p
+ 
+ 
+class TunnelNode(Node):
+ 
+    def __init__(self, **kwargs):
+        super().__init__('tunnel', **kwargs)
+        self.declare_parameter(
+            'record_dir', 'logs/tunnel',
+            ParameterDescriptor(description='where missions are logged (restart to apply)',
+                                read_only=True))
+        self.cfg = ros_params.declare(self, TUNNEL)
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+ 
+        self._lock = threading.Lock()
+        self.tunnel = None              # control.tunnel.Tunnel while a mission runs
+        self.running = False
+        self.start_pose = None          # odom pose the mission started from
+        self._odom = None               # (x, y, yaw) odom frame, latest
+        self._odom_t = -math.inf
+        self._odom_hist = deque(maxlen=ODOM_HISTORY)   # (stamp, x, y, yaw)
+        self._scan_t = -math.inf
+        self._mode = ''
+        self._last_scan = None
+        self._moving_since = None
+        self._moving_pose = None
+        self._stopped_at = -math.inf
+        self.motor_note = ''
+        self._log = None
+        self._map_last = 0.0
+ 
+        self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
+        self.create_subscription(Odometry, '/odom', self._on_odom,
+                                 QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT))
+        self.create_subscription(ModeState, '/mode/state', self._on_mode, LATEST)
+        self.create_subscription(Twist, '/tunnel/nav_cmd', self._on_nav_cmd, 10)
+        self.create_subscription(Path, '/plan', self._on_plan, 10)
+        self.nav = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+        # Nav2 plans on the explorer's map, not raw LIDAR: one noisy hit 4 cm off a wall put
+        # the footprint "in collision" and Smac stopped planning. Cell for cell the same grid.
+        self.nav_map_pub = self.create_publisher(
+            OccupancyGrid, '/tunnel/nav_map',
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self._nav_map_t = -math.inf
+        self.tf_static = StaticTransformBroadcaster(self)
+        self.nav_params = {name: self.create_client(SetParameters, f'{name}/set_parameters')
+                           for name in NAV_COSTMAPS + ('/controller_server',)}
+        self._publish_start_frame((0.0, 0.0, 0.0))     # Nav2's costmaps need it from the start
+        self._nav_cmd = (0.0, 0.0, -math.inf)       # v, w, arrival
+        self._nav_goal = None                        # (x, y) start frame, being driven to
+        self._nav_handle = None
+        self._nav_pending = False                    # sent, not yet accepted or refused
+        self._nav_aborts = deque(maxlen=4)           # (when, pose) Nav2 gave a goal up
+        self._escape = None                          # (until, (x, y) from) while freeing it
+        self._nav_sent = -math.inf
+        self._nav_note = ''
+        self.cmd_pub = self.create_publisher(Twist, '/tunnel/cmd', LATEST)
+        self.status_pub = self.create_publisher(BehaviorStatus, '/tunnel/status', LATEST)
+        self.map_pub = self.create_publisher(CompressedImage, '/tunnel/map/compressed', LATEST)
+        steady_timer(self, 1.0 / CONTROL_HZ, self._control)
+        steady_timer(self, 1.0 / STATUS_HZ, self._status)
+        self._planner = threading.Thread(target=self._plan_loop, daemon=True)
+        self._alive = True
+        self._planner.start()
+        self.get_logger().info('tunnel: /scan, /odom -> /tunnel/cmd, /tunnel/status, '
+                               '/tunnel/map/compressed; waits for mode TUNNEL')
+ 
+    def _on_set_parameters(self, parameters):
+        changes = ros_params.changes(parameters, TUNNEL)
+        with self._lock:
+            self.cfg.update(changes)
+            if self.tunnel is not None:
+                fresh = params_from(self.cfg)
+                for k in ('resolution', 'size_m'):        # the grid stays as it is
+                    setattr(fresh, k, getattr(self.tunnel.p, k))
+                self.tunnel.p = fresh
+        if changes and self._log is not None:
+            self._log.write('events', {'t': time.monotonic(), 'kind': 'params',
+                                       'changes': changes})
+        if any(k in changes for k in NAV_SYNC):
+            self._sync_nav2()
+        return SetParametersResult(successful=True)
+ 
+    def _sync_nav2(self):
+        # Smac needs an inflation radius that covers the footprint.
+        c = self.cfg
+        f, r, w = c['robot.front'], c['robot.rear'], c['robot.half_width']
+        pad = c['safety.guard_margin']
+        circumscribed = math.hypot(max(f, r), w)
+        costmap = [Parameter('footprint', value=f'[[{f:.3f}, {w:.3f}], [{-r:.3f}, {w:.3f}], '
+                                                f'[{-r:.3f}, {-w:.3f}], [{f:.3f}, {-w:.3f}]]'),
+                   Parameter('footprint_padding', value=float(pad)),
+                   Parameter('inflation_layer.inflation_radius',
+                             value=float(max(INFLATION_M, circumscribed + pad + 0.01)))]
+        sets = {name: costmap for name in NAV_COSTMAPS}
+        sets['/controller_server'] = [Parameter('FollowPath.desired_linear_vel',
+                                                value=float(c['drive.v_max']))]
+        for name, params in sets.items():
+            client = self.nav_params[name]
+            if not client.service_is_ready():
+                continue                          # Nav2 not up: it starts from tunnel.yaml
+            future = client.call_async(SetParameters.Request(
+                parameters=[q.to_parameter_msg() for q in params]))
+            future.add_done_callback(lambda fut, n=name: self._nav_params_set(n, fut))
+ 
+    def _nav_params_set(self, name, future):
+        result = future.result()
+        bad = [r.reason for r in (result.results if result else []) if not r.successful]
+        if result is None or bad:
+            self.get_logger().warn(f'tunnel: Nav2 {name} kept its settings: '
+                                   f'{bad or "no answer"}')
+ 
+    def _on_odom(self, msg: Odometry):
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        with self._lock:
+            self._odom = (p.x, p.y, yaw)
+            self._odom_t = time.monotonic()
+            self._odom_hist.append((stamp, p.x, p.y, yaw))
+ 
+    def _odom_at(self, stamp: float):
+        hist = list(self._odom_hist)
+        if not hist:
+            return None
+        times = [h[0] for h in hist]
+        if not (times[0] - STAMP_MATCH_S <= stamp <= times[-1] + STAMP_MATCH_S):
+            return hist[-1][1:]
+        i = bisect.bisect_left(times, stamp)
+        if i <= 0:
+            return hist[0][1:]
+        if i >= len(hist):
+            return hist[-1][1:]
+        a, b = hist[i - 1], hist[i]
+        f = 0.0 if b[0] <= a[0] else (stamp - a[0]) / (b[0] - a[0])
+        dyaw = math.atan2(math.sin(b[3] - a[3]), math.cos(b[3] - a[3]))
+        return (a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]), a[3] + f * dyaw)
+ 
+    def _to_start(self, pose):
+        sx, sy, syaw = self.start_pose
+        c, s = math.cos(syaw), math.sin(syaw)
+        dx, dy = pose[0] - sx, pose[1] - sy
+        return (c * dx + s * dy, -s * dx + c * dy,
+                math.atan2(math.sin(pose[2] - syaw), math.cos(pose[2] - syaw)))
+ 
+    def _on_scan(self, msg: LaserScan):
+        now = time.monotonic()
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        with self._lock:
+            self._scan_t = now
+            self._last_scan = msg
+            if not self.running or self.tunnel is None or not self._odom_hist:
+                return
+            n = len(msg.ranges)
+            if msg.time_increment > 0.0 and n > 1:
+                # a turning robot smears a scan: a pose per beam
+                poses = [self._to_start(self._odom_at(stamp + i * msg.time_increment))
+                         for i in range(0, n, 20)]
+                idx = [min(i // 20, len(poses) - 1) for i in range(n)]
+                beam_poses = [poses[k] for k in idx]
+                pose = beam_poses[0]
+            else:
+                odom = self._odom_at(stamp)
+                if odom is None:
+                    return
+                pose, beam_poses = self._to_start(odom), None
+            self.tunnel.add_scan(pose, msg.ranges, msg.angle_min, msg.angle_increment,
+                                 msg.range_min, beam_poses)
+        if self._log is not None:
+            self._log.write('scans', {'t': now, 'stamp': stamp, 'pose': pose,
+                                      'angle_min': msg.angle_min,
+                                      'angle_increment': msg.angle_increment,
+                                      'range_min': msg.range_min,
+                                      'time_increment': msg.time_increment,
+                                      # mm; -1: +inf (nothing in range), 0: no valid return
+                                      'mm': [int(r * 1000) if math.isfinite(r)
+                                             else (-1 if r > 0 else 0)
+                                             for r in msg.ranges]})
+ 
+    def _on_nav_cmd(self, msg: Twist):
+        self._nav_cmd = (msg.linear.x, msg.angular.z, time.monotonic())
+ 
+    def _on_plan(self, msg: Path):
+        with self._lock:
+            if self.tunnel is None or self.start_pose is None or not self.running:
+                return
+            if msg.header.frame_id == START_FRAME:
+                pts = [(ps.pose.position.x, ps.pose.position.y) for ps in msg.poses[::2]]
+            else:
+                pts = [self._to_start((ps.pose.position.x, ps.pose.position.y, 0.0))[:2]
+                       for ps in msg.poses[::2]]
+            self.tunnel.ext_path = np.array(pts) if pts else None
+ 
+    def _drive_nav2(self, tunnel, pose):
+        now = time.monotonic()
+        tunnel.observe(pose, now)
+        if tunnel.status == T.DONE:
+            self._cancel_goal()
+            return 0.0, 0.0, tunnel.note
+        if not self.nav.server_is_ready():
+            self._nav_note = 'Nav2 is not running - start_real.sh tunnel_nav:=true'
+            return 0.0, 0.0, self._nav_note
+        if now - self._nav_map_t >= 1.0 / NAV_MAP_HZ:
+            self._nav_map_t = now
+            self._publish_nav_map(tunnel)
+        move = self._unwedge(tunnel, pose, now)
+        if move is not None:
+            return move
+        goal = tunnel.plan_.goal
+        if self._nav_pending and now - self._nav_sent > GOAL_ANSWER_S:
+            self._nav_pending = False
+        # One goal at a time, at most once a second (Nav2 replans at that rate anyway);
+        # a pick moved off a wall just seen must still reach Nav2.
+        if goal is not None and not self._nav_pending and now - self._nav_sent >= GOAL_EVERY_S \
+                and (self._nav_goal is None or self._nav_handle is None
+                     or math.hypot(goal[0] - self._nav_goal[0], goal[1] - self._nav_goal[1])
+                     > GOAL_MOVE_M):
+            self._send_goal(goal, pose)
+        v, w, t = self._nav_cmd
+        if now - t > NAV_CMD_FRESH_S:
+            v = w = 0.0
+        return v, w, self._nav_note or tunnel.note
+ 
+    def _unwedge(self, tunnel, pose, now):
+        # In a squeeze the padded footprint already touches and Nav2 refuses every goal: two
+        # refused from one spot mean the spot is the problem; the explorer's guard backs out.
+        if self._escape is not None:
+            until, (x0, y0) = self._escape
+            move = None
+            if now < until and math.hypot(pose[0] - x0, pose[1] - y0) < ESCAPE_M:
+                move = tunnel.escape(pose)
+            if move is not None:
+                return move[0], move[1], 'wedged - backing out for Nav2'
+            self._escape = None
+        recent = [(t, q) for t, q in self._nav_aborts if now - t < WEDGE_S]
+        if len(recent) < 2 or any(math.hypot(pose[0] - q[0], pose[1] - q[1]) > 0.03
+                                  for _, q in recent):
+            return None
+        self._nav_aborts.clear()
+        self._cancel_goal()
+        self._nav_goal = None
+        # the goals refused since were not the problem: no reason to avoid them
+        since = recent[0][0] - 0.5
+        tunnel.avoid = [(q, until) for q, until in tunnel.avoid if until - T.AVOID_S < since]
+        self._escape = (now + ESCAPE_S, (pose[0], pose[1]))
+        if self._log is not None:
+            self._log.write('events', {'t': now, 'kind': 'wedged', 'pose': list(pose)})
+        move = tunnel.escape(pose)
+        return (move[0], move[1], 'wedged - backing out for Nav2') if move else \
+            (0.0, 0.0, 'wedged - no way out that touches nothing')
+ 
+    def _publish_start_frame(self, pose):
+        x, y, yaw = pose
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id, t.child_frame_id = 'odom', START_FRAME
+        t.transform.translation.x, t.transform.translation.y = float(x), float(y)
+        t.transform.rotation.z, t.transform.rotation.w = math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+        self.tf_static.sendTransform(t)
+ 
+    def _publish_nav_map(self, tunnel):
+        g = tunnel.grid
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = START_FRAME
+        msg.info.resolution = float(g.res)
+        msg.info.width = msg.info.height = g.n
+        msg.info.origin.position.x, msg.info.origin.position.y = float(g.x0), float(g.y0)
+        msg.info.origin.orientation.w = 1.0
+        msg.data = array.array('b', tunnel.nav_map().tobytes())
+        self.nav_map_pub.publish(msg)
+ 
+    def _send_goal(self, goal, pose):
+        heading = math.atan2(goal[1] - pose[1], goal[0] - pose[0])
+        msg = NavigateToPose.Goal()
+        msg.pose = PoseStamped()
+        msg.pose.header.frame_id = START_FRAME
+        msg.pose.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x, msg.pose.pose.position.y = float(goal[0]), float(goal[1])
+        msg.pose.pose.orientation.z = math.sin(heading / 2.0)
+        msg.pose.pose.orientation.w = math.cos(heading / 2.0)
+        self._nav_goal, self._nav_sent = goal, time.monotonic()
+        self._nav_pending = True
+        future = self.nav.send_goal_async(msg)
+        future.add_done_callback(self._goal_accepted)
+        if self._log is not None:
+            self._log.write('events', {'t': time.monotonic(), 'kind': 'nav_goal',
+                                       'start_frame': goal})
+ 
+    def _goal_accepted(self, future):
+        self._nav_pending = False
+        handle = future.result()
+        if handle is None or not handle.accepted:
+            self._nav_note = 'Nav2 refused the goal'
+            self._nav_handle = None
+            return
+        self._nav_handle = handle
+        self._nav_note = ''
+        handle.get_result_async().add_done_callback(
+            lambda f, h=handle: self._goal_done(h, f))
+ 
+    def _goal_done(self, handle, future):
+        if handle is not self._nav_handle:
+            return                                   # an old goal, replaced since
+        status = future.result().status if future.result() else None
+        self._nav_handle = None
+        if status == GoalStatus.STATUS_ABORTED:
+            self._nav_note = 'Nav2 could not get there - next point'
+            pose = self._pose()
+            if pose is not None:
+                self._nav_aborts.append((time.monotonic(), pose))
+            with self._lock:
+                if self.tunnel is not None and self._nav_goal is not None:
+                    # the explorer passes it by, not back to the start of the wall
+                    self.tunnel.avoid.append((self._nav_goal, self.tunnel._now + T.AVOID_S))
+        if self._log is not None:
+            self._log.write('events', {'t': time.monotonic(), 'kind': 'nav_result',
+                                       'status': status})
+ 
+    def _cancel_goal(self):
+        if self._nav_handle is not None:
+            self._nav_handle.cancel_goal_async()
+            self._nav_handle = None
+ 
+    def _on_mode(self, msg: ModeState):
+        mode = msg.mode
+        if mode == self._mode:
+            return
+        before, self._mode = self._mode, mode
+        if mode == 'TUNNEL':
+            # after a Stop the robot has likely been carried: odometry cannot tell
+            self._start(resume_ok=before == 'ERROR')
+        elif self.running:
+            self._stop(f'mode {mode}')
+ 
+    def _start(self, resume_ok):
+        with self._lock:
+            if self._odom is None:
+                self.get_logger().error('tunnel: no odometry - cannot start')
+                return
+            resume = (resume_ok and self.tunnel is not None and self.tunnel.status != T.DONE
+                      and time.monotonic() - self._stopped_at <= self.cfg['resume_s'])
+            if resume:
+                self.tunnel.status, self.tunnel.note = T.ACTIVE, 'resumed'
+                self.tunnel.stopped_since = math.nan
+                self.tunnel.backing = None
+            else:
+                self.start_pose = self._odom
+                self.tunnel = T.Tunnel(params_from(self.cfg))
+                self._publish_start_frame(self.start_pose)
+                self._publish_nav_map(self.tunnel)        # the old mission's map out at once
+            self.running = True
+            self._nav_goal, self._nav_handle, self._nav_note = None, None, ''
+            self._nav_pending = False
+            self._nav_aborts.clear()
+            self._escape = None
+        self._sync_nav2()
+        if resume:
+            self.get_logger().info('tunnel: mission resumed (same map)')
+        else:
+            self.get_logger().info(f'tunnel: mission started at odom {self.start_pose}')
+        if self.cfg['record']:          # _stop closed the last one
+            self._log = MissionLog(self.get_parameter('record_dir').value, self.cfg,
+                                   self.start_pose, self.get_logger())
+ 
+    def _stop(self, why):
+        self._cancel_goal()
+        with self._lock:
+            self.running = False
+            self._stopped_at = time.monotonic()
+            tunnel = self.tunnel
+        self._publish_cmd(0.0, 0.0)
+        self.get_logger().info(f'tunnel: mission ended ({why}): {tunnel.status} {tunnel.note}')
+        if self._log is not None:
+            self._log.close(why, tunnel.picture(self._pose()), tunnel)
+            self._log = None
+ 
+    def _pose(self):
+        if self._odom is None or self.start_pose is None:
+            return None
+        return self._to_start(self._odom)
+ 
+    def _plan_loop(self):
+        while self._alive:
+            t0 = time.monotonic()
+            with self._lock:
+                running, tunnel, pose = self.running, self.tunnel, self._pose()
+            if running and tunnel is not None and pose is not None:
+                try:
+                    tunnel.plan(pose)
+                except Exception as exc:   # noqa: BLE001 - report, keep going
+                    self.get_logger().error(f'tunnel plan failed: {exc}',
+                                            throttle_duration_sec=2.0)
+            time.sleep(max(0.0, 1.0 / PLAN_HZ - (time.monotonic() - t0)))
+ 
+    def _control(self):
+        with self._lock:
+            running, tunnel, pose = self.running, self.tunnel, self._pose()
+            fresh = (time.monotonic() - self._odom_t < STALE_S
+                     and time.monotonic() - self._scan_t < STALE_S)
+        if not running or tunnel is None or pose is None:
+            # The mode manager wants to hear from a behaviour the moment it switches to it.
+            self._publish_cmd(0.0, 0.0)
+            now = time.monotonic()
+            if (not running and now - self._map_last >= 1.0 / MAP_HZ
+                    and self.map_pub.get_subscription_count()):
+                self._map_last = now
+                self._publish_preview()
+            return
+        if not fresh:
+            self._publish_cmd(0.0, 0.0)
+            return
+        if self.cfg['driver'] == 'nav2':
+            v, w, why = self._drive_nav2(tunnel, pose)
+        else:
+            v, w, why = tunnel.command(pose)
+        self._publish_cmd(v, w)
+        self._watch_motors(v, w, pose)
+        if self._log is not None:
+            self._log.write('cmd', {'t': time.monotonic(), 'pose': pose, 'v': v, 'w': w,
+                                    'status': tunnel.status, 'note': why,
+                                    'goal': tunnel.plan_.goal})
+        now = time.monotonic()
+        if now - self._map_last >= 1.0 / MAP_HZ and self.map_pub.get_subscription_count():
+            self._map_last = now
+            self._publish_map(tunnel.picture(pose))
+ 
+    def _publish_preview(self):
+        if self.tunnel is not None:
+            self._publish_map(self.tunnel.picture(self._pose()))
+            return
+        scan = self._last_scan
+        if scan is None:
+            return
+        size, ppm = 480, 100.0
+        img = np.full((size, size, 3), 235, np.uint8)
+        c = size // 2
+        for k in range(-2, 3):
+            cv2.line(img, (c + int(k * 0.5 * ppm), 0), (c + int(k * 0.5 * ppm), size),
+                     (215, 215, 215), 1)
+            cv2.line(img, (0, c + int(k * 0.5 * ppm)), (size, c + int(k * 0.5 * ppm)),
+                     (215, 215, 215), 1)
+        r = np.asarray(scan.ranges, dtype=np.float64)
+        a = scan.angle_min + np.arange(len(r)) * scan.angle_increment
+        ok = np.isfinite(r) & (r > scan.range_min) & (r < 2.4)
+        lx = -0.032 + r[ok] * np.cos(a[ok])
+        ly = r[ok] * np.sin(a[ok])
+        for x, y in zip(lx, ly):                     # x forward = up, y left = left
+            cv2.circle(img, (int(c - y * ppm), int(c - x * ppm)), 2, (40, 40, 40), -1)
+        p = params_from(self.cfg)
+        cv2.rectangle(img, (int(c - p.half_width * ppm), int(c - p.front * ppm)),
+                      (int(c + p.half_width * ppm), int(c + p.rear * ppm)), (0, 0, 220), 2)
+        cv2.putText(img, 'ready - LIDAR now (0.5 m grid)', (6, 16), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, (0, 0, 0), 1, cv2.LINE_AA)
+        self._publish_map(img)
+ 
+    def _watch_motors(self, v, w, pose):
+        # Odometry standing still under a command is the motors, not the planning.
+        now = time.monotonic()
+        if abs(v) < 1e-3 and abs(w) < 1e-2:
+            self._moving_since = None
+            return
+        if self._moving_since is None:
+            self._moving_since, self._moving_pose = now, pose
+            return
+        if now - self._moving_since < MOTOR_CHECK_S:
+            return
+        x0, y0, a0 = self._moving_pose
+        moved = math.hypot(pose[0] - x0, pose[1] - y0) > 0.003 or abs(pose[2] - a0) > 0.02
+        if not moved:
+            self.motor_note = 'motors do not move - OpenCR motor power / torque / battery?'
+            self.get_logger().warn(f'tunnel: {self.motor_note}', throttle_duration_sec=5.0)
+        else:
+            self.motor_note = ''
+        self._moving_since, self._moving_pose = now, pose
+ 
+    def _publish_map(self, picture):
+        ok, buf = cv2.imencode('.jpg', picture, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ok:
+            msg = CompressedImage()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.format = 'jpeg'
+            msg.data = as_message_data(buf)
+            self.map_pub.publish(msg)
+ 
+    def _publish_cmd(self, v, w):
+        t = Twist()
+        t.linear.x, t.angular.z = float(v), float(w)
+        self.cmd_pub.publish(t)
+ 
+    def _status(self):
+        now = time.monotonic()
+        msg = BehaviorStatus()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = 'tunnel'
+        age = max(now - self._scan_t, now - self._odom_t)
+        msg.input_age = float(min(age, 1e3))
+        with self._lock:
+            running, tunnel = self.running, self.tunnel
+        if age > STALE_S:
+            msg.state, msg.note = BehaviorStatus.LOST, ('no LIDAR scan' if now - self._scan_t
+                                                        > STALE_S else 'no odometry')
+        elif self.cfg['driver'] == 'nav2' and not self.nav.server_is_ready():
+            msg.state, msg.note = (BehaviorStatus.LOST,
+                                   'Nav2 is not running - start_real.sh tunnel_nav:=true')
+        elif not running or tunnel is None:
+            msg.state, msg.note = BehaviorStatus.ACTIVE, 'ready'
+        else:
+            msg.state = {T.ACTIVE: BehaviorStatus.ACTIVE, T.DEGRADED: BehaviorStatus.DEGRADED,
+                         T.LOST: BehaviorStatus.LOST, T.DONE: BehaviorStatus.DONE
+                         }.get(tunnel.status, BehaviorStatus.LOST)
+            msg.note = self.motor_note or tunnel.note
+            if self.motor_note and msg.state == BehaviorStatus.ACTIVE:
+                msg.state = BehaviorStatus.DEGRADED
+        self.status_pub.publish(msg)
+ 
+    def stop(self):
+        self._alive = False
+        if self.running:
+            self._stop('node stopping')
+ 
+ 
+class MissionLog:
+    """logs/tunnel/<time>/: meta.json, scans/cmd/events.jsonl, map.png at the end."""
+ 
+    def __init__(self, root, cfg, start_pose, logger):
+        self.dir = None
+        self.files = {}
+        try:
+            self.dir = os.path.join(root, time.strftime('%Y%m%d-%H%M%S'))
+            os.makedirs(self.dir, exist_ok=True)
+            with open(os.path.join(self.dir, 'meta.json'), 'w') as f:
+                json.dump({'started': time.strftime('%Y-%m-%d %H:%M:%S'), 'params': cfg,
+                           'start_odom': start_pose}, f, indent=2)
+            logger.info(f'tunnel: logging to {self.dir}')
+        except OSError as exc:
+            logger.warn(f'tunnel: cannot log: {exc}')
+            self.dir = None
+ 
+    def write(self, kind, record):
+        if self.dir is None:
+            return
+        try:
+            f = self.files.get(kind)
+            if f is None:
+                f = self.files[kind] = open(os.path.join(self.dir, f'{kind}.jsonl'), 'a',
+                                            buffering=1)
+            f.write(json.dumps(record, default=_plain) + '\n')
+        except OSError:
+            pass
+ 
+    def close(self, why, picture, tunnel):
+        if self.dir is None:
+            return
+        self.write('events', {'t': time.monotonic(), 'kind': 'end', 'why': why,
+                              'status': tunnel.status, 'note': tunnel.note})
+        cv2.imwrite(os.path.join(self.dir, 'map.png'), picture)
+        for f in self.files.values():
+            f.close()
+        self.files = {}
+ 
+ 
+def _plain(value):
+    if hasattr(value, 'tolist'):
+        return value.tolist()
+    return str(value)
+ 
+ 
+def main(args=None):
+    run(TunnelNode, args, before_destroy=TunnelNode.stop)
