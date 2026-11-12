@@ -215,6 +215,17 @@ class detect_lane(Node):
                 mask_white_filtered, center_white_y, left_line=False, last_known=last_white)
         center_white_x = self.track_line('Weiss', raw_white, white_alternative, now)
 
+        # Laut statt still raten: Gelb gefunden, Weiss rechts davon nicht, aber links davon
+        # -> der Bot steht auf der falschen Spurseite oder quer zur Spur. Die Ersatzspalten
+        # unten ergeben dann einen geratenen Spurfehler (am 12.11. genau 0.0, Spur "verloren").
+        if raw_yellow is not None and raw_white is None:
+            left_of_yellow = mask_white.copy()
+            left_of_yellow[:, int(center_yellow_x):] = 0
+            if self.get_x_for_driving(left_of_yellow, center_yellow_y, left_line=False) is not None:
+                self.get_logger().warn(
+                    'Weiss LINKS von Gelb -- falsche Spurseite oder quer zur Spur? '
+                    'Spurfehler ist geraten (Ersatzspalten).', throttle_duration_sec=2.0)
+
         if center_white_x <= center_yellow_x:
             if center_white_x > int(width * 0.4):
                 center_yellow_x = yellow_alternative

@@ -3,23 +3,37 @@
 Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist)
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel
 Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel, auf die
-Radgrenze skaliert.
+Radgrenze skaliert. Align: auf der Stelle zum Kurs /control/align_yaw (switch_control),
+Ist-Kurs aus /odom_filtered.
 Jeder andere Modus, unbekannter Modus oder veraltete Quelle: Nullbefehl.
 """
+import math
 import time
 
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from std_msgs.msg import Float64, UInt8
 
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, read_params, require_params, run_node)
+    ControlType, control_mode_from_msg, frange, read_params, require_params, run_node,
+    yaw_from_quaternion)
 
 # TunnelEntry mit PID: auf der 20-cm-Spur vor dem Tunnel passt der Bot fuer Nav2
 # nicht zwischen die Spurwaende.
 PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
+
+# Align (nach Obstacle): auf der Stelle zum Zielkurs von switch_control (/control/align_yaw,
+# odom) drehen, Ist-Kurs aus /odom_filtered. P-Regler, mindestens ALIGN_MIN_VEL (sonst
+# bleibt der Burger vor dem Ziel stehen), hoechstens ALIGN_MAX_VEL; ab ALIGN_TOL_RAD Null.
+# switch_control schaltet bei 5 Grad Rest auf Lane.
+ALIGN_KP = 2.0
+ALIGN_MIN_VEL = 0.3
+ALIGN_MAX_VEL = 1.2
+ALIGN_TOL_RAD = math.radians(3.0)
+ALIGN_INPUT_TIMEOUT = 1.0
 
 # Prueft, ob die aktive Quelle noch liefert; = controller_frequency in nav2_params.yaml.
 WATCHDOG_RATE_HZ = 20.0
@@ -79,6 +93,10 @@ class control_driving(Node):
             Float64, '/detect/lane', self.cb_lane_error, 1)
         self.sub_nav2_cmd_vel = self.create_subscription(
             Twist, '/nav2/cmd_vel', self.cb_nav2_cmd_vel, 1)
+        self.sub_align_yaw = self.create_subscription(
+            Float64, '/control/align_yaw', self.cb_align_yaw, 1)
+        self.sub_odom = self.create_subscription(
+            Odometry, '/odom_filtered', self.cb_odom, 1)
 
         # --- Publisher ---
         self.pub_cmd_vel = self.create_publisher(Twist, '/control/cmd_vel', 1)
@@ -93,6 +111,8 @@ class control_driving(Node):
         self._lane_time = None
         self._nav2_time = None
         self._nav2_blocked_until = 0.0
+        self._align_yaw = None          # (Zielkurs rad, Empfangszeit)
+        self._yaw = None                # (Ist-Kurs rad, Empfangszeit)
         self._reset_pid()
 
         self.get_logger().info('Started control_driving Node.')
@@ -143,9 +163,38 @@ class control_driving(Node):
         self._nav2_time = now
         self.pub_cmd_vel.publish(self._limit_wheels(msg))
 
+    def cb_align_yaw(self, msg):
+        self._align_yaw = (msg.data, time.monotonic())
+
+    def cb_odom(self, msg):
+        self._yaw = (yaw_from_quaternion(msg.pose.pose.orientation), time.monotonic())
+
+    def _align(self, now):
+        """Twist fuer Align oder None, wenn Ziel- oder Ist-Kurs fehlen bzw. veraltet sind."""
+        if not (self._align_yaw and self._yaw
+                and self._fresh(self._align_yaw[1], now, ALIGN_INPUT_TIMEOUT)
+                and self._fresh(self._yaw[1], now, ALIGN_INPUT_TIMEOUT)):
+            return None
+        err = self._align_yaw[0] - self._yaw[0]
+        err = math.atan2(math.sin(err), math.cos(err))
+        twist = Twist()
+        if abs(err) > ALIGN_TOL_RAD:
+            speed = min(ALIGN_MAX_VEL, max(ALIGN_MIN_VEL, ALIGN_KP * abs(err)))
+            twist.angular.z = float(math.copysign(speed, err))
+        return twist
+
     def cb_watchdog(self):
         read_params(self, self._param_names)
         now = time.monotonic()
+        if self._mode_is(ControlType.Align):
+            twist = self._align(now)
+            if twist is None:
+                self.get_logger().warn('Align ohne Zielkurs oder /odom_filtered -- Null.',
+                                       throttle_duration_sec=2.0)
+                self._publish_stop()
+            else:
+                self.pub_cmd_vel.publish(twist)
+            return
         if self._mode_is(*PID_MODES):
             fresh = self._fresh(self._lane_time, now, LANE_CMD_TIMEOUT)
         elif self._mode_is(*NAV2_MODES):

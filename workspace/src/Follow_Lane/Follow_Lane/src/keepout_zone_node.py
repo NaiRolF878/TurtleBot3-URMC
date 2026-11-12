@@ -1,13 +1,15 @@
-"""Sperrt im Tunnel den Eingang, damit der Bot dort nicht wieder hinausfaehrt.
+"""Sperrt im Tunnel den Eingang, damit der Bot dort nicht wieder hinausfaehrt, und im
+Obstacle-Modus die Strasse hinter dem Startpunkt, damit NavFn nicht rueckwaerts plant.
 
 Ein:  /control/mode, /control/clear_maps (Taste L: Sperre neu an der aktuellen Pose), TF
-Aus:  /detect/tunnel_entrance_obstacle (PointCloud2, odom)
+Aus:  /detect/tunnel_entrance_obstacle (PointCloud2, odom; beide Sperren, entrance_layer)
 """
 import math
 
 import numpy as np
 
 import rclpy
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -30,6 +32,16 @@ WALL_WIDTH_M = 0.4
 # Abstand der Wandpunkte (m): = kleinste resolution der Costmaps (global und local 0.01),
 # sonst bleiben Luecken.
 WALL_POINT_STEP_M = 0.01
+
+# Startsperre im Obstacle-Modus (12.11.: NavFn plante wieder rueckwaerts durch den Startpunkt;
+# max_path_backward in nav2_goal_publisher verwirft solche Plaene nur, verhindert sie nicht).
+# Quer zur Fahrtrichtung beim Wechsel Lane -> Obstacle, so weit hinter der Radachse, dass sie
+# sofort frei hinter dem Heck liegt (>= WALL_DELAY_M), breit genug fuer beide Spuren samt Linien.
+OBSTACLE_WALL_BACK_M = 0.20
+OBSTACLE_WALL_WIDTH_M = 0.6
+# Beim Verlassen von Obstacle: erst leere Wolke, nach so vielen s beide Costmaps leeren (sonst
+# bleibt die Wand eingetragen; Linien und LiDAR kommen im naechsten Zyklus wieder).
+COSTMAP_CLEAR_DELAY_S = 0.3
 
 
 class keepout_zone_node(Node):
@@ -57,6 +69,16 @@ class keepout_zone_node(Node):
         self.control_mode = None
         self._door = None               # (kante a, kante b, mitte, normale nach innen)
         self._wall_active = False
+        self._start_wall = None         # Obstacle: (kante a, kante b) in odom
+
+        self.clear_clients = {
+            'local_costmap': self.create_client(
+                ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap'),
+            'global_costmap': self.create_client(
+                ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap'),
+        }
+        self.clear_timer = self.create_timer(COSTMAP_CLEAR_DELAY_S, self.cb_clear_timer)
+        self.clear_timer.cancel()
 
         self.get_logger().info('Started keepout_zone_node Node.')
 
@@ -71,6 +93,10 @@ class keepout_zone_node(Node):
             self._wall_active = False
         if new_mode == ControlType.Tunnel and self.control_mode == ControlType.TunnelEntry:
             self._door = self._door_at_robot('Wechsel TunnelEntry -> Tunnel')
+        if new_mode == ControlType.Obstacle and self.control_mode != ControlType.Obstacle:
+            self._start_wall = self._start_wall_at_robot()
+        elif self.control_mode == ControlType.Obstacle and new_mode != ControlType.Obstacle:
+            self._remove_start_wall()
         self.control_mode = new_mode
 
     def cb_clear_maps(self, _msg):
@@ -102,7 +128,48 @@ class keepout_zone_node(Node):
         self.get_logger().info(f'Tunnel-Eingang bei x={x:.2f} y={y:.2f} (odom, {reason}).')
         return (center - side, center + side, center, normal)
 
+    def cb_clear_timer(self):
+        self.clear_timer.cancel()
+        for name, client in self.clear_clients.items():
+            if not client.service_is_ready():
+                self.get_logger().error(f'{name}-Clear-Service nicht erreichbar -- Startsperre '
+                                        'bleibt in der Karte.')
+                continue
+            client.call_async(ClearEntireCostmap.Request())
+
+    def _start_wall_at_robot(self):
+        """Startsperre: Linie quer zur Fahrtrichtung, OBSTACLE_WALL_BACK_M hinter der Radachse."""
+        pose = self._robot_pose()
+        if pose is None:
+            self.get_logger().warn('Keine Pose beim Wechsel in Obstacle -- keine Startsperre.')
+            return None
+        x, y, yaw = pose
+        normal = np.array([math.cos(yaw), math.sin(yaw)])
+        center = np.array([x, y]) - normal * OBSTACLE_WALL_BACK_M
+        side = np.array([-normal[1], normal[0]]) * OBSTACLE_WALL_WIDTH_M / 2.0
+        self.get_logger().info(f'Obstacle: Startsperre {OBSTACLE_WALL_BACK_M * 100:.0f} cm hinter '
+                               f'dem Bot bei x={center[0]:.2f} y={center[1]:.2f} (odom).')
+        return (center - side, center + side)
+
+    def _remove_start_wall(self):
+        if self._start_wall is None:
+            return
+        self._start_wall = None
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = ODOM_FRAME
+        self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, []))
+        self.clear_timer.reset()
+        self.get_logger().info('Obstacle beendet -- Startsperre entfernt.')
+
     def cb_timer(self):
+        if self.control_mode == ControlType.Obstacle and self._start_wall is not None:
+            header = Header()
+            header.stamp = self.get_clock().now().to_msg()
+            header.frame_id = ODOM_FRAME
+            self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(
+                header, self._line_points(*self._start_wall)))
+            return
         if self.control_mode != ControlType.Tunnel or self._door is None:
             return
         if not self._wall_active:
@@ -137,6 +204,10 @@ class keepout_zone_node(Node):
 
     def _wall_points(self):
         a, b, _, _ = self._door
+        return self._line_points(a, b)
+
+    @staticmethod
+    def _line_points(a, b):
         count = max(2, int(math.ceil(np.hypot(*(b - a)) / WALL_POINT_STEP_M)) + 1)
         return [(float(p[0]), float(p[1]), 0.0) for p in np.linspace(a, b, count)]
 

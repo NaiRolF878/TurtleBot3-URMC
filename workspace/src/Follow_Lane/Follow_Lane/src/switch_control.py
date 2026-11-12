@@ -15,7 +15,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
 from rclpy.parameter import Parameter
-from std_msgs.msg import Bool, String, UInt8
+from std_msgs.msg import Bool, Float64, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
@@ -43,6 +43,18 @@ OBSTACLE_CLEAR_DEBOUNCE_S = 1.0
 LINE_BLOCK_TOLERANCE = 0.02
 LINE_OBSTACLE_MARGIN = 0.05
 LANE_MAX_AGE_S = 0.5
+
+# Ausrichten nach Obstacle (Modus Align): Spurrichtung = Hauptachse der gemerkten Linienpunkte
+# bis ALIGN_RADIUS_M um den Bot, nur bei eindeutig laenglicher Wolke (Eigenwert-Verhaeltnis).
+# Weicht der Bot mehr als ALIGN_MIN_DEG ab, dreht control_driving auf der Stelle, bis
+# ALIGN_DONE_DEG erreicht ist oder ALIGN_TIMEOUT_S um sind; dann Lane. Anlass 12.11.: nach
+# Obstacle stand der Bot 40 Grad schraeg, der PID fand die Spur nicht mehr.
+ALIGN_RADIUS_M = 0.5
+ALIGN_MIN_POINTS = 30
+ALIGN_ELONGATION = 4.0
+ALIGN_MIN_DEG = 15.0
+ALIGN_DONE_DEG = 5.0
+ALIGN_TIMEOUT_S = 5.0
 
 
 class switch_control(Node):
@@ -109,6 +121,8 @@ class switch_control(Node):
         # --- Publisher ---
         self.pub_control_mode = self.create_publisher(UInt8, '/control/mode', 1)
         self.pub_tunnel_source = self.create_publisher(String, '/control/tunnel_source', 1)
+        # Zielkurs (rad, odom) im Modus Align, fuer control_driving.
+        self.pub_align_yaw = self.create_publisher(Float64, '/control/align_yaw', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(MODE_PUBLISH_PERIOD_S, self.cb_timer)
@@ -123,6 +137,8 @@ class switch_control(Node):
         self._lines_lost_count = 0        # Bilder in Folge ohne Spurlinie (TunnelEntry)
         self._lines_msg_time = None       # letztes /detect/lines_lost (TunnelEntry)
         self._lane_points = None          # (N, 2) im Frame der Wolke
+        self._align_yaw = None            # Zielkurs in odom (Modus Align)
+        self._align_start = None          # Beginn des Ausrichtens (monotonic)
         self._lane_frame = None
         self._lane_time = None
         self._scanner_poses = {}          # (Ziel-Frame, Scanner-Frame) -> (x, y, yaw)
@@ -186,6 +202,8 @@ class switch_control(Node):
                 self._set_mode(ControlType.Obstacle, 'Hindernis in der Fahrbahn')
         elif self.control_mode == ControlType.Obstacle:
             self._update_obstacle_exit(scan)
+        elif self.control_mode == ControlType.Align:
+            self._update_align()
 
     # --- Hilfsmethoden ---
 
@@ -203,11 +221,15 @@ class switch_control(Node):
     def _publish_mode(self):
         self.pub_control_mode.publish(UInt8(data=self.control_mode.value))
         self.pub_tunnel_source.publish(String(data=self._tunnel_source))
+        if self.control_mode == ControlType.Align and self._align_yaw is not None:
+            self.pub_align_yaw.publish(Float64(data=float(self._align_yaw)))
 
     def _enter_tunnel(self, source):
         if self.control_mode in TUNNEL_MODES:
             return
-        self._mode_before_tunnel = self.control_mode
+        # Ausrichten ist nur ein Uebergang: danach gilt Lane.
+        self._mode_before_tunnel = ControlType.Lane if self.control_mode == ControlType.Align \
+            else self.control_mode
         self._tunnel_source = source
         self._lines_lost_count = 0
         self._lines_msg_time = time.monotonic()
@@ -241,7 +263,66 @@ class switch_control(Node):
         if self._obstacle_clear_since is None:
             self._obstacle_clear_since = now
         elif (now - self._obstacle_clear_since).nanoseconds / 1e9 >= OBSTACLE_CLEAR_DEBOUNCE_S:
+            self._leave_obstacle()
+
+    def _leave_obstacle(self):
+        """Obstacle -> Lane, vorher auf die Spurrichtung drehen, falls der Bot schraeg steht."""
+        robot = self._robot_pose()
+        lane_dir = self._lane_direction()
+        if robot is None or lane_dir is None:
+            self._set_mode(ControlType.Lane, 'Kein Hindernis mehr in der Naehe (Spurrichtung '
+                                             'unbekannt, ohne Ausrichten)')
+            return
+        if abs(math.degrees(lane_dir)) <= ALIGN_MIN_DEG:
             self._set_mode(ControlType.Lane, 'Kein Hindernis mehr in der Naehe')
+            return
+        self._align_yaw = robot[2] + lane_dir
+        self._align_start = time.monotonic()
+        self._set_mode(ControlType.Align, f'Kein Hindernis mehr, Bot {math.degrees(lane_dir):+.0f} '
+                                          'Grad zur Spur -- erst ausrichten')
+
+    def _update_align(self):
+        robot = self._robot_pose()
+        waited = time.monotonic() - self._align_start
+        if robot is not None:
+            err = math.degrees(math.atan2(math.sin(self._align_yaw - robot[2]),
+                                          math.cos(self._align_yaw - robot[2])))
+            if abs(err) <= ALIGN_DONE_DEG:
+                self._set_mode(ControlType.Lane, f'Ausgerichtet (Rest {err:+.1f} Grad)')
+                return
+        if waited >= ALIGN_TIMEOUT_S:
+            self._set_mode(ControlType.Lane, f'Ausrichten nach {ALIGN_TIMEOUT_S:.0f} s abgebrochen')
+
+    def _lane_direction(self):
+        """Winkel (rad) der Spur zur Fahrtrichtung des Bots, -90..+90 Grad: Hauptachse der
+        gemerkten Linienpunkte (base_footprint) bis ALIGN_RADIUS_M. None ohne frische Punkte
+        oder wenn die Wolke nicht eindeutig laenglich ist (Kreuzung, Querlinien)."""
+        lanes = self._fresh_lane_points()
+        if lanes is None or self._lane_frame != 'base_footprint':
+            return None
+        near = lanes[np.hypot(lanes[:, 0], lanes[:, 1]) <= ALIGN_RADIUS_M]
+        if len(near) < ALIGN_MIN_POINTS:
+            return None
+        c = near - near.mean(axis=0)
+        values, vectors = np.linalg.eigh(c.T @ c)
+        if values[1] < ALIGN_ELONGATION * max(values[0], 1e-12):
+            self.get_logger().info('Spurrichtung nicht eindeutig (Linien nicht parallel) -- '
+                                   'kein Ausrichten.')
+            return None
+        axis = vectors[:, -1]
+        if axis[0] < 0.0:
+            axis = -axis
+        return math.atan2(axis[1], axis[0])
+
+    def _robot_pose(self):
+        """(x, y, yaw) von base_footprint in odom, None ohne TF."""
+        try:
+            tf = self.tf_buffer.lookup_transform('odom', 'base_footprint', rclpy.time.Time())
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().warn(f'Keine TF odom <- base_footprint: {e}',
+                                   throttle_duration_sec=5.0)
+            return None
+        return pose2d_from_transform(tf)
 
     def _obstacle_in_lane(self, scan, half_angle_deg, distance):
         """Liegt ein LiDAR-Punkt im Bereich +/-half_angle_deg naeher als distance, der
