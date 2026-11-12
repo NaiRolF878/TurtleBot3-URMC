@@ -742,6 +742,13 @@ class StorageSequence:
         elif z.fallback and any(o.digit == z.digit for o in self._zones[:-1]):
             self.node.get_logger().info(f'Rueckfall: Schild {z.digit} schon bekannt, verworfen.')
             self._zones.pop()
+        # Palette in genau dieser Zone und Zielzone schon bekannt: nicht erst zur Spur und
+        # wieder zurueck drehen. ZUR_PALETTENZONE faehrt zum Spurpunkt dieser Zone (= hier,
+        # sofort erreicht) und korrigiert nur noch den Kurs in die Zone.
+        if z.occupied and z in self._zones and self._plan() and self._pallet_zone is z:
+            self.node.get_logger().info('Palette in dieser Zone -- bleibe zur Zone gedreht.')
+            self._enter(S.ZUR_PALETTENZONE)
+            return
         self._enter(S.ZURUECKDREHEN)
 
     def _set_track_from_zone(self, yaw_in):
