@@ -49,6 +49,7 @@ tb             # Menü mit allen Launchern
 | Launcher | Was er macht |
 |---|---|
 | `follow_lane.sh` | komplette Spurverfolgung + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
+| `follow_lane_record.sh` | wie `follow_lane.sh`, dazu während der Fahrt jede Sekunde ein YOLO-Trainingsbild, abwechselnd Original (`_roh`) und entzerrt (`_entzerrt`), nach `dataset/fahrt_<datum>_<zeit>/` (nicht im Stand/Tunnel) |
 | `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel), RViz und Draufsicht `/nav2/view` |
 | `extrinsik_view.sh` | Kamerabild mit 10-cm-Bodengitter + Vogelperspektive, Brett wird live vermessen |
 | `rqt_debug.sh` | Bildanzeige (`/lokal/raw_image`, `/lokal/bev`, Debug-Bilder) |
@@ -85,12 +86,16 @@ bash scripts/tb/load-params.sh detect_lane     # Datei in den laufenden Node lad
 
 ## Logs (Ordner `logs/` im Repo)
 
-| Datei | Inhalt |
+| Ordner / Datei | Inhalt |
 |---|---|
-| `logs/follow_lane-<Zeit>.log` / `follow_lane-latest.log` | Ausgaben aller Knoten der Pipeline (Fehler, Tracebacks) |
-| `logs/tb-status-<Zeit>.log` | alle 10 s Knoten/Topic-Raten/Netz, wenn bei `tb` „mitloggen“ = j |
+| `logs/pipeline/follow_lane-<Zeit>.log`, `nav2_obstacle-<Zeit>.log`, `*-latest.log` | Ausgaben aller Knoten der Pipeline (Fehler, Tracebacks); `-latest` zeigt auf den letzten Lauf |
+| `logs/status/tb-status-<Zeit>.log` | alle 10 s Knoten/Topic-Raten/Netz, wenn bei `tb` „mitloggen“ = j |
+| `logs/bags/` | Aufzeichnungen (`ros2 bag record -o logs/bags/bag-<Zeit> ...`), lesbar mit `scripts/tb/bag-to-text.py` |
+| `logs/kalibrierung/` | Bilder und Aufnahmen der Kamerakalibrierung (Intrinsik-Archive, Vogelperspektive, Rasterbilder) |
+| `logs/bilder/` | Screenshots und Skizzen |
+| `logs/notizen/` | lose Notizen |
 
-Zeiten in Dateinamen sind UTC (2 h hinter deutscher Sommerzeit).
+Zeiten in Dateinamen sind UTC (Winterzeit 1 h, Sommerzeit 2 h hinter deutscher Zeit).
 
 ## Wichtige Topics
 
@@ -151,3 +156,49 @@ bash scripts/tb/launchers/extrinsik_view.sh           # live prüfen
 | `ros2 topic list` fast leer | `--no-daemon` anhängen; Domain prüfen (`echo $ROS_DOMAIN_ID` muss 33 sein) |
 | OpenCR nicht gefunden (`ttyACM0`) | nach Reset liegt er auf `ttyACM1` |
 | rviz zeigt keine LIDAR-Punkte | Bot-Uhr falsch → `sync-time.sh`, danach Bringup neu starten |
+
+## GPU im Container (TensorRT / YOLO)
+
+Einmalig **auf dem Host** (nicht im Container), Ubuntu mit installiertem NVIDIA-Treiber
+(`nvidia-smi` muss auf dem Host laufen):
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+docker run --rm --gpus all ubuntu nvidia-smi     # Test: muss die GPU zeigen
+```
+
+Danach in VS Code „Dev Containers: Rebuild Container“. `devcontainer.json` fordert die GPU mit
+`hostRequirements.gpu: "optional"` an -- ohne GPU/Toolkit (z.B. anderer Laptop) startet der
+Container trotzdem, nur ohne GPU. Im Container prüfen: `nvidia-smi`,
+`python3 -c "import tensorrt as trt; print(trt.__version__)"`.
+
+TensorRT-Engines (`.engine`) sind an GPU und TensorRT-Version gebunden: auf dem Rechner bauen,
+auf dem sie laufen (z.B. `YOLO('best.pt').export(format='engine')`). Auf dem Pi des Bots gibt es
+kein TensorRT.
+
+### YOLO-Engine bauen (im Container, ohne torch)
+
+Aus der ONNX-Datei mit der TensorRT-Version des Containers (~4 min, FP16):
+
+```bash
+cd Yolo/yolo26s_800/weights
+python3 -c "
+import tensorrt as trt
+L = trt.Logger(trt.Logger.WARNING); b = trt.Builder(L)
+net = b.create_network(0); p = trt.OnnxParser(net, L)
+assert p.parse(open('best.onnx', 'rb').read())
+c = b.create_builder_config(); c.set_flag(trt.BuilderFlag.FP16)
+open('best_trt10.15_fp16.engine', 'wb').write(b.build_serialized_network(net, c))"
+```
+
+`detect_lane_nav2` lädt `YOLO_ENGINE` (Konstante oben in der Datei, relativ zum Repo-Ordner) und
+sendet die Boxen auf `/detect/objects` (vision_msgs/Detection2DArray, Pixel im Rohbild). Die
+Rohbild-Ansicht `/lokal/debug_view_raw` zeichnet sie ein. Ohne Engine/GPU läuft der Node ohne YOLO
+(Warnung im Log).

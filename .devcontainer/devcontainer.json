@@ -1,7 +1,10 @@
 {
   "name": "TurtleBot3 – ROS 2 Humble",
+  // Gleiches Dockerfile auf allen Branches -> Docker-Cache trifft, kein Neu-Download.
+  // Zusaetzlicher fester Name, damit das Image in "docker images" leicht zu finden ist.
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "Dockerfile",
+    "options": ["--tag=turtlebot3-urmc:humble"]
   },
   "runArgs": [
     "--network=host",
@@ -9,6 +12,10 @@
     "-e", "DISPLAY=${localEnv:DISPLAY}",
     "-v", "/tmp/.X11-unix:/tmp/.X11-unix"
   ],
+  // NVIDIA-GPU in den Container (TensorRT/YOLO). "optional": mit GPU und NVIDIA Container
+  // Toolkit auf dem Host startet der Container mit --gpus all, ohne beides trotzdem.
+  // Host einmalig einrichten: docs/Befehle.md, Abschnitt "GPU im Container".
+  "hostRequirements": { "gpu": "optional" },
   "mounts": [
     "source=/dev,target=/dev,type=bind"
   ],
@@ -47,5 +54,6 @@
   // der X-Socket gehoert aber dem Host-User. xhost ist nicht persistent, daher bei
   // jedem Containerstart neu. "|| true": auf Hosts ohne X (z.B. SSH) nicht abbrechen.
   "initializeCommand": "xhost +local:root || true",
-  "postCreateCommand": "mkdir -p ~/turtlebot3_ws/src && cd ~/turtlebot3_ws/src && git clone -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git && git clone -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git && cd ~/turtlebot3_ws && colcon build --symlink-install && echo 'source ~/turtlebot3_ws/install/setup.bash' >> ~/.bashrc && echo '[ -f /workspaces/TurtleBot3-URMC/workspace/install/setup.bash ] && source /workspaces/TurtleBot3-URMC/workspace/install/setup.bash' >> ~/.bashrc && echo \"alias tb='bash /workspaces/TurtleBot3-URMC/scripts/tb/launch.sh'\" >> ~/.bashrc && echo \"alias botssh='bash /workspaces/TurtleBot3-URMC/scripts/tb/ssh-bot.sh'\" >> ~/.bashrc && echo \"alias botcheck='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-check.sh'\" >> ~/.bashrc && echo \"alias botup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-up.sh'\" >> ~/.bashrc && echo \"alias botdown='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-down.sh'\" >> ~/.bashrc && echo \"alias lanup='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh up'\" >> ~/.bashrc && echo \"alias landown='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh down'\" >> ~/.bashrc && echo \"alias lanstatus='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh status'\" >> ~/.bashrc && echo \"alias lansetup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-lan-setup.sh'\" >> ~/.bashrc"
+  // turtlebot3_ws ist jetzt im Image (Dockerfile); hier nur noch Aliase, kein Download.
+  "postCreateCommand": "echo '[ -f /workspaces/TurtleBot3-URMC/workspace/install/setup.bash ] && source /workspaces/TurtleBot3-URMC/workspace/install/setup.bash' >> ~/.bashrc && echo \"alias tb='bash /workspaces/TurtleBot3-URMC/scripts/tb/launch.sh'\" >> ~/.bashrc && echo \"alias botssh='bash /workspaces/TurtleBot3-URMC/scripts/tb/ssh-bot.sh'\" >> ~/.bashrc && echo \"alias botcheck='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-check.sh'\" >> ~/.bashrc && echo \"alias botup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-up.sh'\" >> ~/.bashrc && echo \"alias botdown='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-down.sh'\" >> ~/.bashrc && echo \"alias lanup='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh up'\" >> ~/.bashrc && echo \"alias landown='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh down'\" >> ~/.bashrc && echo \"alias lanstatus='bash /workspaces/TurtleBot3-URMC/scripts/tb/net-lan.sh status'\" >> ~/.bashrc && echo \"alias lansetup='bash /workspaces/TurtleBot3-URMC/scripts/tb/bot-lan-setup.sh'\" >> ~/.bashrc"
 }

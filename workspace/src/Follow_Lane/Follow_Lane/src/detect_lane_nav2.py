@@ -1,30 +1,42 @@
 """Spurerkennung auf der Vogelperspektive: Spurfehler fuer den PID und Linienpixel fuer Nav2.
+Auf dem Rohbild: Schranke (Blau-Maske) und YOLO-Objekte (TensorRT).
 
-Ein:  /lokal/bev, /control/mode
+Ein:  /lokal/bev, /lokal/raw_image, /control/mode
 Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
       /detect/lane_mask (LaneMask fuer lane_costmap_node),
-      /detect/lines_lost (Bool, nur TunnelEntry)
+      /detect/lines_lost (Bool, nur TunnelEntry),
+      /detect/barrier, /detect/barrier_pixels, /detect/barrier_debug/compressed,
+      /detect/objects (vision_msgs/Detection2DArray, Pixel im Rohbild),
+      /detect/intersection (PolygonStamped, Kreuzungsfeld in BEV-Pixeln),
+      /detect/lane_far (Float64MultiArray, nur im Modus Intersection),
+      /detect/timing (String, JSON, 1x/s: Bildalter, Raten, Rechenzeiten fuer debug_view)
 Laeuft als Node detect_lane; im Tunnel pausiert (Reglement).
 """
 import array
+import json
 import os
 import time
+from collections import defaultdict, deque
 
 import cv2
 import numpy as np
 
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Point32, Polygon
+from geometry_msgs.msg import Point32, Polygon, PolygonStamped
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.time import Time
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Bool, Float64, UInt8
+from std_msgs.msg import Bool, Float64, Float64MultiArray, Int32, String, UInt8
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
 from Follow_Lane.src import bev_geometry
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, frange, irange, read_params, require_params, run_node)
+    ControlType, bev_pixels_to_ground, control_mode_from_msg, frange, inverse_transform_points,
+    irange, read_params, require_params, run_node, transform_points, yaw_from_quaternion)
 
 # Rasterweite fuers Ausduennen der auf /detect/lane_mask gesendeten Punkte.
 LANE_MASK_STRIDE = 2
@@ -49,14 +61,53 @@ ERODE_KERNEL = 5
 # gehalten wird.
 WHITE_ALTERNATIVE = 0.65
 YELLOW_ALTERNATIVE = 0.35
-# Kreuzungserkennung: Mindestlaenge einer Kante (px), Konturen kleiner als
-# MIN_CONTOUR_AREA (px^2) sind Rauschen, Toleranzen in Grad.
+# Kreuzungserkennung: Mindestlaenge einer Kante (px, 1,25 mm/px), Konturen kleiner als
+# MIN_CONTOUR_AREA (px^2) sind Rauschen, POLY_EPSILON (px) = Toleranz der Polygone.
 MIN_EDGE_LEN = 30
 MIN_CONTOUR_AREA = 50
 POLY_EPSILON = 3
-PARALLEL_TOL_DEG = 4.0
-CORNER_TOL_DEG = 10.0
-MIN_BISECTOR_DOT = 0.7
+# Laengskante: hoechstens so weit (Grad) von der Senkrechten, Querkante: so weit von 90 Grad
+# zur Laengskante. Dazwischen liegen Boegen abgerundeter Ecken.
+LONG_TOL_DEG = 20.0
+CROSS_TOL_DEG = 20.0
+# Laenger (m) darf der Bogen zwischen Laengs- und Querkante nicht sein (Radius ~12 cm ->
+# Viertelbogen ~19 cm); laengere Uebergaenge sind normale Kurven.
+MAX_BEND_ARC_M = 0.25
+# Querkante mindestens so lang (m): das Ende einer Linie (Stirnseite, ~5 cm) zaehlt nicht.
+MIN_CROSS_LEN_M = 0.08
+# Schliessen der kombinierten Maske (px, ~1,4 cm), siehe detect_intersection.
+CLOSE_KERNEL = 11
+# Beide Ecken einer Kreuzung liegen etwa gleich weit voraus (m).
+MAX_CORNER_DX_M = 0.06
+# So viele der letzten Bilder muessen die Kreuzung zeigen, bevor sie als erkannt gilt.
+INTERSECTION_CONFIRM = (3, 5)
+# Bestaetigte Kreuzung so lange (s) halten, wenn sie in einzelnen Bildern fehlt; in der Zeit
+# per Odometrie mitgeschoben (bleibt am Boden stehen, waehrend der Bot faehrt).
+INTERSECTION_HOLD_S = 0.5
+# Fernes Linienpaar beim Queren der Kreuzung (Modus Intersection, far_lane_pair): von der
+# Suchzeile aus in Baendern nach oben (fern). Je Band +-FAR_BAND_PX Zeilen, davon mindestens
+# FAR_MIN_ROWS mit Kante je Linie; Baender alle FAR_ROW_STEP_PX. Abstand gelb -> weiss
+# zwischen min_lane_width und FAR_MAX_LANE_WIDTH_M (Spur 20 cm + Spiel).
+FAR_BAND_PX = 16
+FAR_ROW_STEP_PX = 16
+FAR_MIN_ROWS = 8
+FAR_MAX_LANE_WIDTH_M = 0.30
+# Nach der Kreuzung hoechstens so lange (s) auf das ferne Paar regeln, bis die Suchzeile
+# wieder beide Linien hat.
+EXIT_FAR_S = 5.0
+# Schranken-Debugbild (Rohbild) hoechstens so oft (s).
+BARRIER_DEBUG_PERIOD_S = 0.1
+# YOLO (Schilder, andere Bots, Startlinie) auf dem Rohbild: TensorRT-Engine relativ zum
+# Repo-Ordner (muss mit der TensorRT-Version im Container gebaut sein, siehe yolo_trt.py).
+# Ohne Engine oder GPU laeuft der Node ohne YOLO weiter.
+YOLO_ENGINE = 'Yolo/yolo26s_800/weights/best_trt10.15_fp16.engine'
+YOLO_CONF = 0.25      # Mindest-Konfidenz einer Box
+YOLO_IOU = 0.7        # Ueberlappung, ab der NMS die schwaechere Box derselben Klasse verwirft
+# Aelter (s) darf das Rohbild fuer YOLO nicht sein.
+YOLO_MAX_AGE_S = 0.5
+# Zeitmessung (/detect/timing) so oft (s) senden, jede TIMING_LOG_EVERY-te auch ins Log.
+TIMING_PERIOD_S = 1.0
+TIMING_LOG_EVERY = 5
 
 
 class detect_lane(Node):
@@ -84,6 +135,9 @@ class detect_lane(Node):
             'lab_b_white_l', 'lab_b_white_h',
             'lab_l_yellow_l', 'lab_l_yellow_h', 'lab_a_yellow_l', 'lab_a_yellow_h',
             'lab_b_yellow_l', 'lab_b_yellow_h',
+            # Blau fuer die Schranke (aus detect_lane.py, Kalibrierung-Tests 188048a)
+            'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l', 'lab_a_blue_h',
+            'lab_b_blue_l', 'lab_b_blue_h',
         ]
         for name in self._param_names:
             self.declare_parameter(name, Parameter.Type.INTEGER, byte)
@@ -95,8 +149,12 @@ class detect_lane(Node):
         # an, damit wechselndes Licht die festen Schwellwerte nicht verfaelscht.
         self.declare_parameter('clahe_clip_limit', Parameter.Type.DOUBLE, frange(0.1, 40.0))
         self.declare_parameter('clahe_tile_grid_size', Parameter.Type.INTEGER, irange(1, 64))
+        # Schranke: ab so vielen blauen Pixeln im Suchbereich des Rohbilds gilt sie als da.
+        # Die aktuelle Zahl steht im Debugbild, danach einstellen.
+        self.declare_parameter('thresh_blue_pixel', Parameter.Type.INTEGER, irange(0, 500000))
         self._param_names += ['detection_row_factor', 'min_lane_width',
-                              'clahe_clip_limit', 'clahe_tile_grid_size']
+                              'clahe_clip_limit', 'clahe_tile_grid_size',
+                              'thresh_blue_pixel']
         require_params(self, self._param_names)
         try:
             self._bev = bev_geometry.load_bev_spec(
@@ -109,7 +167,11 @@ class detect_lane(Node):
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cb_control_mode, 1)
         # Tiefe 1: die Verarbeitung ist langsamer als 30 Bilder/s, nur das neueste zaehlt.
+        self.sub_raw_image = self.create_subscription(Image, '/lokal/raw_image', self.cbGetRawImage, 1)
+
         self.sub_bev = self.create_subscription(Image, '/lokal/bev', self.cb_bev, 1)
+        # Nur fuers Mitschieben einer gehaltenen Kreuzung.
+        self.sub_odom = self.create_subscription(Odometry, '/odom_filtered', self.cb_odom, 1)
 
         # --- Publisher ---
         self.pub_lane_error = self.create_publisher(Float64, '/detect/lane', 1)
@@ -120,10 +182,28 @@ class detect_lane(Node):
         # vom komprimierten Debug-Bild oben, das nur zum Anschauen gedacht ist.
         self.pub_lane_mask = self.create_publisher(LaneMask, '/detect/lane_mask', 1)
         self.pub_lines_lost = self.create_publisher(Bool, '/detect/lines_lost', 1)
+        # Schranke: True = Schwelle erreicht (switch_control schaltet auf Stop), Zahl der
+        # blauen Pixel fuers Debugbild, Rohbild mit blauer Maske zum Einstellen.
+        self.pub_barrier = self.create_publisher(Bool, '/detect/barrier', 1)
+        self.pub_barrier_pixels = self.create_publisher(Int32, '/detect/barrier_pixels', 1)
+        self.pub_barrier_debug = self.create_publisher(
+            CompressedImage, '/detect/barrier_debug/compressed', 1)
+        # Kreuzungsfeld (Mitte zwischen den Ecken, BEV-Pixel), sobald bestaetigt; sonst leer.
+        self.pub_intersection = self.create_publisher(PolygonStamped, '/detect/intersection', 1)
+        # YOLO-Boxen im Rohbild (Pixel), Header = der des Rohbilds.
+        self.pub_objects = self.create_publisher(Detection2DArray, '/detect/objects', 1)
+        # Nur im Modus Intersection: naechstes gelb/weiss-Paar ab der Suchzeile nach vorn,
+        # [lane_error, Abstand Paar (m ab Radachse), Abstand Suchzeile (m)]; leer = keins.
+        self.pub_lane_far = self.create_publisher(Float64MultiArray, '/detect/lane_far', 1)
+        # Bildalter (Kamera-Stempel -> Ankunft hier), Raten und Rechenzeiten, siehe publish_timing.
+        self.pub_timing = self.create_publisher(String, '/detect/timing', 1)
+        self.timer_timing = self.create_timer(TIMING_PERIOD_S, self.publish_timing)
 
         # --- Zustand ---
         self.bridge = CvBridge()
         self.control_mode = None
+        self.raw_image = None    # letztes /lokal/raw_image (Schranke)
+        self._barrier_debug_time = 0.0
         self.is_running = False
         self.img_height = None   # Groesse des Bilds, pro Frame gesetzt
         self.img_width = None
@@ -131,10 +211,57 @@ class detect_lane(Node):
         # je Linie, damit die gedrosselten Meldungen sich nicht gegenseitig verschlucken.
         self._anchor = {'Gelb': None, 'Weiss': None}
         self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
+        self._intersection_hits = deque(maxlen=INTERSECTION_CONFIRM[1])
+        self._intersection_seen = False
+        # Nach der Kreuzung bis zu diesem Zeitpunkt (monotonic) PID auf das ferne Paar, None = aus.
+        self._exit_far_until = None
+        # Zuletzt erkannte Kreuzung: Flaechen am Boden (m, base_footprint), Odometrie-Pose
+        # dazu, Zeitpunkt (monotonic); None = keine.
+        self._held = None
+        self._odom_pose = None
+        self.yolo = self.load_yolo()
+        self._yolo_times = []    # Dauer je Bild (ms) fuers gedrosselte Log
+        self._timing = defaultdict(list)   # Messreihe -> Werte seit dem letzten publish_timing
+        self._last_arrival = {}            # 'raw'/'bev'/'pid' -> monotonic der letzten Ankunft
+        self._timing_count = 0
+        self._timing_log = defaultdict(list)   # dasselbe ueber TIMING_LOG_EVERY Sekunden
 
         self.get_logger().info('Started detect_lane Node (Nav2-Zweig).')
 
+    def load_yolo(self):
+        """YoloTRT oder None (keine Engine, keine GPU, falsche TensorRT-Version)."""
+        # Repo-Ordner: vom Install-Ordner des Pakets aufwaerts, bis Yolo/ auftaucht.
+        path = None
+        d = get_package_share_directory('Follow_Lane')
+        while d != os.path.dirname(d):
+            if os.path.isfile(os.path.join(d, YOLO_ENGINE)):
+                path = os.path.join(d, YOLO_ENGINE)
+                break
+            d = os.path.dirname(d)
+        if path is None:
+            self.get_logger().warn(f'{YOLO_ENGINE} nicht gefunden -- YOLO aus.')
+            return None
+        try:
+            from Follow_Lane.src.yolo_trt import YoloTRT
+            yolo = YoloTRT(path, conf=YOLO_CONF, iou=YOLO_IOU)
+        except Exception as e:  # noqa: BLE001 -- ohne GPU/TensorRT laeuft der Rest weiter
+            self.get_logger().warn(f'YOLO nicht ladbar ({e}) -- YOLO aus.')
+            return None
+        self.get_logger().info(f'YOLO geladen: {path} ({len(yolo.names)} Klassen, '
+                               f'Eingang {yolo.in_w}x{yolo.in_h}).')
+        return yolo
+
     # --- Callbacks ---
+
+    def cbGetRawImage(self, img):
+        self.raw_image = img
+        self.note_arrival('raw', img.header.stamp)
+        self.detectBarrier()
+        self.vision_detection()
+
+    def cb_odom(self, msg):
+        p = msg.pose.pose
+        self._odom_pose = (p.position.x, p.position.y, yaw_from_quaternion(p.orientation))
 
     def cb_control_mode(self, msg):
         new_mode = control_mode_from_msg(self, msg)
@@ -144,6 +271,11 @@ class detect_lane(Node):
             self.get_logger().info('Tunnel -- Spurerkennung pausiert.')
         elif self.control_mode == ControlType.Tunnel:
             self.get_logger().info('Tunnel verlassen -- Spurerkennung laeuft wieder.')
+        if self.control_mode == ControlType.Intersection and new_mode == ControlType.Lane:
+            self._exit_far_until = time.monotonic() + EXIT_FAR_S
+            self.get_logger().info('Nach Kreuzung: PID auf fernes Paar, bis die Suchzeile Linien hat.')
+        elif new_mode != ControlType.Lane:
+            self._exit_far_until = None
         self.control_mode = new_mode
 
     def cb_bev(self, img):
@@ -152,6 +284,8 @@ class detect_lane(Node):
         if self.is_running:
             return
         self.is_running = True
+        self.note_arrival('bev', img.header.stamp)
+        t0 = time.monotonic()
         # Alles im try: sonst bliebe das Flag nach einer Exception dauerhaft True und
         # der Node verarbeitete still keine Bilder mehr.
         try:
@@ -160,6 +294,7 @@ class detect_lane(Node):
             self.get_logger().error(f'Spurerkennung fehlgeschlagen: {e}')
         finally:
             self.is_running = False
+            self._timing['lane_ms'].append((time.monotonic() - t0) * 1000.0)
 
     # --- Hilfsmethoden ---
 
@@ -235,13 +370,40 @@ class detect_lane(Node):
         lane_center = (center_white_x + center_yellow_x) / 2
         lane_error = 1 - (lane_center / width * 2)
 
-        polies, horizontal, vertical, corners, intersection_corners = \
-            self.detect_intersection(mask_white, mask_yellow)
+        # Direkt nach der Kreuzung (intersection_node hat an Lane zurueckgegeben, sobald das
+        # Paar dahinter sicher war): solange an der Suchzeile noch eine Linie fehlt, regelt der
+        # PID auf das ferne Paar. Endet, sobald beide Linien an der Suchzeile gefunden sind.
+        if self._exit_far_until is not None:
+            if raw_yellow is not None and raw_white is not None:
+                self.get_logger().info('Nach Kreuzung: Linien an der Suchzeile -- normal weiter.')
+                self._exit_far_until = None
+            elif now > self._exit_far_until:
+                self.get_logger().warn('Nach Kreuzung: Suchzeile nach '
+                                       f'{EXIT_FAR_S:.0f} s noch leer -- normal weiter.')
+                self._exit_far_until = None
+            else:
+                _, pair = self.far_lane_pair(mask_yellow, mask_white)
+                if pair is not None:
+                    center_yellow_x, center_white_x, row = pair
+                    center_yellow_y = center_white_y = row
+                    # Anker setzen: die Linien laufen von dort in die Suchzeile hinein.
+                    self._anchor['Gelb'] = (center_yellow_x, now)
+                    self._anchor['Weiss'] = (center_white_x, now)
+                    lane_center = (center_white_x + center_yellow_x) / 2
+                    lane_error = 1 - (lane_center / width * 2)
+
+        polies, horizontal, vertical = self.detect_intersection(
+            mask_white, mask_yellow, (center_yellow_x, center_yellow_y),
+            (center_white_x, center_white_y), img.header.stamp)
+        if self.control_mode == ControlType.Intersection:
+            self.pub_lane_far.publish(self.far_lane_pair(mask_yellow, mask_white)[0])
 
         self.pub_lane_error.publish(Float64(data=lane_error))
+        # Alter beim Senden an den PID (control_driving rechnet sofort, < 1 ms).
+        self.note_arrival('pid', img.header.stamp)
         self.pub_debug_follow_lane(center_yellow_x, center_yellow_y, center_white_x, center_white_y,
                                    lane_error, int(lane_center), cv_image, polies, horizontal,
-                                   vertical)
+                                   vertical, img.header)
         self.publish_mask_debug(mask_yellow, mask_white,
                                 center_yellow_x, center_yellow_y, center_white_x, center_white_y)
         # Ungefilterte Masken: die links der gelben Linie ausgeblendeten weissen Pixel
@@ -320,8 +482,10 @@ class detect_lane(Node):
 
     def pub_debug_follow_lane(self, center_yellow_x, center_yellow_y, center_white_x,
                               center_white_y, lane_error, lane_center, img, polies,
-                              horizontal, vertical):
+                              horizontal, vertical, header):
         info = FollowLaneDebug()
+        # Stempel des BEV-Bilds: debug_view misst damit Alter und Versatz zum Rohbild.
+        info.raw_image.header = header
         info.center_white_x = center_white_x
         info.center_white_y = center_white_y
         info.center_yellow_x = center_yellow_x
@@ -360,11 +524,6 @@ class detect_lane(Node):
             polies.append(cv2.approxPolyDP(contour, epsilon=POLY_EPSILON, closed=True))
         return polies
 
-    def get_angle_of_line(self, p1, p2):
-        d = p2 - p1
-        ang = abs(np.degrees(np.arctan2(d[1], d[0])))
-        return min(ang, 180 - ang)
-
     def line_dir(self, p1, p2):
         d = np.asarray(p2, float) - np.asarray(p1, float)
         return np.degrees(np.arctan2(d[1], d[0])) % 180.0
@@ -373,92 +532,289 @@ class detect_lane(Node):
         d = abs(a - b) % 180.0
         return min(d, 180.0 - d)
 
-    def corner_bisector(self, p_prev, p, p_next):
-        u1 = (p_prev - p) / np.linalg.norm(p_prev - p)
-        u2 = (p_next - p) / np.linalg.norm(p_next - p)
-        b = u1 + u2
-        n = np.linalg.norm(b)
-        return None if n < 1e-6 else b / n
+    def far_lane_pair(self, mask_yellow, mask_white):
+        """Naechstes Spurpaar ab der Suchzeile nach vorn (Queren der Kreuzung).
 
-    def _on_border(self, p1, p2, y0):
-        return (p1[0] == 0 and p2[0] == 0) \
-            or (p1[0] == self.img_width - 1 and p2[0] == self.img_width - 1) \
-            or (p1[1] == y0 and p2[1] == y0) \
-            or (p1[1] == self.img_height - 1 and p2[1] == self.img_height - 1)
+        Wie find_lane, aber ohne Tracking (die Linien hinter der Kreuzung tauchen erst
+        fern auf): je Band die rechte Kante von gelb (die rechteste) und die linke Kante
+        von weiss (die linkeste rechts von gelb + min_lane_width), Median ueber die Zeilen.
+        Das erste Band mit plausibler Spurbreite gewinnt. Querlinien der Kreuzung haben
+        kaum senkrechte Kanten und stoeren deshalb wenig.
+        Rueckgabe: (Nachricht fuer /detect/lane_far, (Spalte gelb, Spalte weiss, Zeile) oder None)."""
+        out = Float64MultiArray()
+        res = self._res()
+        x_max = self._bev['x_max'] if self._bev is not None else 0.60
+        yellow = -cv2.Sobel(mask_yellow, cv2.CV_16S, 1, 0, ksize=3) > 127
+        white = cv2.Sobel(mask_white, cv2.CV_16S, 1, 0, ksize=3) > 127
+        max_width = FAR_MAX_LANE_WIDTH_M / res
+        start = int(self.img_height * self.detection_row_factor)
+        for row in range(start, FAR_BAND_PX - 1, -FAR_ROW_STEP_PX):
+            rows = range(max(0, row - FAR_BAND_PX), min(self.img_height, row + FAR_BAND_PX))
+            ys = [hits[-1] for hits in (np.flatnonzero(yellow[r]) for r in rows) if hits.size]
+            if len(ys) < FAR_MIN_ROWS:
+                continue
+            yx = float(np.median(ys))
+            ws = []
+            for r in rows:
+                hits = np.flatnonzero(white[r])
+                hits = hits[hits >= yx + self.min_lane_width]
+                if hits.size:
+                    ws.append(hits[0])
+            if len(ws) < FAR_MIN_ROWS:
+                continue
+            wx = float(np.median(ws))
+            if wx - yx > max_width:
+                continue
+            lane_error = 1 - ((yx + wx) / 2 / self.img_width * 2)
+            out.data = [float(lane_error), x_max - (row + 0.5) * res,
+                        x_max - (start + 0.5) * res]
+            return out, (int(yx), int(wx), row)
+        return out, None
 
-    def detect_intersection(self, img_white, img_yellow):
-        """Kanten und Kreuzungsecken der Fahrbahnlinien, fuer das Debugbild."""
-        full_img = cv2.bitwise_or(img_white, img_yellow)
-        y0 = int(self.img_height * 0.30)
-        polies = self.lines_to_poly(full_img[y0:, :], y0)
+    def detect_intersection(self, img_white, img_yellow, yellow_point, white_point, stamp):
+        """Kreuzung vor dem Bot: Polygone, Quer- und Laengsgeraden fuers Debugbild.
 
-        vertical = []
-        horizontal = []
-        corners_per_poly = []      # pro Fahrbahnlinie: [(eckpunkt, halbierende), ...]
+        Je Seite wird die eigene Linie an der vom PID verfolgten Stelle gesucht und ihre
+        Kontur von der zur Spur zeigenden Laengskante aus nach vorn abgelaufen. Knickt
+        sie nach aussen ab (Querkante, ~90 Grad), ist der Schnittpunkt der beiden
+        verlaengerten Kanten die Ecke der Kreuzung. Ob die Ecke rechtwinklig oder
+        abgerundet ist, aendert den Schnittpunkt nicht: Boegen werden uebersprungen,
+        es zaehlen nur die geraden Kanten davor und danach.
+
+        Ecke links und rechts etwa gleich weit voraus = Kreuzung, die Verbindung beider
+        Ecken ist die Haltelinie. Nur eine Seite = Abzweig auf dieser Seite. Gemeldet
+        wird erst nach INTERSECTION_CONFIRM Bildern; fehlt sie danach in einzelnen Bildern,
+        gilt bis INTERSECTION_HOLD_S die letzte, per Odometrie mitgeschobene Lage.
+        """
+        # Schliessen: am Farbwechsel (weiss -> gelb) liegen nach der Erosion beide Linien
+        # getrennt; die Kontur soll ueber die Ecke hinweg durchlaufen.
+        full = cv2.morphologyEx(cv2.bitwise_or(img_white, img_yellow), cv2.MORPH_CLOSE,
+                                np.ones((CLOSE_KERNEL, CLOSE_KERNEL), np.uint8))
+        polies = self.lines_to_poly(self.shape_filter(full), 0)
+
+        horizontal, vertical, corners = [], [], {}
+        for side, point, outward in (('links', yellow_point, -1), ('rechts', white_point, 1)):
+            found = self._corner_of_line(polies, point, outward)
+            if found is None:
+                continue
+            corner, long_end, cross_end = found
+            corners[side] = corner
+            vertical.append((long_end, corner))
+            horizontal.append((corner, cross_end))
+
+        stop_line = None
+        if len(corners) == 2:
+            dx = abs(corners['links'][1] - corners['rechts'][1]) * self._res()
+            if dx <= MAX_CORNER_DX_M:
+                stop_line = (corners['links'], corners['rechts'])
+        self._report_intersection(stop_line, corners)
+
+        # Debug: Haltelinie, Kreuzungsflaechen und kleine Rauten an den Ecken als
+        # Polygone (rot).
+        marks = []
+        areas = None
+        if stop_line is not None:
+            areas = self.intersection_areas(stop_line, full)
+            if self._intersection_seen:
+                self._remember_intersection(areas)
+        elif self._intersection_seen:
+            areas = self._recall_intersection()
+        center = None
+        if areas is not None:
+            center = areas['mitte']
+            # Haltelinie = Unterkante der Mitte (unten links -> unten rechts)
+            marks.append(np.array([center[3], center[2]], np.int32).reshape(-1, 1, 2))
+            for area in areas.values():
+                marks.append(area.reshape(-1, 1, 2))
+        # Bestaetigte Kreuzung (Mitte, BEV-Pixel) fuers Rohbild-Debug und intersection_node;
+        # leer = keine. Stempel des Kamerabilds: intersection_node legt die Haltelinie per
+        # TF zu genau diesem Zeitpunkt in odom ab.
+        out = PolygonStamped()
+        out.header.stamp = stamp
+        out.header.frame_id = 'bev'
+        if center is not None and self._intersection_seen:
+            out.polygon.points = [Point32(x=float(x), y=float(y), z=0.0) for x, y in center]
+        self.pub_intersection.publish(out)
+        for c in corners.values():
+            x, y = int(c[0]), int(c[1])
+            marks.append(np.array([[x, y - 8], [x + 8, y], [x, y + 8], [x - 8, y]],
+                                  np.int32).reshape(-1, 1, 2))
+        return marks, horizontal, vertical
+
+    def _corner_of_line(self, polies, point, outward):
+        """Ecke (x, y), Ende der Laengs- und der Querkante (fuers Debugbild) oder None.
+        outward: -1 links (Querkante muss nach links weggehen), +1 rechts."""
+        px, py = float(point[0]), float(point[1])
+        best = None
         for poly in polies:
             pts = poly.reshape(-1, 2).astype(float)
-            len_pts = len(pts)
-            if len_pts < 4:
-                continue
-
-            # Kanten sammeln (ohne Rand-Kanten und ohne kurze Fransen)
-            edge_dirs = []
-            for i in range(len_pts):
-                p1, p2 = pts[i], pts[(i + 1) % len_pts]
-                if self._on_border(p1, p2, y0):
+            n = len(pts)
+            for i in range(n):
+                p1, p2 = pts[i], pts[(i + 1) % n]
+                if np.linalg.norm(p2 - p1) < MIN_EDGE_LEN:
                     continue
-                if np.linalg.norm(p2 - p1) > MIN_EDGE_LEN:
-                    edge_dirs.append(self.line_dir(p1, p2))
-                    angle = self.get_angle_of_line(p1, p2)
-                    if angle < 10:
-                        horizontal.append((p1, p2))
-                    elif angle >= 80:
-                        vertical.append((p1, p2))
-
-            has_parallel = any(self.angle_diff(edge_dirs[a], edge_dirs[b]) <= PARALLEL_TOL_DEG
-                               for a in range(len(edge_dirs)) for b in range(a + 1, len(edge_dirs)))
-            if not has_parallel:
-                continue
-
-            corners = []
-            for i in range(len_pts):
-                p_prev, p, p_next = pts[i - 1], pts[i], pts[(i + 1) % len_pts]
-                if min(np.linalg.norm(p_prev - p), np.linalg.norm(p_next - p)) < MIN_EDGE_LEN:
+                if self.angle_diff(self.line_dir(p1, p2), 90.0) > LONG_TOL_DEG:
                     continue
-                if self._on_border(p_prev, p, y0) or self._on_border(p, p_next, y0):
+                if not min(p1[1], p2[1]) - 5 <= py <= max(p1[1], p2[1]) + 5:
                     continue
-                if abs(self.angle_diff(self.line_dir(p_prev, p),
-                                       self.line_dir(p, p_next)) - 90) > CORNER_TOL_DEG:
-                    continue
-                b = self.corner_bisector(p_prev, p, p_next)
-                if b is not None:
-                    corners.append((p, b))
-            if corners:
-                corners_per_poly.append((poly, corners))
+                dist = abs(self._x_at(p1, p2, py) - px)
+                if best is None or dist < best[0]:
+                    best = (dist, pts, i)
+        # Die verfolgte Stelle liegt auf der zur Spur zeigenden Kante (wenige Pixel).
+        if best is None or best[0] > 15:
+            return None
+        _, pts, i = best
+        n = len(pts)
+        a, b = pts[i], pts[(i + 1) % n]
+        # Nach vorn (kleineres y) laufen: in Richtung des vorderen Endpunkts.
+        step = 1 if b[1] < a[1] else -1
+        idx = (i + 1) % n if step == 1 else i
+        long_start, long_end = (a, b) if step == 1 else (b, a)
+        long_dir = self.line_dir(long_start, long_end)
 
-        # Kreuzungsecke = Innen- und Aussenkante desselben Streifens knicken parallel ab,
-        # d.h. zwei Ecken im selben Polygon mit gleich gerichteter Halbierender.
-        # Pro Paar bleibt die konvexe Ecke (Halbierende zeigt ins Polygon), das ist die
-        # Ecke an der Fahrbahnseite.
-        intersection_corners = []
-        for poly, corners in corners_per_poly:
-            used = set()
-            for i in range(len(corners)):
-                for j in range(i + 1, len(corners)):
-                    if i in used or j in used:
-                        continue
-                    (c1, b1), (c2, b2) = corners[i], corners[j]
-                    if np.dot(b1, b2) <= MIN_BISECTOR_DOT:
-                        continue
-                    used.update((i, j))
-                    for c, b in ((c1, b1), (c2, b2)):
-                        probe = c + 5.0 * b
-                        if cv2.pointPolygonTest(poly, (float(probe[0]), float(probe[1])), False) > 0:
-                            intersection_corners.append((c, b))
-                            break
+        arc = 0.0
+        for _ in range(n):
+            q1 = pts[idx]
+            q2 = pts[(idx + step) % n]
+            seg = np.linalg.norm(q2 - q1)
+            ang = self.line_dir(q1, q2)
+            if seg >= MIN_EDGE_LEN and self.angle_diff(ang, long_dir) <= LONG_TOL_DEG / 2:
+                # Laengskante geht weiter (Polygon hat sie geteilt).
+                long_end, arc = q2, 0.0
+            elif seg * self._res() >= MIN_CROSS_LEN_M \
+                    and abs(self.angle_diff(ang, long_dir) - 90.0) <= CROSS_TOL_DEG:
+                if np.sign(q2[0] - q1[0]) != outward:
+                    return None             # knickt nach innen: Kurve, keine Kreuzung
+                corner = self._intersect(long_start, long_end, q1, q2)
+                if corner is None or corner[1] > long_start[1]:
+                    return None
+                return corner, long_start, q2
+            else:
+                arc += seg
+                if arc * self._res() > MAX_BEND_ARC_M:
+                    return None
+            idx = (idx + step) % n
+        return None
 
-        corners = [c for _, cs in corners_per_poly for c in cs]
-        return polies, horizontal, vertical, corners, intersection_corners
+    @staticmethod
+    def _x_at(p1, p2, y):
+        if abs(p2[1] - p1[1]) < 1e-6:
+            return (p1[0] + p2[0]) / 2.0
+        return p1[0] + (y - p1[1]) * (p2[0] - p1[0]) / (p2[1] - p1[1])
+
+    @staticmethod
+    def _intersect(a1, a2, b1, b2):
+        """Schnittpunkt der Geraden a1-a2 und b1-b2, None wenn (fast) parallel."""
+        d1, d2 = a2 - a1, b2 - b1
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < 1e-6:
+            return None
+        t = ((b1[0] - a1[0]) * d2[1] - (b1[1] - a1[1]) * d2[0]) / den
+        return a1 + t * d1
+
+    def intersection_areas(self, stop_line, mask):
+        bot_l, bot_r = (np.asarray(p, float) for p in stop_line)
+        width = bot_r[0] - bot_l[0]
+        y_near = min(bot_l[1], bot_r[1])
+        y_top = self.get_y_for_driving(mask, bot_l[0] + 10, bot_r[0] - 10, y_near, None)
+        if y_top is None:
+            y_top = max(0.0, y_near - width)
+        top_l, top_r = np.array([bot_l[0], y_top]), np.array([bot_r[0], y_top])
+        arm = np.array([width, 0.0])
+        return {
+            'mitte': np.array([top_l, top_r, bot_r, bot_l], np.int32),
+            'links': np.array([top_l - arm, top_l, bot_l, bot_l - arm], np.int32),
+            'rechts': np.array([top_r, top_r + arm, bot_r + arm, bot_r], np.int32),
+        }
+
+    def get_y_for_driving(self, mask, x_from, x_to, y_start, no_lane_value, min_gap=5):
+        """Gegenstueck zu get_x_for_driving, aber spaltenweise: sucht in den Spalten
+        x_from..x_to von y_start aus NACH OBEN die naechste waagerechte Kante
+        (z.B. die querliegende Linie am Ende einer ┴-Kreuzung).
+        min_gap: Zeilen direkt ueber y_start ignorieren, damit nicht die Kante
+        an der Ecke selbst gefunden wird. (aus detect_lane.py, Kalibrierung-Tests)"""
+        grad = cv2.Sobel(mask, cv2.CV_16S, 0, 1, ksize=3, scale=1, delta=0,
+                         borderType=cv2.BORDER_DEFAULT)
+        th1 = cv2.convertScaleAbs(grad) > 127
+
+        y_end = int(y_start) - min_gap
+        if y_end <= 0:
+            return no_lane_value
+
+        a = []
+        for col in range(max(0, int(x_from)), min(mask.shape[1], int(x_to))):
+            hits = np.flatnonzero(th1[:y_end, col])
+            if hits.size:
+                a.append(hits[-1])      # groesstes y oberhalb = naechste Kante ueber der Ecke
+        if len(a) > 10:
+            return int(np.median(a))
+        return no_lane_value
+
+    def get_x_beside(self, mask, y, x_start, direction, min_gap=5):
+        """get_x_for_driving, aber nur auf einer Seite von x_start: direction=-1 sucht
+        links davon die naechste Kante, +1 rechts davon, None ohne Kante. Noetig bei der
+        kombinierten Maske, sonst findet die Suche den Streifen der Ecke selbst.
+        (aus detect_lane.py, Kalibrierung-Tests; noch ungenutzt)"""
+        x_start = int(x_start)
+        if direction < 0:
+            x_end = x_start - min_gap
+            if x_end <= 0:
+                return None
+            return self.get_x_for_driving(mask[:, :x_end], int(y), left_line=True)
+        x_begin = x_start + min_gap
+        if x_begin >= mask.shape[1]:
+            return None
+        x = self.get_x_for_driving(mask[:, x_begin:], int(y), left_line=False)
+        return None if x is None else x + x_begin
+
+    def _res(self):
+        return self._bev['res'] if self._bev is not None else 0.00125
+
+    def _remember_intersection(self, areas):
+        """Flaechen (BEV-Pixel) als Bodenpunkte mit der aktuellen Odometrie merken."""
+        if self._bev is None:
+            return
+        ground = {}
+        for name, poly in areas.items():
+            X, Y = bev_pixels_to_ground(self._bev, poly[:, 0], poly[:, 1])
+            ground[name] = np.column_stack([X, Y])
+        self._held = {'ground': ground, 'pose': self._odom_pose, 'time': time.monotonic()}
+
+    def _recall_intersection(self):
+        """Gemerkte Flaechen in BEV-Pixeln, um die seitdem gefahrene Strecke verschoben;
+        None ohne Merker oder nach INTERSECTION_HOLD_S."""
+        h, b = self._held, self._bev
+        if h is None or time.monotonic() - h['time'] > INTERSECTION_HOLD_S:
+            return None
+        areas = {}
+        for name, pts in h['ground'].items():
+            if h['pose'] is not None and self._odom_pose is not None:
+                pts = inverse_transform_points(self._odom_pose, transform_points(h['pose'], pts))
+            u = (b['y_half'] - pts[:, 1]) / b['res'] - 0.5
+            v = (b['x_max'] - pts[:, 0]) / b['res'] - 0.5
+            areas[name] = np.round(np.column_stack([u, v])).astype(np.int32)
+        return areas
+
+    def _report_intersection(self, stop_line, corners):
+        """Entprellt melden: erst nach INTERSECTION_CONFIRM Bildern, einmal je Kreuzung."""
+        self._intersection_hits.append(stop_line is not None)
+        need = INTERSECTION_CONFIRM[0]
+        if sum(self._intersection_hits) >= need and stop_line is not None:
+            if not self._intersection_seen:
+                # Abstand der Haltelinie ab Radachse: X = x_max - (v + 0.5) * res
+                v = (stop_line[0][1] + stop_line[1][1]) / 2.0
+                x_max = self._bev['x_max'] if self._bev is not None else 0.60
+                dist = x_max - (v + 0.5) * self._res()
+                self.get_logger().info(f'Kreuzung erkannt, Haltelinie {dist * 100:.0f} cm voraus.')
+            self._intersection_seen = True
+        elif stop_line is None and self._intersection_seen and (
+                self._held is None or time.monotonic() - self._held['time'] > INTERSECTION_HOLD_S):
+            self.get_logger().info('Kreuzung nicht mehr im Bild.')
+            self._intersection_seen = False
+            self._held = None
+        elif len(corners) == 1 and stop_line is None:
+            side = next(iter(corners))
+            self.get_logger().info(f'Abzweig nur {side} gesehen.', throttle_duration_sec=2.0)
 
     def self_mask(self, mask):
         """Eigenen Bot (Magnet) in der Maske schwarz setzen, in place: Zeilen mit
@@ -515,6 +871,71 @@ class detect_lane(Node):
             (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
         return mask_yellow, mask_white
 
+    def detectBarrier(self):
+        if self.raw_image is None or self.control_mode in (None, ControlType.Tunnel):
+            return None
+
+        try:
+            # Auch hier: das Rohbild kann vor dem ersten BEV-Bild (find_lane) kommen.
+            read_params(self, self._param_names)
+            cv_image = self.bridge.imgmsg_to_cv2(self.raw_image, desired_encoding='bgr8')
+            img_height, img_width = cv_image.shape[:2]
+            x0, y0 = int(img_width * 0.33), int(img_height * 0.10)
+            x1, y1 = int(img_width * 0.66), int(img_height * 0.40)
+            roi = cv_image[y0:y1, x0:x1]
+            mask_blue = self.blue_mask(roi)
+            num_blue_pixel = cv2.countNonZero(mask_blue)
+        except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
+            self.get_logger().error(f'Schrankenerkennung fehlgeschlagen: {e}',
+                                    throttle_duration_sec=5.0)
+            return None
+
+        barrier = num_blue_pixel >= self.thresh_blue_pixel
+        self.pub_barrier.publish(Bool(data=barrier))
+        self.pub_barrier_pixels.publish(Int32(data=num_blue_pixel))
+        self.publish_barrier_debug(cv_image, mask_blue, (x0, y0, x1, y1), num_blue_pixel,
+                                   barrier)
+        return barrier
+
+    def publish_barrier_debug(self, img, mask_blue, roi, num_blue_pixel, barrier):
+        """Rohbild mit blauer Maske im Suchbereich, Rahmen und Pixelzahl. Nur wenn es
+        jemand anschaut."""
+        if self.pub_barrier_debug.get_subscription_count() == 0:
+            return
+        # Hoechstens BARRIER_DEBUG_PERIOD_S: das Rohbild kommt 30x/s, JPEG kostet Zeit.
+        now = time.monotonic()
+        if now - self._barrier_debug_time < BARRIER_DEBUG_PERIOD_S:
+            return
+        self._barrier_debug_time = now
+        x0, y0, x1, y1 = roi
+        view = img.copy()
+        area = view[y0:y1, x0:x1]
+        hit = mask_blue > 0
+        area[hit] = (0.4 * area[hit] + 0.6 * np.array([255, 0, 0])).astype(np.uint8)
+        # Suchbereich blau umrandet, Text rot sobald die Schwelle erreicht ist.
+        cv2.rectangle(view, (x0, y0), (x1 - 1, y1 - 1), (255, 0, 0), 2)
+        color = (0, 0, 255) if barrier else (0, 255, 0)
+        text = f'Blau: {num_blue_pixel} / {self.thresh_blue_pixel}'
+        if barrier:
+            text += '  SCHRANKE'
+        cv2.putText(view, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+        success, encoded = cv2.imencode('.jpg', view)
+        if not success:
+            return
+        msg = CompressedImage()
+        msg.header = self.raw_image.header
+        msg.format = 'jpeg'
+        msg.data = array.array('B', encoded.tobytes())
+        self.pub_barrier_debug.publish(msg)
+
+    def blue_mask(self, img):
+        """Blau-Maske aus dem BGR-Bild (Schranke): CLAHE auf L, dann Schwellen in LAB."""
+        lab = self.apply_clahe(img)
+        return cv2.inRange(lab,
+            (self.lab_l_blue_l, self.lab_a_blue_l, self.lab_b_blue_l),
+            (self.lab_l_blue_h, self.lab_a_blue_h, self.lab_b_blue_h))
+
     def apply_clahe(self, img):
         """BGR -> LAB mit CLAHE auf dem L-Kanal."""
         l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2LAB))
@@ -523,8 +944,111 @@ class detect_lane(Node):
                                 tileGridSize=(tile_size, tile_size))
         return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
 
-    # Linien-Tracking: naechste Kante zur letzten Position, verlorene Linie LINE_HOLD_TIME_S
-    # halten, Sprung je Bild auf LINE_MAX_JUMP_CM begrenzen.
+    def vision_detection(self):
+        """YOLO auf dem letzten Rohbild, Boxen auf /detect/objects. Im Tunnel aus
+        (Reglement), wie die Schranke. Gibt die Liste (x0, y0, x1, y1, score, class_id,
+        name) zurueck, None ohne Bild/YOLO."""
+        if self.yolo is None or self.raw_image is None \
+                or self.control_mode in (None, ControlType.Tunnel):
+            return None
+
+        age = (self.get_clock().now() - Time.from_msg(self.raw_image.header.stamp)).nanoseconds / 1e9
+        if age > YOLO_MAX_AGE_S:
+            return None
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(self.raw_image, desired_encoding='bgr8')
+            t0 = time.monotonic()
+            detections = self.yolo.detect(cv_image)
+            self._yolo_times.append((time.monotonic() - t0) * 1000.0)
+            self._timing['yolo_ms'].append(self._yolo_times[-1])
+        except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
+            self.get_logger().error(f'YOLO fehlgeschlagen: {e}', throttle_duration_sec=5.0)
+            return None
+        if len(self._yolo_times) >= 100:
+            self.get_logger().info(
+                f'YOLO: {np.mean(self._yolo_times):.1f} ms/Bild (Mittel), '
+                f'max {np.max(self._yolo_times):.1f} ms')
+            self._yolo_times = []
+
+        out = Detection2DArray()
+        out.header = self.raw_image.header
+        for x0, y0, x1, y1, score, _, name in detections:
+            det = Detection2D()
+            det.header = self.raw_image.header
+            det.bbox.center.position.x = (x0 + x1) / 2.0
+            det.bbox.center.position.y = (y0 + y1) / 2.0
+            det.bbox.size_x = x1 - x0
+            det.bbox.size_y = y1 - y0
+            hyp = ObjectHypothesisWithPose()
+            hyp.hypothesis.class_id = name
+            hyp.hypothesis.score = score
+            det.results.append(hyp)
+            out.detections.append(det)
+        self.pub_objects.publish(out)
+        self._timing['yolo_age_ms'].append(self.age_ms(self.raw_image.header.stamp))
+        return detections
+
+    # --- Zeitmessung ---
+
+    def age_ms(self, stamp):
+        """Alter (ms) eines Kamera-Stempels jetzt. Stimmt nur, wenn die Bot-Uhr synchron ist
+        (scripts/tb/sync-time.sh); Raten und Luecken sind davon unabhaengig."""
+        return (self.get_clock().now() - Time.from_msg(stamp)).nanoseconds / 1e6
+
+    def note_arrival(self, name, stamp):
+        """Alter beim Eintreffen und Abstand zur letzten Ankunft (Ruckler) mitschreiben."""
+        now = time.monotonic()
+        last = self._last_arrival.get(name)
+        if last is not None:
+            self._timing[name + '_gap_ms'].append((now - last) * 1000.0)
+        self._last_arrival[name] = now
+        self._timing[name + '_age_ms'].append(self.age_ms(stamp))
+
+    @staticmethod
+    def timing_stats(samples, period):
+        """{Messreihe: [Mittel, max]} und Raten (1/s) ueber period Sekunden."""
+        stats = {key: [round(float(np.mean(v)), 1), round(float(np.max(v)), 1)]
+                 for key, v in samples.items() if v}
+        for name, key in (('raw', 'raw_age_ms'), ('bev', 'bev_age_ms'), ('yolo', 'yolo_ms'),
+                          ('pid', 'pid_age_ms')):
+            stats[name + '_hz'] = len(samples.get(key, ())) / period
+        return stats
+
+    def publish_timing(self):
+        """Je Messreihe Mittel und Maximum seit dem letzten Aufruf, dazu Raten (1/s) als
+        JSON auf /detect/timing. raw = /lokal/raw_image (Schranke, YOLO), bev = /lokal/bev,
+        soweit die Spurerkennung es verarbeitet hat (Rest verworfen, weil sie noch rechnete),
+        pid = Spurfehler an control_driving gesendet."""
+        self.pub_timing.publish(String(data=json.dumps(
+            self.timing_stats(self._timing, TIMING_PERIOD_S))))
+        for key, values in self._timing.items():
+            self._timing_log[key].extend(values)
+        self._timing.clear()
+        self._timing_count += 1
+        if self._timing_count % TIMING_LOG_EVERY == 0:
+            # Ueber alle TIMING_LOG_EVERY Sekunden, damit kein Ruckler durchrutscht.
+            stats = self.timing_stats(self._timing_log, TIMING_PERIOD_S * TIMING_LOG_EVERY)
+            self._timing_log.clear()
+
+            def part(name, src, calc=None):
+                age, gap = stats.get(f'{src}_age_ms'), stats.get(f'{src}_gap_ms')
+                text = f'{name} {stats.get(src + "_hz", 0):.0f} Hz'
+                if age:
+                    text += f' Alter {age[0]:.0f}/{age[1]:.0f}'
+                if gap:
+                    text += f' Luecke max {gap[1]:.0f}'
+                if calc and stats.get(calc):
+                    text += f' Rechnen {stats[calc][0]:.0f}/{stats[calc][1]:.0f}'
+                return text
+            self.get_logger().info('Zeit (ms, Mittel/max): ' + ' | '.join([
+                part('Kamera', 'raw'), part('Spur', 'bev', 'lane_ms'), part('PID', 'pid'),
+                part('YOLO', 'yolo', 'yolo_ms')]))
+
+
+    # Linien-Tracking entsprechend zur Duckiebot Challenge (DuckieRace,
+    # intersection_handling) umgebaut: naechste Kante zur letzten Position, verlorene
+    # Linie halten, Sprung pro Bild begrenzen. Zusaetzlich: Haltezeit, Sprung in cm.
+    # Frage an FaFelF: Gab es einen Grund, warum du dies anders geloest hast?
 
     def anchor_column(self, name, now):
         """Letzte Spalte der Linie, None ohne Detektion in den letzten LINE_HOLD_TIME_S s."""
@@ -587,6 +1111,8 @@ class detect_lane(Node):
     # --- Beenden ---
 
     def shut_down(self):
+        if self.yolo is not None:
+            self.yolo.close()
         self.get_logger().info('Shutting down detect_lane Node (Nav2-Zweig).')
 
 

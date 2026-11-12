@@ -10,7 +10,7 @@ Bibliothek war das Problem, sondern drei Dinge drumherum -- siehe docs/MEMORY.md
      mittige, frontale Ansichten -- und aus DENEN sind cx, cy, p1, p2 mathematisch
      nicht bestimmbar. Hier werden solche Ansichten vor dem Fit AUSSORTIERT.
   2. Die Rohbilder landeten in /tmp und waren nach dem Container-Neustart weg. Hier
-     gehen sie nach logs/ -- damit ist ein Fit ohne neue Aufnahmesession wiederholbar.
+     gehen sie nach logs/kalibrierung/ -- damit ist ein Fit ohne neue Aufnahmesession wiederholbar.
   3. Es gab kein Modell mit festgehaltenem Hauptpunkt. Hier werden drei Varianten
      aus DENSELBEN Bildern gerechnet und gegenuebergestellt.
 
@@ -58,7 +58,7 @@ from camera_calibration.calibrator import (  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/camera_info')
-TARBALL = os.path.join(REPO, 'logs', 'intrinsik_aufnahmen.tar.gz')
+TARBALL = os.path.join(REPO, 'logs', 'kalibrierung', 'intrinsik_aufnahmen.tar.gz')
 OUTFILE = os.path.join(PARAM_DIR, 'imx219_800x600.yaml')
 
 RAW_TOPIC = '/camera/image_raw/compressed'
@@ -424,7 +424,7 @@ def write_yaml(res):
     K, D = res['K'], res['D']
     with open(OUTFILE, 'w') as f:
         f.write(f"# scripts/tb/camera-intrinsics.py -- Modell: {res['desc']}\n")
-        f.write(f"# {res['n']} Ansichten. Rohbilder: logs/intrinsik_aufnahmen.tar.gz\n")
+        f.write(f"# {res['n']} Ansichten. Rohbilder: logs/kalibrierung/intrinsik_aufnahmen.tar.gz\n")
         yaml.dump({
             'image_width': int(w), 'image_height': int(h), 'camera_name': 'camera',
             'camera_matrix': {'rows': 3, 'cols': 3, 'data': [float(x) for x in K.ravel()]},

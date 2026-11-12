@@ -1,8 +1,9 @@
 """Zustandsmaschine fuer den Fahrmodus, einziger Publisher von /control/mode.
 
 Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request,
-      /detect/lines_lost, /tunnel/outside
-Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String)
+      /detect/lines_lost, /tunnel/outside, /detect/barrier, /intersection/active
+Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
+      /control/obstacle_enabled (Bool, fuers Debugbild), /control/align_yaw (Float64, Align)
 Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier. Die Durchfahrt einer
 Engstelle im Tunnel (Grundbewegungen) steuert TunnelPassage (tunnel_passage.py).
 """
@@ -45,6 +46,10 @@ OBSTACLE_CLEAR_DEBOUNCE_S = 1.0
 LINE_BLOCK_TOLERANCE = 0.02
 LINE_OBSTACLE_MARGIN = 0.05
 LANE_MAX_AGE_S = 0.5
+# Schranke: so viele Meldungen in Folge (Rohbilder, ~30/s) bis Stop, so lange (s) frei bis
+# zurueck zu Lane.
+BARRIER_CONFIRM = 3
+BARRIER_CLEAR_DEBOUNCE_S = 1.0
 
 # Ausrichten nach Obstacle (Modus Align): Spurrichtung = Hauptachse der gemerkten Linienpunkte
 # bis ALIGN_RADIUS_M um den Bot, nur bei eindeutig laenglicher Wolke (Eigenwert-Verhaeltnis).
@@ -89,6 +94,13 @@ class switch_control(Node):
 
     Im Tunnel faehrt TunnelPassage auf Anfrage von tunnel_explorer_node eine Engstelle mit
     Grundbewegungen; der Modus bleibt Tunnel, damit die Kamera aus bleibt.
+
+    Lane -> Stop, wenn detect_lane BARRIER_CONFIRM Mal in Folge eine Schranke meldet
+    (/detect/barrier); Stop -> Lane, wenn sie BARRIER_CLEAR_DEBOUNCE_S lang weg ist
+    (Schranke offen). In Stop sendet control_driving Null.
+
+    Lane -> Intersection, solange intersection_node /intersection/active True meldet
+    (Haltelinie erreicht: halten, Vorfahrt pruefen, queren); False -> zurueck zu Lane.
     """
 
     def __init__(self):
@@ -122,12 +134,17 @@ class switch_control(Node):
             Bool, '/detect/lines_lost', self.cb_lines_lost, 1)
         self.sub_tunnel_outside = self.create_subscription(
             Bool, '/tunnel/outside', self.cb_tunnel_outside, 1)
+        self.sub_barrier = self.create_subscription(
+            Bool, '/detect/barrier', self.cb_barrier, 1)
+        self.sub_intersection_active = self.create_subscription(
+            Bool, '/intersection/active', self.cb_intersection_active, 1)
 
         # --- Publisher ---
         self.pub_control_mode = self.create_publisher(UInt8, '/control/mode', 1)
         self.pub_tunnel_source = self.create_publisher(String, '/control/tunnel_source', 1)
         # Zielkurs (rad, odom) im Modus Align, fuer control_driving.
         self.pub_align_yaw = self.create_publisher(Float64, '/control/align_yaw', 1)
+        self.pub_obstacle_enabled = self.create_publisher(Bool, '/control/obstacle_enabled', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(MODE_PUBLISH_PERIOD_S, self.cb_timer)
@@ -148,6 +165,8 @@ class switch_control(Node):
         self._lane_time = None
         self._scanner_poses = {}          # (Ziel-Frame, Scanner-Frame) -> (x, y, yaw)
         self.passage = TunnelPassage(self)
+        self._barrier_hits = 0            # Schranken-Meldungen in Folge
+        self._barrier_clear_since = None  # seit wann keine Schranke mehr (Stop)
 
         self.get_logger().info('Started switch_control Node.')
 
@@ -196,6 +215,24 @@ class switch_control(Node):
             self.get_logger().info('Bot ist ausserhalb der Wand-Huelle.')
             self._leave_tunnel()
 
+    def cb_barrier(self, msg):
+        self._barrier_hits = self._barrier_hits + 1 if msg.data else 0
+        if self.control_mode == ControlType.Lane and self._barrier_hits >= BARRIER_CONFIRM:
+            self._set_mode(ControlType.Stop, 'Schranke voraus')
+        elif self.control_mode == ControlType.Stop:
+            if msg.data:
+                self._barrier_clear_since = None
+            elif self._barrier_clear_since is None:
+                self._barrier_clear_since = time.monotonic()
+            elif time.monotonic() - self._barrier_clear_since >= BARRIER_CLEAR_DEBOUNCE_S:
+                self._set_mode(ControlType.Lane, 'Schranke offen')
+
+    def cb_intersection_active(self, msg):
+        if msg.data and self.control_mode == ControlType.Lane:
+            self._set_mode(ControlType.Intersection, 'Haltelinie erreicht')
+        elif not msg.data and self.control_mode == ControlType.Intersection:
+            self._set_mode(ControlType.Lane, 'Kreuzung gequert')
+
     def cb_scan(self, scan):
         read_params(self, self._param_names)
 
@@ -203,9 +240,16 @@ class switch_control(Node):
         if self.control_mode == ControlType.Obstacle and not self.obstacle_enabled:
             self._set_mode(ControlType.Lane, 'Obstacle abgeschaltet (obstacle_enabled)')
         elif self.control_mode == ControlType.Lane and self.obstacle_enabled:
-            if self._obstacle_in_lane(scan, self.obstacle_check_angle_deg,
-                                      self.obstacle_trigger_distance):
-                self._set_mode(ControlType.Obstacle, 'Hindernis in der Fahrbahn')
+            # Erst mit Spurgedaechtnis: ohne zaehlt jeder Punkt im Kegel, auch eine Wand
+            # neben der Spur -- direkt nach dem Start loeste das Obstacle grundlos aus.
+            if self._lane_time is None:
+                return
+            hit = self._obstacle_in_lane(scan, self.obstacle_check_angle_deg,
+                                         self.obstacle_trigger_distance)
+            if hit is not None:
+                self._set_mode(ControlType.Obstacle,
+                               f'Hindernis in der Fahrbahn ({hit[0]:+.0f} Grad, '
+                               f'{hit[1] * 100:.0f} cm)')
         elif self.control_mode == ControlType.Obstacle:
             self._update_obstacle_exit(scan)
         elif self.control_mode == ControlType.Align:
@@ -222,6 +266,7 @@ class switch_control(Node):
         self.control_mode = new_mode
         # Entprell-Zeitstempel gelten nur fuer den Modus, in dem sie gesetzt wurden.
         self._obstacle_clear_since = None
+        self._barrier_clear_since = None
         # Sofort senden, nicht erst mit dem Timer: control_driving schaltet sonst
         # bis zu MODE_PUBLISH_PERIOD_S spaeter um.
         self._publish_mode()
@@ -231,6 +276,9 @@ class switch_control(Node):
         self.pub_tunnel_source.publish(String(data=self._tunnel_source))
         if self.control_mode == ControlType.Align and self._align_yaw is not None:
             self.pub_align_yaw.publish(Float64(data=float(self._align_yaw)))
+        # Frisch gelesen: Taste O / rqt wirken sonst erst mit dem naechsten Scan.
+        self.pub_obstacle_enabled.publish(
+            Bool(data=bool(self.get_parameter('obstacle_enabled').value)))
 
     def _enter_tunnel(self, source):
         if self.control_mode in TUNNEL_MODES:
@@ -262,9 +310,12 @@ class switch_control(Node):
         self._set_mode(restored, 'Tunnel verlassen')
 
     def _update_obstacle_exit(self, scan):
-        if self._obstacle_in_lane(scan, OBSTACLE_CLEAR_ANGLE_DEG,
-                                  self.obstacle_clear_distance):
+        hit = self._obstacle_in_lane(scan, OBSTACLE_CLEAR_ANGLE_DEG, self.obstacle_clear_distance)
+        if hit is not None:
             self._obstacle_clear_since = None
+            self.get_logger().info(
+                f'Obstacle bleibt: Punkt bei {hit[0]:+.0f} Grad, {hit[1] * 100:.0f} cm',
+                throttle_duration_sec=5.0)
             return
 
         now = self.get_clock().now()
@@ -333,20 +384,24 @@ class switch_control(Node):
         return pose2d_from_transform(tf)
 
     def _obstacle_in_lane(self, scan, half_angle_deg, distance):
-        """Liegt ein LiDAR-Punkt im Bereich +/-half_angle_deg naeher als distance, der
-        nicht hinter einer Spurlinie liegt?"""
+        """Naechster LiDAR-Punkt im Bereich +/-half_angle_deg naeher als distance, der
+        nicht hinter einer Spurlinie liegt, als (Winkel in Grad, Abstand in m); None ohne."""
         angles, ranges, points = scan_points(scan)
         near = (np.abs(angles) <= math.radians(half_angle_deg)) & (ranges < distance)
         if not near.any():
-            return False
+            return None
 
         lanes = self._fresh_lane_points()
         scanner = self._scanner_pose(self._lane_frame, scan.header.frame_id) \
             if lanes is not None else None
-        if scanner is None:
-            return True
-        candidates = transform_points(scanner, points[near])
-        return bool((~self._behind_line(candidates, lanes)).any())
+        hit = np.flatnonzero(near)
+        if scanner is not None:
+            candidates = transform_points(scanner, points[near])
+            hit = hit[~self._behind_line(candidates, lanes)]
+            if hit.size == 0:
+                return None
+        i = hit[np.argmin(ranges[hit])]
+        return math.degrees(angles[i]), float(ranges[i])
 
     def _fresh_lane_points(self):
         if self._lane_time is None or self._lane_points is None:

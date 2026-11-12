@@ -28,8 +28,8 @@ class ControlType(Enum):
     """Fahrmodus auf /control/mode (std_msgs/UInt8), gesetzt nur von switch_control."""
     Lane = 1
     Obstacle = 2
-    Stop = 3            # noch ohne Ausloeser
-    Intersection = 4    # noch ohne Ausloeser
+    Stop = 3            # Schranke (switch_control)
+    Intersection = 4    # Halt an der Haltelinie + Queren (intersection_node)
     Align = 5           # noch ohne Ausloeser
     Tunnel = 6          # im Tunnel: Kamera verboten (Reglement)
     TunnelEntry = 7     # Einfahrt bis kurz vor die Oeffnung, Kamera noch erlaubt

@@ -1,10 +1,11 @@
 """Einzige Quelle fuer Fahrbefehle: waehlt je nach /control/mode den Regler.
 
 Ein:  /control/mode (UInt8), /detect/lane (Float64, Spurfehler), /nav2/cmd_vel (Twist),
-      /control/maneuver (Maneuver), TF odom -> base_footprint
+      /control/maneuver (Maneuver), /intersection/cmd_vel (Twist), TF odom -> base_footprint
 Aus:  /control/cmd_vel (Twist) -> notaus -> /cmd_vel,
       /control/maneuver_status (UInt32, id der zuletzt beendeten Grundbewegung)
-Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel.
+Lane/TunnelEntry: PID auf den Spurfehler. Obstacle/Tunnel: /nav2/cmd_vel. Intersection:
+/intersection/cmd_vel (intersection_node: halten, queren).
 Tunnel mit laufender Grundbewegung in odom (Durchfahrt einer Engstelle): nur diese.
 Alles ausser dem PID wird auf die Radgrenze skaliert, der PID begrenzt selbst.
 Align: auf der Stelle zum Kurs /control/align_yaw (switch_control), Ist-Kurs aus
@@ -34,6 +35,7 @@ PID_MODES = (ControlType.Lane, ControlType.TunnelEntry)
 NAV2_MODES = (ControlType.Obstacle, ControlType.Tunnel)
 # Hier hat eine laufende Grundbewegung Vorrang vor Nav2; der Modus bleibt (im Tunnel keine Kamera).
 MANEUVER_MODES = (ControlType.Tunnel,)
+INTERSECTION_MODES = (ControlType.Intersection,)
 
 # Align (nach Obstacle): auf der Stelle zum Zielkurs von switch_control (/control/align_yaw,
 # odom) drehen, Ist-Kurs aus /odom_filtered. P-Regler, mindestens ALIGN_MIN_VEL (sonst
@@ -68,6 +70,8 @@ WHEEL_SEPARATION = 0.160
 # Perioden von switch_control (2 Hz).
 LANE_CMD_TIMEOUT = 0.3
 NAV2_CMD_TIMEOUT = 0.25
+# intersection_node sendet mit 20 Hz, auch im Halt (Null).
+INTERSECTION_CMD_TIMEOUT = 0.25
 MODE_TIMEOUT = 1.5
 MODE_SWITCH_HOLD = 0.3
 
@@ -150,6 +154,8 @@ class control_driving(Node):
             Odometry, '/odom_filtered', self.cb_odom, 1)
         self.sub_maneuver = self.create_subscription(
             Maneuver, '/control/maneuver', self.cb_maneuver, 1)
+        self.sub_intersection_cmd_vel = self.create_subscription(
+            Twist, '/intersection/cmd_vel', self.cb_intersection_cmd_vel, 1)
 
         # --- Publisher ---
         self.pub_cmd_vel = self.create_publisher(Twist, '/control/cmd_vel', 1)
@@ -166,6 +172,7 @@ class control_driving(Node):
         self._mode_time = None
         self._lane_time = None
         self._nav2_time = None
+        self._intersection_time = None
         self._nav2_blocked_until = 0.0
         self._align_yaw = None          # (Zielkurs rad, Empfangszeit)
         self._yaw = None                # (Ist-Kurs rad, Empfangszeit)
@@ -202,6 +209,7 @@ class control_driving(Node):
         self._nav2_time = None
         self._maneuver = None
         self._maneuver_start = None
+        self._intersection_time = None
         if new_mode in PID_MODES:
             self._reset_pid()
         if new_mode == ControlType.Tunnel:
@@ -264,6 +272,11 @@ class control_driving(Node):
         self._waypoint = 0
         self._turned = 0.0
         self._turn_time = None
+    def cb_intersection_cmd_vel(self, msg):
+        if not self._mode_is(*INTERSECTION_MODES):
+            return
+        self._intersection_time = time.monotonic()
+        self.pub_cmd_vel.publish(self._limit_wheels(msg))
 
     def cb_watchdog(self):
         read_params(self, self._param_names)
@@ -287,6 +300,8 @@ class control_driving(Node):
             fresh = self._fresh(self._lane_time, now, LANE_CMD_TIMEOUT)
         elif self._mode_is(*NAV2_MODES):
             fresh = self._fresh(self._nav2_time, now, NAV2_CMD_TIMEOUT)
+        elif self._mode_is(*INTERSECTION_MODES):
+            fresh = self._fresh(self._intersection_time, now, INTERSECTION_CMD_TIMEOUT)
         else:
             fresh = False
         if not fresh:

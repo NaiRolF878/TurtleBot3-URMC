@@ -14,7 +14,7 @@
 
 # Laeuft schon eine Pipeline? Zwei gleichzeitig senden auf dieselben Topics, und ein
 # zweiter Not-Aus im STOPP schickt dauernd Null an den Bot.
-PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view|image_recorder|intersection_node)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Pipeline:"
     ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/[^/]*/##; s# --ros-args.*##'
@@ -27,7 +27,7 @@ if pgrep -f "$PATTERN" >/dev/null; then
     # Zuerst den Not-Aus (sendet beim Beenden Stopp), dann die Launch-Prozesse und Knoten
     pkill -INT -f 'lib/Follow_Lane/notaus( |$)'
     sleep 1
-    pkill -INT -f 'ros2 launch Follow_Lane (follow_lane|nav2_obstacle).launch.py'
+    pkill -INT -f 'ros2 launch Follow_Lane (follow_lane|follow_lane_record|nav2_obstacle).launch.py'
     sleep 3
     pkill -TERM -f "$PATTERN"
     sleep 1
@@ -39,11 +39,11 @@ if pgrep -f "$PATTERN" >/dev/null; then
     echo ""
 fi
 
-# Ausgaben aller Knoten: pro Start eine eigene Datei in logs/ (logs/ ist in .gitignore).
+# Ausgaben aller Knoten: pro Start eine eigene Datei in logs/pipeline/ (logs/ ist in .gitignore).
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-mkdir -p "$REPO_ROOT/logs"
-NODE_LOG="$REPO_ROOT/logs/nav2_obstacle-$(date +%Y%m%d-%H%M%S).log"
-ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/nav2_obstacle-latest.log"
+mkdir -p "$REPO_ROOT/logs/pipeline"
+NODE_LOG="$REPO_ROOT/logs/pipeline/nav2_obstacle-$(date +%Y%m%d-%H%M%S).log"
+ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/nav2_obstacle-latest.log"
 
 # set -m: eigene Prozessgruppe, sonst ignoriert der Hintergrundjob SIGINT (siehe follow_lane.sh).
 set -m
@@ -66,7 +66,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Pipeline startet im Hintergrund (Log der Knoten: logs/$(basename "$NODE_LOG"))."
+echo "Pipeline startet im Hintergrund (Log der Knoten: logs/pipeline/$(basename "$NODE_LOG"))."
 echo ""
 echo "Tunnel von Hand: im Fenster rqt_image_view einmal \"Publish click location\""
 echo "anhaken, dann im Debugbild auf TUNNEL STARTEN klicken."

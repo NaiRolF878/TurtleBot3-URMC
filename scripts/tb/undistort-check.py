@@ -38,7 +38,7 @@ import _camera_geometry as cg  # noqa: E402
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/camera_info')
 INTRINSICS = os.path.join(PARAM_DIR, 'imx219_800x600.yaml')
-FRAME = os.path.join(REPO, 'logs', 'raster_roh.png')
+FRAME = os.path.join(REPO, 'logs', 'kalibrierung', 'raster_roh.png')
 
 RAW_TOPIC = '/camera/image_raw/compressed'
 
@@ -128,6 +128,7 @@ def grab(path):
     if 'i' not in holder:
         print(f'Kein Bild auf {RAW_TOPIC}. Laeuft die Kamera?')
         return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     cv2.imwrite(path, holder['i'])
     print(f'Rohbild geschrieben: {path} ({holder["i"].shape[1]}x{holder["i"].shape[0]})')
     return holder['i']
@@ -188,7 +189,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--grab', action='store_true', help=f'Rohbild von {RAW_TOPIC} holen')
     ap.add_argument('--models', action='store_true',
-                    help='ALLE Kalibriermodelle aus logs/intrinsik_aufnahmen.tar.gz '
+                    help='ALLE Kalibriermodelle aus logs/kalibrierung/intrinsik_aufnahmen.tar.gz '
                          'rechnen und am Rasterbild gegeneinander testen. Beantwortet '
                          '"welches Modell nehme ich?" ohne jedesmal colcon build.')
     ap.add_argument('--image', default=FRAME, help='auszuwertendes ROHBILD (unverzerrt korrigiert)')

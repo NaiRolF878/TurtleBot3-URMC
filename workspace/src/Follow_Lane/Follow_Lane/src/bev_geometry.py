@@ -54,6 +54,41 @@ def ground_homography(K, height, pitch_deg, roll_deg, dx=0.0, dy=0.0, yaw_deg=0.
     return K @ np.column_stack([R[:, 0], R[:, 1], t])
 
 
+def bev_to_image_homography(spec, ext, K_und):
+    """3x3-Matrix BEV-Pixel (u, v, 1) -> Pixel im ENTZERRTEN Bild (/lokal/raw_image), z.B.
+    um Ergebnisse aus der BEV ins Rohbild einzuzeichnen (cv2.perspectiveTransform).
+    Gilt fuer Punkte am Boden; K_und wie in build_bev_maps."""
+    res = spec['res']
+    # u, v -> X = x_max - (v + 0.5) * res, Y = y_half - (u + 0.5) * res
+    A = np.array([[0.0, -res, spec['x_max'] - 0.5 * res],
+                  [-res, 0.0, spec['y_half'] - 0.5 * res],
+                  [0.0, 0.0, 1.0]])
+    H = ground_homography(K_und, ext['camera_height_m'], ext['camera_pitch_deg'],
+                          ext['camera_roll_deg'], ext.get('forward_offset_m', 0.0),
+                          ext.get('lateral_offset_m', 0.0), ext.get('camera_yaw_deg', 0.0))
+    return H @ A
+
+
+def load_bev_to_image(param_dir, calibration, extrinsics, balance, size=None):
+    """(3x3 BEV-Pixel -> entzerrtes Rohbild, spec) aus den Kalibrierdateien, wie
+    ingress_node_nav2 rechnet (gleiche Dateien, gleiche balance). size = (w, h) des
+    Rohbilds; None = Groesse der Intrinsik-Datei. Wirft bei fehlenden Dateien."""
+    with open(os.path.join(param_dir, 'camera_info', calibration)) as f:
+        cal = yaml.safe_load(f)
+    with open(os.path.join(param_dir, 'camera_info', extrinsics)) as f:
+        ext = yaml.safe_load(f)
+    spec = load_bev_spec(param_dir)
+    w, h = size if size is not None else (cal['image_width'], cal['image_height'])
+    K = np.array(cal['camera_matrix']['data'], np.float64).reshape(3, 3)
+    K[0] *= w / cal['image_width']
+    K[1] *= h / cal['image_height']
+    if cal.get('distortion_model', 'plumb_bob') in ('equidistant', 'fisheye'):
+        D = np.array(cal['distortion_coefficients']['data'], np.float64).reshape(4, 1)
+        K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+            K, D, (w, h), np.eye(3), balance=balance)
+    return bev_to_image_homography(spec, ext, K), spec
+
+
 def build_bev_maps(spec, ext, K_raw, D, fisheye, K_und):
     """Remap-Tabellen BEV-Pixel -> Rohbild-Pixel.
 

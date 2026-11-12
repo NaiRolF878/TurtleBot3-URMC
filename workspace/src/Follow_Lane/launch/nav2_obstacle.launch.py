@@ -95,4 +95,10 @@ def generate_launch_description():
             arguments=['/nav2/view'],
             condition=IfCondition(LaunchConfiguration('image_view')),
         ),
+        # Drittes Fenster: Rohbild mit Schranken-Maske und projizierter Kreuzungserkennung.
+        Node(
+            package='rqt_image_view', executable='rqt_image_view', name='rqt_debug_view_raw',
+            arguments=['/lokal/debug_view_raw'],
+            condition=IfCondition(LaunchConfiguration('image_view')),
+        ),
     ])

@@ -63,7 +63,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/camera_info')
 INTRINSICS = os.path.join(PARAM_DIR, 'imx219_800x600.yaml')
 OUTFILE = os.path.join(PARAM_DIR, 'ground_homography_800x600.yaml')
-FRAME = os.path.join(REPO, 'logs', 'ground_calib_frame.png')
+FRAME = os.path.join(REPO, 'logs', 'kalibrierung', 'ground_calib_frame.png')
 
 RAW_TOPIC = '/lokal/raw_image'
 
@@ -92,6 +92,7 @@ def grab_frame(path, timeout=20.0):
     if 'img' not in holder:
         print(f'Kein Bild auf {RAW_TOPIC}. Laeuft ingress_node?')
         return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     cv2.imwrite(path, holder['img'])
     print(f'Bild geschrieben: {path}  ({holder["img"].shape[1]}x{holder["img"].shape[0]})')
     return holder['img']
@@ -201,7 +202,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--grab', action='store_true',
-                    help=f'ein Bild von {RAW_TOPIC} holen und nach logs/ ablegen, dann Ende')
+                    help=f'ein Bild von {RAW_TOPIC} holen und nach logs/kalibrierung/ ablegen, dann Ende')
     ap.add_argument('--image', default=FRAME,
                     help='Bild, auf dem geklickt wird (Default: das zuletzt gegrabbte)')
     ap.add_argument('--layout', default=None,

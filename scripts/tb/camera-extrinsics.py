@@ -42,7 +42,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/camera_info')
 INTRINSICS = os.path.join(PARAM_DIR, 'imx219_800x600.yaml')
 OUTFILE = os.path.join(PARAM_DIR, 'extrinsics_800x600.yaml')
-PREVIEW_OUT = os.path.join(REPO, 'logs', 'vogelperspektive.png')
+PREVIEW_OUT = os.path.join(REPO, 'logs', 'kalibrierung', 'vogelperspektive.png')
 
 RAW_TOPIC = '/lokal/raw_image'
 
@@ -96,6 +96,7 @@ def render_preview(src_bgr, H_g2i, A, x_min, x_max, y_half, size, outpath, max_d
     if combo is None:
         print('  Vorschau: kaum Boden im Bild -- stimmt die Messung?')
         return
+    os.makedirs(os.path.dirname(outpath), exist_ok=True)
     cv2.imwrite(outpath, combo)
     print(f'Vorschau geschrieben: {outpath}')
     print(f'  sichtbarer Boden: {info[0] * 100:.0f} bis {info[1] * 100:.0f} cm vor der Radachse, '
@@ -263,7 +264,7 @@ def main():
                     help='nicht neu messen, nur Homographie aus der gespeicherten Lage rechnen')
     ap.add_argument('--preview', action='store_true',
                     help='ein Kamerabild von %s holen und die Vogelperspektive mit '
-                         'metrischem Gitter nach logs/vogelperspektive.png schreiben. '
+                         'metrischem Gitter nach logs/kalibrierung/vogelperspektive.png schreiben. '
                          'ingress_node muss mit undistort:=true laufen.' % RAW_TOPIC)
     args = ap.parse_args()
 
