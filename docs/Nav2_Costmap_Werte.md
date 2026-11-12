@@ -129,7 +129,7 @@ ankommt.
 |---|---|---|---|---|---|
 | `obstacle_layer` (local + global) | `/scan` | LiDAR | 0.0 / 3.0 m | 0.0 / 3.5 m | `true` |
 | `lane_layer` (local + global) | `/detect/lane_obstacles` | `base_footprint` | 0.0 / 2.0 m | 0.0 / 2.0 m | `true` |
-| `entrance_layer` (local + global) | `/detect/tunnel_entrance_obstacle` | `odom` | 0.0 / 100.0 m | 0.0 / 3.0 m | `false` |
+| `entrance_layer` (local + global) | `/detect/tunnel_entrance_obstacle`, `/tunnel/blocked` | `odom` | 0.0 / 100.0 m | 0.0 / 3.0 m | `false` |
 
 ### `obstacle_layer` (LiDAR)
 - **`obstacle_max_range` 3.0:** Bis zu dieser Entfernung tragen Messpunkte ein
@@ -166,7 +166,11 @@ ankommt.
   `base_footprint`. *Woher:* gewählt, = `MEMORY_RADIUS` des Gedächtnisses. Wer
   einen der beiden Werte ändert, muss den anderen mitziehen.
 
-### `entrance_layer` (Tunnel-Eingangssperre)
+### `entrance_layer` (Tunnel-Eingangssperre, gesperrte Engstellen)
+Zwei Quellen mit denselben Werten: die Eingangssperre von `keepout_zone_node` und die
+Sperrlinien von `tunnel_explorer_node` quer über Engstellen unter 0,21 m oder solche, deren
+Durchfahrt gescheitert ist.
+
 - **`clearing: false`:** *Woher:* gewählt, siehe Kommentar in der Datei. Die
   Punkte sind virtuell und haben keinen echten Sensorursprung. Ein Raytrace
   liefe entlang einer willkürlichen Linie im odom-Frame und würde dabei echte

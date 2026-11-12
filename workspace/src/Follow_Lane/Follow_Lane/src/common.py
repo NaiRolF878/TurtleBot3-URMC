@@ -100,6 +100,11 @@ def yaw_from_quaternion(q):
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 
+def wrap_angle(a):
+    """Winkel (rad) auf [-pi, pi]."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+
 def pose2d_from_transform(tf):
     """(x, y, yaw) aus einem geometry_msgs/TransformStamped; z, Roll und Nick entfallen."""
     t = tf.transform.translation
