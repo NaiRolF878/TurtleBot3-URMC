@@ -13,7 +13,7 @@ import numpy as np
 import tensorrt as trt
 from cuda.bindings import runtime as cudart
 
-# Klassen des Modells Yolo/yolo26s_800 (aus den Metadaten von best.engine). Falls die
+# Klassen der Modelle Yolo/yolo26s_800 und yolo26s_640_data1311 (gleich, aus den Metadaten von best.engine). Falls die
 # Engine eigene Metadaten hat, gelten die.
 CLASS_NAMES = ['tb', 'park', 'tunnel', 'stop', 'left', 'right', 'work', 'start_line',
                'no_entry']

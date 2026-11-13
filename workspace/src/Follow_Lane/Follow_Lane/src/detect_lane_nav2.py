@@ -104,7 +104,7 @@ BARRIER_DEBUG_PERIOD_S = 0.1
 # YOLO (Schilder, andere Bots, Startlinie) auf dem Rohbild: TensorRT-Engine relativ zum
 # Repo-Ordner (muss mit der TensorRT-Version im Container gebaut sein, siehe yolo_trt.py).
 # Ohne Engine oder GPU laeuft der Node ohne YOLO weiter.
-YOLO_ENGINE = 'Yolo/yolo26s_800/weights/best_trt10.15_fp16.engine'
+YOLO_ENGINE = 'Yolo/yolo26s_640_data1311/weights/best_trt10.15_fp16.engine'
 YOLO_CONF = 0.25      # Mindest-Konfidenz einer Box
 YOLO_IOU = 0.7        # Ueberlappung, ab der NMS die schwaechere Box derselben Klasse verwirft
 # Aelter (s) darf das Rohbild fuer YOLO nicht sein.
