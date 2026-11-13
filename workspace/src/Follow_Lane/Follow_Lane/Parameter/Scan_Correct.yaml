@@ -3,3 +3,11 @@
     # So viel (m) misst der LiDAR zu kurz; wird auf jede Entfernung addiert. Messen: Brett in
     # bekanntem Abstand vor, neben und hinter den Bot, mit /scan vergleichen.
     range_offset_m: 0.0
+    # So viel (Grad) schaut der LiDAR-Kopf verdreht nach links (+) / rechts (-); er sitzt auf
+    # Bogen-Langloechern und ist beim Einbau verdrehbar, die TF nimmt 0 an. 13.11. gemessen mit
+    # scripts/tb/lidar_yaw_drive.py (geradeaus an einer Flasche vorbei, 4 Fahrten: 3,9 / 5,3 /
+    # 4,3 / 4,0 Grad links, Mittel 4,4; Wandtest 4,0). Ohne Korrektur lagen Hindernisse in den
+    # Karten aus 60 cm ~4,6 cm zu weit rechts, der Bot fuhr naeher an rechten Hindernissen.
+    # RUECKGAENGIG: 0.0 eintragen (oder die Zeile loeschen ist NICHT moeglich, Pflichtparameter).
+    # Neu messen, sobald der Kopf neu montiert wird.
+    yaw_offset_deg: 4.4

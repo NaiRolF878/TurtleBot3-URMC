@@ -3,12 +3,17 @@
 Ein:  /scan, /odom_filtered, TF base_footprint <- Scanner
 Aus:  /scan_corrected (LaserScan, Frame und Stempel wie /scan)
 
-Der Scanner misst nah zu kurz (range_offset_m, gemessen). Dreht der Bot waehrend eines Umlaufs,
+Der Scanner misst nah zu kurz (range_offset_m, gemessen) und ist um yaw_offset_deg verdreht
+montiert (gemessen, nicht in der TF): jeder Strahl zeigt um diesen Winkel weiter links, als /scan
+angibt; angle_min/angle_max von /scan_corrected sind entsprechend verschoben. Dreht der Bot
+waehrend eines Umlaufs,
 misst jeder Strahl aus einer anderen Pose: die Punkte werden auf die Pose beim ersten Strahl
 (Stempel des Scans) bezogen. Ohne time_increment oder ohne Odometrie nur der Entfernungsfehler.
 Alle Nodes und beide Costmaps lesen /scan_corrected.
 """
 from collections import deque
+
+import math
 
 import numpy as np
 
@@ -43,7 +48,9 @@ class scan_correct(Node):
         # --- Parameter ---
         # Werte nur in Scan_Correct.yaml. So viel (m) misst der LiDAR zu kurz.
         self.declare_parameter('range_offset_m', Parameter.Type.DOUBLE, frange(-0.1, 0.1))
-        self._param_names = ['range_offset_m']
+        # So viel (Grad) schaut der LiDAR verdreht nach links (+) bzw. rechts (-).
+        self.declare_parameter('yaw_offset_deg', Parameter.Type.DOUBLE, frange(-20.0, 20.0))
+        self._param_names = ['range_offset_m', 'yaw_offset_deg']
         require_params(self, self._param_names)
         read_params(self, self._param_names)
 
@@ -73,11 +80,13 @@ class scan_correct(Node):
         scanner = self._scanner_pose(scan.header.frame_id)
         # Ohne Lage des Scanners nur der Entfernungsfehler: lieber unkorrigiert als gar kein Scan.
         rel = self._relative_poses(scan) if scanner is not None else None
-        ranges = correct_scan(scan.ranges, scan.angle_min, scan.angle_increment, scan.range_min,
+        yaw = math.radians(self.yaw_offset_deg)
+        angle_min = scan.angle_min + yaw
+        ranges = correct_scan(scan.ranges, angle_min, scan.angle_increment, scan.range_min,
                               self.range_offset_m, scanner or (0.0, 0.0, 0.0), rel)
         out = LaserScan()
         out.header = scan.header
-        out.angle_min, out.angle_max = scan.angle_min, scan.angle_max
+        out.angle_min, out.angle_max = angle_min, scan.angle_max + yaw
         out.angle_increment = scan.angle_increment
         # Alle Strahlen gelten jetzt zum Stempel des Scans.
         out.time_increment = 0.0 if rel is not None else scan.time_increment
