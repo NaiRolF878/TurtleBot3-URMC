@@ -7,7 +7,6 @@ Aus:  /tunnel/explore_path (Path, odom), /tunnel/door (PolygonStamped, odom: Tue
       Engstellen), /control/maneuver_request (Engstelle, Freifahren); Pfade rechnet
       planner_server (ComputePathToPose). Fahrtprotokoll in $TUNNEL_LOG_DIR/<Zeit>/.
 """
-import json
 import math
 import os
 import time
@@ -23,7 +22,7 @@ from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, Empty, Header, String, UInt8
@@ -33,6 +32,7 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 from follow_lane_msg.msg import ManeuverRequest, ManeuverStatus
 from Follow_Lane.src import passage_geometry as pg
 from Follow_Lane.src import tunnel_geometry as geo
+from Follow_Lane.src.mission_log import MissionLog, scan_record
 from Follow_Lane.src.common import (
     ControlType, control_mode_from_msg, path_blocked, pose2d_from_transform, run_node)
 
@@ -46,6 +46,13 @@ PLAN_TIMEOUT_S = 5.0
 MAP_SETTLE_S = 1.5
 # So lange (s) muss der Bot durchgehend ausserhalb der Huelle sein.
 EXIT_HOLD_S = 1.0
+# So weit (m) muss der ganze Bot hinter der Tuerlinie des Ausgangs stehen.
+EXIT_MARGIN_M = 0.03
+# So lange (s) muss derselbe Ausgang (Mitte naeher als SAME_TARGET_M) erkannt werden; danach
+# bleibt er fest -- es gibt nur einen.
+EXIT_CONFIRM_S = 1.0
+# Ohne gefundene Tuer: Randstuecke naeher als das (m) an der Startpose sind der Eingang.
+ENTRANCE_EXCLUDE_M = 0.35
 # Um diesen Radius (m) gilt eine Stelle als dieselbe: xy_goal_tolerance des Reglers.
 SAME_TARGET_M = 0.15
 # Engstellen naeher als das (m) sind dieselbe.
@@ -139,6 +146,11 @@ class tunnel_explorer_node(Node):
 
         self.pub_explore_path = self.create_publisher(Path, '/tunnel/explore_path', 1)
         self.pub_door = self.create_publisher(PolygonStamped, '/tunnel/door', 1)
+        # Fuer nav2_view: Rechteck des Kastens und Tuerlinie des Ausgangs (a, b); leer = keins.
+        view_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                              reliability=ReliabilityPolicy.RELIABLE)
+        self.pub_box = self.create_publisher(PolygonStamped, '/tunnel/box', view_qos)
+        self.pub_exits = self.create_publisher(PolygonStamped, '/tunnel/exits', view_qos)
         self.pub_outside = self.create_publisher(Bool, '/tunnel/outside', 1)
         self.pub_blocked = self.create_publisher(PointCloud2, '/nav2/blocked', 1)
         self.pub_request = self.create_publisher(ManeuverRequest, '/control/maneuver_request', 1)
@@ -203,14 +215,7 @@ class tunnel_explorer_node(Node):
     def cb_scan(self, scan):
         self.latest_scan = scan
         if self._log is not None:
-            self._log.write('scans', {
-                't': time.monotonic(),
-                'stamp': scan.header.stamp.sec + scan.header.stamp.nanosec * 1e-9,
-                'angle_min': scan.angle_min, 'angle_increment': scan.angle_increment,
-                'range_min': scan.range_min,
-                # mm; -1: kein Echo (inf), 0: ungueltig
-                'mm': [int(r * 1000) if math.isfinite(r) else (-1 if r > 0 else 0)
-                       for r in scan.ranges]})
+            self._log.write('scans', scan_record(scan))
 
     def cb_lines_lost(self, msg):
         if not msg.data:
@@ -241,7 +246,7 @@ class tunnel_explorer_node(Node):
         if msg.active or self._waiting_for is None:
             return
         kind, self._waiting_for = self._waiting_for, None
-        self._event('maneuver_done', kind=int(kind), success=msg.success, reason=msg.reason)
+        self._event('maneuver_done', maneuver=int(kind), success=msg.success, reason=msg.reason)
         if self.control_mode != ControlType.Tunnel or self._target is None:
             return
         if kind == ManeuverRequest.PASSAGE:
@@ -269,7 +274,10 @@ class tunnel_explorer_node(Node):
             self._log.write('poses', {'t': time.monotonic(), 'pose': list(pose)})
         grid, res, origin = self._grid()
         self._update_walls(grid, res, origin, pose)
-        hull = geo.convex_hull(self._walls_xy())
+        # Rechteck des Kastens statt der konvexen Huelle, sobald alle vier Waende gefunden
+        # sind: die Huelle waechst mit einer anschliessenden Streckenbegrenzung weit hinaus.
+        box = self._update_box(grid, res, origin, pose)
+        hull = box if box is not None else geo.convex_hull(self._walls_xy())
         self._update_outside(hull, pose)
         if self._waiting_for is not None:
             return
@@ -341,6 +349,7 @@ class tunnel_explorer_node(Node):
         self._publish_door(a, b, target)
         self.get_logger().info(f'Tuer gefunden, {width:.2f} m breit: x={center[0]:.2f} '
                                f'y={center[1]:.2f}.')
+        self._door_target = np.array(target[:2], dtype=np.float64)
         self._set_target((float(target[0]), float(target[1])), 'Tuer')
 
     def _find_door(self, pose):
@@ -360,7 +369,14 @@ class tunnel_explorer_node(Node):
         a, b, center, width, normal = in_robot[0]
         world = (lambda p: geo.transform(pose, geo.transform(scanner, p[None]))[0])
         out = world(center + normal) - world(center)
-        return world(a), world(b), world(center), width, out / np.hypot(*out)
+        out = out / np.hypot(*out)
+        # find_openings richtet die Normale vom Scanner weg. Steht der Bot schon in der Tuer,
+        # liegt die Mitte fast auf dem Scanner und das Vorzeichen ist Zufall (12:22: Ziel hinter
+        # dem Bot, 180 Grad gedreht, wieder hinaus). Der Bot faehrt vorwaerts ein: nach innen
+        # heisst in Fahrtrichtung.
+        if out @ np.array([math.cos(pose[2]), math.sin(pose[2])]) < 0.0:
+            out = -out
+        return world(a), world(b), world(center), width, out
 
     def _publish_door(self, a, b, inside):
         msg = PolygonStamped()
@@ -401,14 +417,29 @@ class tunnel_explorer_node(Node):
         self._set_target(target, kind)
 
     def _opening_target(self, hull, free, res, origin, pose):
-        """Zielzelle hinter der breitesten Oeffnung der Huelle, nicht am Eingang."""
+        """Zielzelle hinter dem Ausgang des Kastens; solange kein Rechteck da ist, hinter der
+        breitesten Oeffnung der Huelle (nicht am Eingang). Mit Rechteck, aber ohne Ausgang:
+        keins -- dann erkundet die Frontier-Suche den Rand weiter."""
+        if self._exit is not None:
+            center, half_width, _, normal = self._exit
+            # So weit hinaus, dass der ganze Bot hinter der Linie steht, auch wenn der Regler
+            # schon xy_goal_tolerance vorher "erreicht" meldet (wie DOOR_DEPTH_M beim Eingang).
+            target = geo.nearest_free(free, res, origin,
+                                      center + normal * (geo.DOOR_DEPTH_M + EXIT_MARGIN_M),
+                                      max(2 * half_width, geo.BOT_WIDTH))
+            if target is not None and cv2.pointPolygonTest(hull, target, False) < 0 \
+                    and not self._is_done(target):
+                return target
+            return None
+        if self._box is not None:
+            return None
         scan = self.latest_scan
         scanner = self._scanner_pose(scan)
         if scan is None or scanner is None:
             return None
         angles, ranges = self._world_rays(scan, scanner, pose)
         sensor = geo.transform(pose, np.array([scanner[:2]]))[0]
-        for center, width, direction in geo.hull_openings(hull, sensor, angles, ranges):
+        for center, width, direction, _, _ in geo.hull_openings(hull, sensor, angles, ranges):
             if self._door is not None and np.hypot(*(center - self._door[2])) < self._door[4]:
                 continue
             entrance, inward = self._entrance(pose)
@@ -494,19 +525,82 @@ class tunnel_explorer_node(Node):
         self._walls.update(map(tuple, np.round(points, 3).tolist()))
         self._seeds = np.array(list(self._walls))
 
+    def _update_box(self, grid, res, origin, pose):
+        """Rechteck des Kastens und sein Ausgang (fest nach EXIT_CONFIRM_S). Bezugspunkt im
+        Kasten: das Einfahrtsziel hinter der Tuer, ohne Tuer die erste Pose der Suche."""
+        if self._inside_ref is None:
+            if self._door is None and self._phase != EXPLORING:
+                return None
+            self._inside_ref = self._door_target if self._door is not None else np.array(pose[:2])
+        if self._exit is not None:
+            return self._box
+        walls = self._walls_xy()
+        box = geo.box_rectangle(walls, self._inside_ref)
+        if box is None:
+            return self._box
+        if self._box is None or np.abs(box - self._box).max() > 0.02:
+            if self._box is None:
+                corners = box.reshape(-1, 2)
+                self.get_logger().info('Kasten erkannt: ' + ', '.join(
+                    f'({x:.2f}|{y:.2f})' for x, y in corners) + '.')
+            self._box = box
+            self._event('box', corners=box.reshape(-1, 2).tolist())
+            self._publish_polygon(self.pub_box, box.reshape(-1, 2))
+
+        def known(points):
+            c = np.floor((points - origin) / res).astype(np.int64)
+            inside = (c >= 0).all(axis=1) & (c[:, 0] < grid.shape[1]) & (c[:, 1] < grid.shape[0])
+            result = np.zeros(len(points), bool)
+            result[inside] = grid[c[inside, 1], c[inside, 0]] != -1
+            return result
+        if self._door is not None:
+            exclude, radius = self._door[2], self._door[4] / 2.0 + 0.05
+        else:
+            exclude, radius = self._entrance(pose)[0], ENTRANCE_EXCLUDE_M
+        found = geo.box_exit(box, walls, known, exclude, radius)
+        now = time.monotonic()
+        if found is None:
+            self._exit_candidate = None
+            return box
+        center = (found[0] + found[1]) / 2.0
+        if self._exit_candidate is None or np.hypot(*(center - self._exit_candidate[0])) > SAME_TARGET_M:
+            self._exit_candidate = (center, now)
+            return box
+        if now - self._exit_candidate[1] < EXIT_CONFIRM_S:
+            return box
+        self._exit = geo.exit_line(found[0], found[1], box.reshape(-1, 2).mean(axis=0))
+        self.get_logger().info(f'Ausgang des Kastens: x={center[0]:.2f} y={center[1]:.2f}, '
+                               f'{2 * self._exit[1]:.2f} m breit.')
+        self._event('exit', a=found[0].tolist(), b=found[1].tolist())
+        self._publish_polygon(self.pub_exits, np.array(found))
+        # Ein laufendes Ziel ohne Ausgang wird beim naechsten Takt durch die Oeffnung ersetzt.
+        return box
+
+    def _publish_polygon(self, pub, points):
+        msg = PolygonStamped()
+        msg.header.frame_id = ODOM_FRAME
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.polygon.points = [Point32(x=float(p[0]), y=float(p[1]), z=0.0) for p in points]
+        pub.publish(msg)
+
     def _walls_xy(self):
         return np.array(list(self._walls), dtype=np.float32) if self._walls else np.empty((0, 2))
 
     def _update_outside(self, hull, pose):
-        if hull is None:
-            return
-        if geo.bot_inside(hull, pose):
-            self._was_inside = True
-            self._outside_since = None
-            return
-        if not self._was_inside or not geo.bot_outside(hull, pose):
-            self._outside_since = None
-            return
+        """Draussen: ganz durch einen gemerkten Ausgang gefahren (die Huelle kann mit einer
+        anschliessenden Streckenbegrenzung weit ueber den Kasten wachsen) oder ganz ausserhalb
+        der Huelle -- jeweils EXIT_HOLD_S lang."""
+        past_exit = self._exit is not None and geo.bot_past_exit(self._exit, pose, EXIT_MARGIN_M)
+        if not past_exit:
+            if hull is None:
+                return
+            if geo.bot_inside(hull, pose):
+                self._was_inside = True
+                self._outside_since = None
+                return
+            if not self._was_inside or not geo.bot_outside(hull, pose):
+                self._outside_since = None
+                return
         now = time.monotonic()
         if self._outside_since is None:
             self._outside_since = now
@@ -523,7 +617,7 @@ class tunnel_explorer_node(Node):
         self._pending_passage = None
         self._path = None
         self.get_logger().info(f'Ziel ({kind}): x={target[0]:.2f} y={target[1]:.2f}.')
-        self._event('target', kind=kind, xy=list(target))
+        self._event('target', what=kind, xy=list(target))
         self._request_path(target)
 
     def _finish_target(self, failed):
@@ -535,7 +629,7 @@ class tunnel_explorer_node(Node):
             self._done.append((self._target, time.monotonic() + AVOID_S))
         if failed:
             self.get_logger().warn(f'{self._kind} gilt als unerreichbar.', throttle_duration_sec=2.0)
-        self._event('target_done', kind=self._kind, failed=failed)
+        self._event('target_done', what=self._kind, failed=failed)
         self._target = None
         self._kind = None
         self._path = None
@@ -575,7 +669,7 @@ class tunnel_explorer_node(Node):
         if kind == ManeuverRequest.PASSAGE:
             msg.path = self._path_msg(self._pending_passage[:2])
         self._waiting_for = kind
-        self._event('maneuver', kind=int(kind))
+        self._event('maneuver', maneuver=int(kind))
         self.pub_request.publish(msg)
 
     def _block(self, center, axis, width, why):
@@ -668,6 +762,13 @@ class tunnel_explorer_node(Node):
         self._walls = set()             # (x, y) der Wandzellen in odom
         self._was_inside = False
         self._outside_since = None
+        self._inside_ref = None         # Punkt sicher im Kasten (odom), Bezug fuers Rechteck
+        self._door_target = None        # Einfahrtsziel hinter der Tuer (odom)
+        self._box = None                # Rechteck des Kastens (4, 1, 2), None = noch nicht
+        self._exit = None               # Tuerlinie des Ausgangs (geo.exit_line), fest
+        self._exit_candidate = None     # (mitte, seit monotonic) bis zur Bestaetigung
+        self._publish_polygon(self.pub_box, [])
+        self._publish_polygon(self.pub_exits, [])
         self._start_pose = None
         self._target = None
         self._kind = None
@@ -771,10 +872,17 @@ class tunnel_explorer_node(Node):
         if hull is not None:
             cv2.polylines(img, [np.array([px(p) for p in hull.reshape(-1, 2)], np.int32)],
                           True, (255, 0, 0), 1)
+        if self._box is not None:
+            cv2.polylines(img, [np.array([px(p) for p in self._box.reshape(-1, 2)], np.int32)],
+                          True, (200, 0, 200), 2)
         for line in self._blocked:
             cv2.line(img, px(line[0]), px(line[-1]), (0, 0, 255), 2)
         if self._door is not None:
             cv2.line(img, px(self._door[0]), px(self._door[1]), (0, 160, 0), 2)
+        if self._exit is not None:
+            center, half_width, along, _ = self._exit
+            cv2.line(img, px(center - along * half_width), px(center + along * half_width),
+                     (0, 200, 255), 2)
         return cv2.flip(img, 0)          # Bild: y nach oben
 
     # --- Beenden ---
@@ -782,41 +890,6 @@ class tunnel_explorer_node(Node):
     def shut_down(self):
         self._close_log('Node beendet')
         self.get_logger().info('Shutting down tunnel_explorer_node Node.')
-
-
-class MissionLog:
-    """Fahrtprotokoll einer Tunnelfahrt: events/poses/scans.jsonl, map.png am Ende."""
-
-    def __init__(self, path, logger):
-        self.dir = None
-        self.files = {}
-        try:
-            os.makedirs(path, exist_ok=True)
-            self.dir = path
-            logger.info(f'Fahrtprotokoll: {path}')
-        except OSError as e:
-            logger.warn(f'Kein Fahrtprotokoll ({e}).')
-
-    def write(self, kind, record):
-        if self.dir is None:
-            return
-        try:
-            f = self.files.get(kind)
-            if f is None:
-                f = self.files[kind] = open(os.path.join(self.dir, f'{kind}.jsonl'), 'a',
-                                            buffering=1)
-            f.write(json.dumps(record, default=float) + '\n')
-        except OSError:
-            pass
-
-    def close(self, picture):
-        if self.dir is None:
-            return
-        if picture is not None:
-            cv2.imwrite(os.path.join(self.dir, 'map.png'), picture)
-        for f in self.files.values():
-            f.close()
-        self.files = {}
 
 
 def main(args=None):

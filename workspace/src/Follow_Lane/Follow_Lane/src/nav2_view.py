@@ -46,6 +46,8 @@ PATH = (255, 0, 255)
 OUTLINE = (30, 30, 30)
 WALL = (0, 140, 255)
 SCAN = (255, 190, 120)
+EXIT = (0, 255, 255)          # gelb mit dunklem Rand: erkannter Tunnel-Ausgang
+BOX = (255, 255, 255)         # weiss mit dunklem Rand: Rechteck des Tunnelkastens
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
@@ -108,6 +110,9 @@ class nav2_view(Node):
         blau   Umriss des Bots (published_footprint der local_costmap), schwarz Fahrtrichtung
         magenta Pfad, dem Nav2 gerade folgt, mit Ziel (X); nur waehrend einer Fahrt
         orange Eingangssperre     hellblau LiDAR-Punkte
+        weiss  Rechteck des Tunnelkastens (vier gerade Waende); steht der Bot ganz ausserhalb,
+               schaltet der Tunnel auf Lane
+        gelb   der Ausgang: Randstueck des Rechtecks ohne Wand; ganz dahinter -> Lane
 
     Oben eine Statuszeile: Modus, was nav2_goal_publisher gerade tut, und die letzte
     Warnung der Nav2-Knoten aus /rosout. Das ist der Abbruchgrund: das
@@ -137,6 +142,8 @@ class nav2_view(Node):
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(PointCloud2, '/detect/tunnel_entrance_obstacle',
                                  self.cb_entrance, 1)
+        self.create_subscription(PolygonStamped, '/tunnel/exits', self.cb_exits, latched)
+        self.create_subscription(PolygonStamped, '/tunnel/box', self.cb_box, latched)
         self.create_subscription(LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
         self.create_subscription(UInt8, '/control/mode', self.cb_control_mode, 1)
         self.create_subscription(String, '/control/tunnel_source', self.cb_tunnel_source, 1)
@@ -162,6 +169,8 @@ class nav2_view(Node):
         self.footprint = None
         self.active_path = None
         self.entrance = None
+        self.exits = []             # [((ax, ay), (bx, by))] Tuerlinien in odom
+        self.box = []               # Ecken des Tunnelkastens in odom
         self.scan = None
         self.control_mode = None
         self.tunnel_source = ''
@@ -203,6 +212,16 @@ class nav2_view(Node):
         pts = [(p[0], p[1]) for p in point_cloud2.read_points(
             cloud, field_names=('x', 'y'), skip_nans=True)]
         self.entrance = (cloud.header.frame_id, pts)
+
+    def cb_exits(self, msg):
+        if msg.header.frame_id != ODOM_FRAME:
+            return
+        pts = [(p.x, p.y) for p in msg.polygon.points]
+        self.exits = list(zip(pts[0::2], pts[1::2]))
+
+    def cb_box(self, msg):
+        if msg.header.frame_id == ODOM_FRAME:
+            self.box = [(p.x, p.y) for p in msg.polygon.points]
 
     def cb_scan(self, msg):
         self.scan = msg
@@ -281,6 +300,8 @@ class nav2_view(Node):
         self.draw_lane(body, px)
         self.draw_scan(body, px)
         self.draw_entrance(body, px)
+        self.draw_box(body, px)
+        self.draw_exits(body, px)
         # Lane-Modus: nav2_goal_publisher hat den Pfad beim Verlassen geleert.
         self.draw_path(body, px, self.active_path)
         self.draw_robot(body, px)
@@ -367,6 +388,24 @@ class nav2_view(Node):
             return
         line = np.array([px(x, y) for x, y in pts], np.int32)
         cv2.polylines(body, [line], False, WALL, 3, cv2.LINE_AA)
+
+    def draw_box(self, body, px):
+        """Rechteck des Tunnelkastens; bleibt nach dem Tunnel stehen wie der Ausgang."""
+        if len(self.box) < 3:
+            return
+        poly = np.array([px(x, y) for x, y in self.box], np.int32)
+        cv2.polylines(body, [poly], True, OUTLINE, 5, cv2.LINE_AA)
+        cv2.polylines(body, [poly], True, BOX, 2, cv2.LINE_AA)
+
+    def draw_exits(self, body, px):
+        """Gemerkte Tunnel-Ausgaenge; bleiben nach dem Tunnel stehen, bis der naechste beginnt."""
+        for a, b in self.exits:
+            pa, pb = px(*a), px(*b)
+            cv2.line(body, pa, pb, OUTLINE, 7, cv2.LINE_AA)
+            cv2.line(body, pa, pb, EXIT, 4, cv2.LINE_AA)
+            label = ((pa[0] + pb[0]) // 2 + 6, (pa[1] + pb[1]) // 2 - 6)
+            cv2.putText(body, 'Ausgang', label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, OUTLINE, 3, cv2.LINE_AA)
+            cv2.putText(body, 'Ausgang', label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, EXIT, 1, cv2.LINE_AA)
 
     def draw_path(self, body, px, path):
         if path is None or len(path.poses) < 2:

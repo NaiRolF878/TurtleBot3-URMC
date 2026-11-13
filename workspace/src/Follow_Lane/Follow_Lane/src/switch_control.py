@@ -194,8 +194,8 @@ class switch_control(Node):
 
     def cb_tunnel_outside(self, msg):
         if msg.data and self.control_mode == ControlType.Tunnel:
-            self.get_logger().info('Bot ist ausserhalb der Wand-Huelle.')
-            self._leave_tunnel()
+            self.get_logger().info('Bot ist aus dem Tunnelkasten hinausgefahren.')
+            self._leave_tunnel(ControlType.Lane)
 
     def cb_scan(self, scan):
         read_params(self, self._param_names)
@@ -256,8 +256,12 @@ class switch_control(Node):
             self._set_mode(ControlType.Tunnel,
                            f'Spurlinien enden (seit {LINES_NO_IMAGE_S:.1f} s kein Bild)')
 
-    def _leave_tunnel(self):
-        restored = self._mode_before_tunnel or ControlType.Lane
+    def _leave_tunnel(self, mode=None):
+        """Abbruch von Hand: zurueck in den Modus von vor dem Tunnel. Hinausgefahren (mode=Lane):
+        immer Follow Lane, auch wenn der Tunnel aus Obstacle heraus ausgeloest wurde -- Obstacle
+        faehrt ohne Spurmitte nur geradeaus; ein Hindernis in der Fahrbahn schaltet aus Lane
+        ohnehin wieder auf Obstacle."""
+        restored = mode or self._mode_before_tunnel or ControlType.Lane
         self._mode_before_tunnel = None
         self._tunnel_source = ''
         self._set_mode(restored, 'Tunnel verlassen')
