@@ -20,7 +20,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
 from rclpy.parameter import Parameter
-from std_msgs.msg import Bool, Float64, String, UInt8
+from std_msgs.msg import Bool, Float32MultiArray, Float64, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
@@ -53,6 +53,10 @@ LANE_MAX_AGE_S = 0.5
 # Schranke: so viele Meldungen in Folge (Rohbilder, ~30/s) bis Stop, so lange (s) frei bis
 # zurueck zu Lane.
 BARRIER_CONFIRM = 3
+# Start-/Ziellinie: so viele YOLO-Bilder in Folge nah genug -> Stop (Lauf beendet).
+FINISH_CONFIRM = 3
+# Solange die Linie zu sehen ist, ihren Abstand hoechstens so oft (s) ins Log (zum Einstellen).
+FINISH_LOG_PERIOD_S = 1.0
 BARRIER_CLEAR_DEBOUNCE_S = 1.0
 
 # Ausrichten nach Obstacle (Modus Align): Spurrichtung = Hauptachse der gemerkten Linienpunkte
@@ -127,8 +131,20 @@ class switch_control(Node):
         # false: dort laeuft kein Nav2, in Obstacle bliebe der Bot nur stehen. Abschalten in
         # Obstacle -> Lane.
         self.declare_parameter('obstacle_enabled', Parameter.Type.BOOL)
+        # Start-/Ziellinie (YOLO): an ihr halten = Lauf beendet (Stop). finish_stop_px: Abstand
+        # Unterkante der Box -> unterer Bildrand (px im Rohbild), ab dem gehalten wird.
+        # start_at_line: wir starten an der Linie -> erst nach finish_arm_distance (m) Fahrt.
+        self.declare_parameter('finish_enabled', Parameter.Type.BOOL)
+        self.declare_parameter('finish_stop_px', Parameter.Type.DOUBLE, frange(0.0, 1000.0))
+        self.declare_parameter('start_at_line', Parameter.Type.BOOL)
+        self.declare_parameter('finish_arm_distance', Parameter.Type.DOUBLE, frange(0.0, 20.0))
+        # Nur Boxen, die die Bildmitte (senkrecht) ueberdecken: eine Linie quer ueber die eigene
+        # Spur tut das, ein Schachbrett neben der Fahrbahn nicht.
+        self.declare_parameter('finish_need_center', Parameter.Type.BOOL)
         self._param_names = ['obstacle_check_angle_deg', 'obstacle_trigger_distance',
-                             'obstacle_clear_distance', 'obstacle_enabled']
+                             'obstacle_clear_distance', 'obstacle_enabled', 'finish_enabled',
+                             'finish_stop_px', 'start_at_line', 'finish_arm_distance',
+                             'finish_need_center']
         # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop.
         self.declare_parameter('initial_mode', Parameter.Type.STRING)
         require_params(self, self._param_names + ['initial_mode'])
@@ -151,6 +167,8 @@ class switch_control(Node):
             Bool, '/detect/barrier', self.cb_barrier, 1)
         self.sub_intersection_active = self.create_subscription(
             Bool, '/intersection/active', self.cb_intersection_active, 1)
+        self.sub_start_line = self.create_subscription(
+            Float32MultiArray, '/detect/start_line', self.cb_start_line, 1)
 
         # --- Publisher ---
         self.pub_control_mode = self.create_publisher(UInt8, '/control/mode', 1)
@@ -182,6 +200,11 @@ class switch_control(Node):
         self.maneuvers = ManeuverSequence(self)
         self._barrier_hits = 0            # Schranken-Meldungen in Folge
         self._barrier_clear_since = None  # seit wann keine Schranke mehr (Stop)
+        self._finish_hits = 0             # Ziellinie nah genug, Bilder in Folge
+        self._finished = False            # an der Ziellinie gehalten: Stop bleibt
+        self._finish_log = 0.0            # letzte Abstandsmeldung (monotonic)
+        self._travelled = 0.0             # gefahrene Strecke (m, odom) fuer start_at_line
+        self._last_xy = None
 
         self.get_logger().info(f'Started switch_control Node ({self.control_mode.name}).')
 
@@ -189,7 +212,52 @@ class switch_control(Node):
 
     def cb_timer(self):
         self._update_tunnel_entry()
+        self._update_travelled()
+        if self._finished and not self.finish_enabled:
+            self._finished = False
+            self._set_mode(ControlType.Lane, 'Ziellinie-Halt aufgehoben (finish_enabled aus)')
         self._publish_mode()
+
+    def cb_start_line(self, msg):
+        """Start-/Ziellinie: FINISH_CONFIRM Bilder in Folge hoechstens finish_stop_px ueber dem
+        unteren Bildrand -> Lane => Stop, der Lauf ist zu Ende (bleibt Stop). Mit start_at_line
+        erst nach finish_arm_distance Fahrt, damit die Linie am Start nicht zaehlt."""
+        boxes = [msg.data[i:i + 3] for i in range(0, len(msg.data) - 2, 3)]
+        on_lane = [b for b in boxes if not self.finish_need_center or b[1] <= 0.5 <= b[2]]
+        gap = min(b[0] for b in on_lane) if on_lane else -1.0
+        now = time.monotonic()
+        if boxes and now - self._finish_log >= FINISH_LOG_PERIOD_S:
+            self._finish_log = now
+            if on_lane:
+                self.get_logger().info(f'Ziellinie im Bild: Unterkante {gap:.0f} px ueber dem '
+                                       f'Bildrand (Halt ab {self.finish_stop_px:.0f} px).')
+            else:
+                b = min(boxes, key=lambda b: b[0])
+                self.get_logger().info(
+                    f'Ziellinie neben der Spur (Box {b[1] * 100:.0f}-{b[2] * 100:.0f} % der '
+                    f'Bildbreite, ueberdeckt die Mitte nicht) -- zaehlt nicht.')
+        if self._finished or not self.finish_enabled or self.storage.active:
+            self._finish_hits = 0
+            return
+        close = 0.0 <= gap <= self.finish_stop_px
+        self._finish_hits = self._finish_hits + 1 if close else 0
+        if self.control_mode != ControlType.Lane or self._finish_hits < FINISH_CONFIRM:
+            return
+        if self.start_at_line and self._travelled < self.finish_arm_distance:
+            self.get_logger().info(
+                f'Startlinie (erst {self._travelled:.2f} von {self.finish_arm_distance:.2f} m '
+                'gefahren) -- kein Halt.', throttle_duration_sec=5.0)
+            return
+        self._finished = True
+        self._set_mode(ControlType.Stop, f'Ziellinie erreicht ({gap:.0f} px) -- Lauf beendet')
+
+    def _update_travelled(self):
+        pose = self._robot_pose()
+        if pose is None:
+            return
+        if self._last_xy is not None:
+            self._travelled += math.hypot(pose[0] - self._last_xy[0], pose[1] - self._last_xy[1])
+        self._last_xy = (pose[0], pose[1])
 
     def cb_lane_obstacles(self, cloud):
         try:
@@ -234,7 +302,8 @@ class switch_control(Node):
         # Storage steuert die Modi selbst (auch Stop beim Lesen/Greifen/Ablegen, Lane beim
         # Erkunden); die Schilder sind blau wie die Schranke. "Schranke offen" wuerde sonst
         # mitten in Storage auf Lane schalten.
-        if self.storage.active:
+        if self.storage.active or self._finished:
+            # An der Ziellinie gehalten: "Schranke offen" darf den Lauf nicht wieder starten.
             self._barrier_hits = 0
             self._barrier_clear_since = None
             return

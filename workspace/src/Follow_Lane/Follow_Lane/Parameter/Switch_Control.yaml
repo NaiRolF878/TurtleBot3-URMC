@@ -14,6 +14,23 @@
     # Im Bereich vorn, seitlich und schraeg hinten (270 Grad) nichts naeher als das (m).
     obstacle_clear_distance: 0.40
 
+    # --- Start-/Ziellinie (YOLO 'start_line') ---
+    # An der Linie halten = Lauf beendet (Lane -> Stop, bleibt Stop; aufheben: finish_enabled
+    # auf false, z.B. in rqt, oder Pipeline neu starten).
+    finish_enabled: true
+    # Halt, sobald die Unterkante der Box hoechstens so viele Pixel ueber dem unteren Rand des
+    # Rohbilds (800x600) liegt. VOR ORT EINSTELLEN: switch_control schreibt den aktuellen Wert
+    # ins Log ("Ziellinie im Bild: Unterkante ... px"), Bot an die gewuenschte Haltestelle
+    # stellen und den Wert hier eintragen. Groesser = Halt weiter vor der Linie.
+    finish_stop_px: 60.0
+    # Starten wir an der Linie? Dann zaehlt sie erst nach finish_arm_distance (m) Fahrt.
+    # Standard aus: jede Linie beendet den Lauf.
+    start_at_line: false
+    finish_arm_distance: 1.0
+    # Nur Boxen zaehlen, die die Bildmitte ueberdecken (Linie quer ueber die eigene Spur);
+    # ein Schachbrett neben der Fahrbahn zaehlt dann nicht.
+    finish_need_center: true
+
     # --- Storage (storage_sequence.py) ---
     # Zielzone sagt die Jury an.
     target_zone: 2

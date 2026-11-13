@@ -29,7 +29,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Bool, Float64, Float64MultiArray, Int32, String, UInt8
+from std_msgs.msg import Bool, Float32MultiArray, Float64, Float64MultiArray, Int32, String, UInt8
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 
 from follow_lane_msg.msg import FollowLaneDebug, LaneMask
@@ -196,6 +196,10 @@ class detect_lane(Node):
         self.pub_intersection = self.create_publisher(PolygonStamped, '/detect/intersection', 1)
         # YOLO-Boxen im Rohbild (Pixel), Header = der des Rohbilds.
         self.pub_objects = self.create_publisher(Detection2DArray, '/detect/objects', 1)
+        # Start-/Ziellinie (YOLO 'start_line'): je Box [Abstand Unterkante -> unterer Bildrand
+        # (px im Rohbild), linker Rand, rechter Rand (Anteil der Bildbreite 0..1)], leer = keine.
+        # switch_control entscheidet daraus, ob gehalten wird (Lauf beendet).
+        self.pub_start_line = self.create_publisher(Float32MultiArray, '/detect/start_line', 1)
         # Nur im Modus Intersection: naechstes gelb/weiss-Paar ab der Suchzeile nach vorn,
         # [lane_error, Abstand Paar (m ab Radachse), Abstand Suchzeile (m)]; leer = keins.
         self.pub_lane_far = self.create_publisher(Float64MultiArray, '/detect/lane_far', 1)
@@ -996,6 +1000,10 @@ class detect_lane(Node):
             det.results.append(hyp)
             out.detections.append(det)
         self.pub_objects.publish(out)
+        w, h = float(self.raw_image.width), float(self.raw_image.height)
+        boxes = [v for x0, y0, x1, y1, score, _, name in detections if name == 'start_line'
+                 for v in (h - y1, x0 / w, x1 / w)]
+        self.pub_start_line.publish(Float32MultiArray(data=[float(v) for v in boxes]))
         self._timing['yolo_age_ms'].append(self.age_ms(self.raw_image.header.stamp))
         return detections
 

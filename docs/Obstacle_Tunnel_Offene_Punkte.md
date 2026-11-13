@@ -86,6 +86,16 @@ der LiDAR die Tunnelkarte neu auf. Alles, was vorher über die Umgebung bekannt 
 Die Frontier-Mindestgröße rechnet `tunnel_explorer_node` aus Bot-Breite und Zellgröße. Prüfen: Kommt der Pfad
 rechtzeitig, warnt `planner_server`? Zurück: beide Werte zurücksetzen (Kommentar in der YAML).
 
+### 8. Tunnel-Einfahrt: Tür falsch erkannt, wenn der Bot schon im Eingang steht – **offen** (13.11.)
+
+Letzter Test (13.11. 17:32, Integration, Fahrtprotokoll `logs/tunnel/20261113-173209`): beim Wechsel
+`TunnelEntry -> Tunnel` stand der Bot schon schräg (−21°) im Eingang. Die Türsuche wählte eine 1,00 m
+lange Strecke **längs** zur Fahrtrichtung (Wandende neben dem Bot bis Ecke 1 m voraus), das
+Einfahrtsziel lag 25 cm seitlich. Vom Einfahrtsziel aus wird das Kasten-Rechteck gesucht → kein Kasten,
+kein Ausgang, nur noch Frontier-Ziele, die abbrachen. Der Ausgang-Code selbst ist vorhanden.
+Vorschlag (noch nicht umgesetzt): Tür nur quer zur Fahrtrichtung (≤ ~45°) und ≤ ~0,8 m breit; ohne
+gültige Tür gilt 26 cm geradeaus als „sicher im Kasten“ und die Suche startet von dort.
+
 ---
 
 ## Umgebung (betrifft beide Modi)
