@@ -57,7 +57,9 @@ controller_server:
       regulated_linear_scaling_min_speed: 0.05
       use_rotate_to_heading: true
       rotate_to_heading_angular_vel: 1.2
-      rotate_to_heading_min_angle: 0.785
+      # Ab 20 Grad Abweichung erst auf der Stelle zum Weg drehen, dann fahren (13.11.: bei 45 Grad
+      # bog er schraeg auf Hindernisse neben der Spur zu, statt sich erst auszurichten).
+      rotate_to_heading_min_angle: 0.35
       max_angular_accel: 3.2
       # Nicht zusammen mit use_rotate_to_heading.
       allow_reversing: false
@@ -107,7 +109,12 @@ global_costmap:
       # Der Tunnel-Explorer sucht die Grenze frei/unbekannt.
       track_unknown_space: true
       always_send_full_costmap: true
-      plugins: ["obstacle_layer", "lane_layer", "entrance_layer", "inflation_layer"]
+      # Spurlinien (lane_layer) NACH der grossen Inflation: sie bekommen keine 10-cm-Sperrzone wie
+      # Flaschen, nur lane_inflation (3 cm, schliesst Luecken in der Linie, damit NavFn nicht
+      # hindurchplant). Wie nah der Bot an einer Linie faehrt, entscheidet die Pfadpruefung mit
+      # dem echten Umriss (13.11.: der Knick der gelben Linie sperrte mit 10 cm einen Weg, der in
+      # echt frei war).
+      plugins: ["obstacle_layer", "entrance_layer", "inflation_layer", "lane_layer", "lane_inflation"]
 
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -183,13 +190,22 @@ global_costmap:
           raytrace_min_range: 0.0
 
       # Nur ueber die Inflation kennt NavFn die Bot-Groesse: bis ~0,10 m (robot_radius +
-      # footprint_padding) gesperrt, danach fallend. Radius 0.25 wie HKA (INFLATION_M): NavFn
-      # bevorzugt die Mitte von Luecken. Faktor 10: Naehe ist teuer, mit Abstand wird es schnell
-      # billig (Faktor 3: im ganzen Saum fast gleich teuer, Wege klebten an Hindernissen).
+      # footprint_padding) gesperrt, danach fallend. Faktor 10: Naehe ist teuer, mit Abstand
+      # wird es schnell billig (Faktor 3: im ganzen Saum fast gleich teuer, Wege klebten an
+      # Hindernissen). Radius 0.20 (13.11.: 0.25 wie HKA -> 0.13 -> Wege zu knapp an
+      # Hindernissen -> 0.20): nur der teure Saum aendert sich, die Sperrzone (robot_radius) bleibt.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 10.0
-        inflation_radius: 0.25
+        inflation_radius: 0.20
+
+      # Nur fuer die Spurlinien (siehe plugins): alles innerhalb 3 cm einer Linie ist fuer die
+      # Bot-Mitte gesperrt (liegt im robot_radius), schliesst Luecken zwischen Linienpunkten.
+      # Bereits Aufgeblasenes (Flaschen) bleibt, die Inflation nimmt das Maximum.
+      lane_inflation:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 10.0
+        inflation_radius: 0.03
 
 local_costmap:
   local_costmap:

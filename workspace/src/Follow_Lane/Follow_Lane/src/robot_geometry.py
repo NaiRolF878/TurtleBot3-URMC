@@ -23,6 +23,9 @@ LETHAL_COST = 100
 # Freifahren: Kandidaten (m geradeaus, rad drehen); gefahren wird der, nach dem der Umriss am
 # weitesten von allem Belegten weg ist.
 UNWEDGE_MOVES = (('straight', -0.05), ('straight', 0.05), ('rotate', 0.26), ('rotate', -0.26))
+# Freifahren mit Wegrichtung: weicht der Bot mehr als das (Grad) davon ab, dreht er sich zuerst
+# zum Weg (ganz, sonst zur Haelfte), sofern die Drehung nirgends neu anstoesst.
+UNWEDGE_ALIGN_MIN_DEG = 10.0
 
 
 def transform(pose, xy):
@@ -98,9 +101,19 @@ def move_poses(pose, kind, amount, res):
     return simulate(pose, 0.0, math.copysign(1.0, amount), abs(amount), res)
 
 
-def choose_unwedge(grid, res, origin, pose):
-    """Freieste Bewegung aus UNWEDGE_MOVES als (Art, Betrag). None, wenn keine den Abstand zu
-    allem Belegten vergroessert, ohne unterwegs irgendwo neu anzustossen."""
+def choose_unwedge(grid, res, origin, pose, toward=None):
+    """Freifahr-Bewegung als (Art, Betrag). Mit toward (Wegrichtung, rad odom): zuerst auf der
+    Stelle dorthin drehen, ganz oder zur Haelfte, wenn das frei ist. Sonst die freieste
+    Bewegung aus UNWEDGE_MOVES; None, wenn keine den Abstand zu allem Belegten vergroessert,
+    ohne unterwegs irgendwo neu anzustossen."""
+    if toward is not None:
+        diff = math.remainder(toward - pose[2], 2 * math.pi)
+        if abs(diff) >= math.radians(UNWEDGE_ALIGN_MIN_DEG):
+            for amount in (diff, diff / 2.0):
+                if abs(amount) < math.radians(UNWEDGE_ALIGN_MIN_DEG / 2.0):
+                    break
+                if not motion_collides(grid, res, origin, move_poses(pose, 'rotate', amount, res)):
+                    return 'rotate', amount
     clear = clearance_map(grid, res)
     best, best_clear = None, clearance(clear, res, origin, pose)
     for kind, amount in UNWEDGE_MOVES:
@@ -110,6 +123,13 @@ def choose_unwedge(grid, res, origin, pose):
         end = clearance(clear, res, origin, poses[-1])
         if end > best_clear:
             best, best_clear = (kind, amount), end
+    if best is None and toward is not None:
+        # Nichts vergroessert den Abstand (z.B. Heck 1 cm neben einer Dose), aber in Wegrichtung
+        # ein Stueck geradeaus ist frei: das ist Fortschritt (13.11.: 337x "kein freier Ausweg").
+        if abs(math.remainder(toward - pose[2], 2 * math.pi)) <= math.radians(45.0):
+            forward = max(amount for kind, amount in UNWEDGE_MOVES if kind == 'straight')
+            if not motion_collides(grid, res, origin, move_poses(pose, 'straight', forward, res)):
+                return 'straight', forward
     return best
 
 

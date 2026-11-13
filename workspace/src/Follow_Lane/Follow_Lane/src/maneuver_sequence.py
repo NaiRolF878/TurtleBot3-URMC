@@ -20,6 +20,10 @@ ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
 TICK_PERIOD_S = 0.1
 PASSAGE_VEL = 0.05
+# FOLLOW: Richtung zum Wegpunkt so weit (m) voraus (wie Freifahren in control_driving); weicht der
+# Bot mehr als FOLLOW_ROTATE_MIN_DEG ab, dreht er zuerst auf der Stelle.
+FOLLOW_LOOKAHEAD_M = 0.10
+FOLLOW_ROTATE_MIN_DEG = 10.0
 # Rueckfall, falls control_driving nichts meldet; Abbrueche meldet es selbst.
 STEP_TIMEOUT_S = 20.0
 SEQUENCE_MODES = (ControlType.Obstacle, ControlType.Tunnel)
@@ -29,6 +33,8 @@ class ManeuverSequence:
     """PASSAGE: zum Start der Geraden (control_driving dreht dafuer auf der Stelle und faehrt
     vor oder zurueck), auf der Stelle in Richtung Ende drehen, langsam geradeaus mit gehaltenem
     Kurs bis zum Ende. UNWEDGE: eine Freifahr-Bewegung, die control_driving selbst waehlt.
+    FOLLOW: auf der Stelle zur Richtung des Wegs drehen, dann seinen Punkten langsam folgen
+    (wo RPP an einer engen Stelle Kollision meldet, der Weg aber frei ist).
 
     Meldet control_driving einen Abbruch (Waechter, Sicherung, Pose veraltet, kein Ausweg), endet der
     Ablauf mit diesem Grund. Dauert ein Schritt laenger als STEP_TIMEOUT_S, haelt eine leere
@@ -83,8 +89,21 @@ class ManeuverSequence:
             self._publish(False, False, 'abgelehnt: Modus oder Pose')
             return
         if msg.type == ManeuverRequest.UNWEDGE:
-            self._queue = [self._new_maneuver(Maneuver.UNWEDGE, 0.0)]
-            log.info('Freifahren angefordert.')
+            m = self._new_maneuver(Maneuver.UNWEDGE, 0.0)
+            # Wegrichtung fuer control_driving: dorthin wird zuerst gedreht, wenn frei.
+            m.path = msg.path
+            self._queue = [m]
+            log.info('Freifahren angefordert' + (' (mit Wegrichtung).' if msg.path.poses else '.'))
+        elif msg.type == ManeuverRequest.FOLLOW and len(msg.path.poses) >= 2:
+            points = [(p.pose.position.x, p.pose.position.y) for p in msg.path.poses]
+            yaw = self._direction(points, pose)
+            self._queue = []
+            if abs(math.remainder(yaw - pose[2], 2 * math.pi)) \
+                    >= math.radians(FOLLOW_ROTATE_MIN_DEG):
+                self._queue.append(self._rotate(yaw))
+            self._queue.append(self._path_along(points, PASSAGE_VEL))
+            log.info(f'Weg genau abfahren: drehen auf {math.degrees(yaw):.0f} Grad, '
+                     f'{len(points)} Punkte.')
         elif msg.type == ManeuverRequest.PASSAGE and len(msg.path.poses) == 2:
             start, end = ((p.pose.position.x, p.pose.position.y) for p in msg.path.poses)
             yaw = math.atan2(end[1] - start[1], end[0] - start[0])
@@ -164,6 +183,31 @@ class ManeuverSequence:
         pose.pose.orientation.w = 1.0
         m.path.poses = [pose]
         return m
+
+    def _path_along(self, points, max_vel=0.0):
+        m = self._new_maneuver(Maneuver.PATH, max_vel)
+        m.path.header = m.header
+        for x, y in points:
+            pose = PoseStamped()
+            pose.header = m.header
+            pose.pose.position.x, pose.pose.position.y = float(x), float(y)
+            pose.pose.orientation.w = 1.0
+            m.path.poses.append(pose)
+        return m
+
+    @staticmethod
+    def _direction(points, pose):
+        """Richtung (rad) vom Bot zum Wegpunkt FOLLOW_LOOKAHEAD_M hinter dem naechsten Punkt."""
+        i = min(range(len(points)), key=lambda k: math.dist(points[k], pose[:2]))
+        walked = 0.0
+        j = i
+        while j < len(points) - 1 and walked < FOLLOW_LOOKAHEAD_M:
+            walked += math.dist(points[j], points[j + 1])
+            j += 1
+        tx, ty = points[j]
+        if math.hypot(tx - pose[0], ty - pose[1]) < 0.02:
+            return pose[2]
+        return math.atan2(ty - pose[1], tx - pose[0])
 
     # --- Hilfsmethoden ---
 

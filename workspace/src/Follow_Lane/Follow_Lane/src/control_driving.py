@@ -106,9 +106,19 @@ MANEUVER_ROTATE_FIRST_DEG = 30.0
 # Auftraggeber sofort reagiert statt auf die Zeitgrenze von switch_control zu warten.
 MANEUVER_POSE_STALE_S = 0.5
 MANEUVER_POSE_FAIL_S = 1.0
-# Drehung abbrechen, wenn der Bot so viel (Grad) mehr gedreht haette als geplant
-# (aufsummierte Drehbefehle, unabhaengig von der Odometrie).
+# Drehung abbrechen, wenn der Bot so viel (Grad) mehr gedreht hat als geplant: gemessen am
+# Gierwinkel der Pose (odom_filter: aus der IMU); die aufsummierten Drehbefehle gelten
+# zusaetzlich als Obergrenze, falls die Messung haengt.
 MANEUVER_ROTATE_EXTRA_DEG = 90.0
+# Bot dreht sich nicht (13.11.: Befehle fuer 105 Grad, gedreht 0 -- Raeder/Motor?): nach
+# mindestens MANEUVER_STALL_CMD_DEG gesendeten Drehbefehlen weniger als MANEUVER_STALL_FRACTION
+# davon gemessen. Vom Waechter angehaltene Befehle zaehlen nicht.
+MANEUVER_STALL_CMD_DEG = 30.0
+# Freifahren mit Weg (Maneuver.path): Richtung zum Wegpunkt so weit (m) voraus. Kurz, denn es
+# zaehlt, wohin der Bot jetzt fahren muss (13.11.: bei 0,25 m 5 Grad gemessen, der Weg ging aber
+# mit 30-37 Grad zwischen zwei Dosen hindurch -- keine Drehung, "kein freier Ausweg").
+UNWEDGE_LOOKAHEAD_M = 0.10
+MANEUVER_STALL_FRACTION = 0.25
 # Pfad: liegt das Ziel naeher (m), wird nicht mehr gedreht, nur noch gerade gefahren.
 MANEUVER_NEAR_M = 0.05
 
@@ -198,8 +208,11 @@ class control_driving(Node):
         self._maneuver_start = None     # (x, y, yaw) in odom beim Start
         self._waypoint = 0              # PATH: Index des naechsten Punkts
         self._last_status = None        # ManeuverStatus der zuletzt beendeten Bewegung
-        self._turned = 0.0              # ROTATE: aufsummierte Drehbefehle (rad)
+        self._turned = 0.0              # ROTATE: aufsummierte gesendete Drehbefehle (rad)
         self._turn_time = None
+        self._measured = 0.0            # ROTATE: gemessene Drehung (rad, Gier aus der IMU)
+        self._turn_yaw = None           # Gierwinkel beim letzten Aufruf
+        self._last_sent = False         # letzter Grundbewegungs-Befehl ging hinaus (Waechter)
         self._pose_stamp = None         # letzter Zeitstempel der odom-TF ...
         self._pose_changed = None       # ... und wann (monotonic) er sich zuletzt geaendert hat
         self._pose_lost_since = None    # Grundbewegung ohne gueltige Pose seit (monotonic)
@@ -299,6 +312,9 @@ class control_driving(Node):
         self._waypoint = 0
         self._turned = 0.0
         self._turn_time = None
+        self._measured = 0.0
+        self._turn_yaw = None
+        self._last_sent = False
         self._pose_lost_since = None
 
     def cb_watchdog(self):
@@ -407,14 +423,14 @@ class control_driving(Node):
         if m.type == Maneuver.ROTATE:
             twist, done = self._rotate(pose, m.yaw)
             planned = abs(wrap_angle(m.yaw - self._maneuver_start[2]))
-            if not done and self._rotation_runaway(m, twist, planned):
+            if not done and self._rotation_runaway(m, twist, planned, pose):
                 return
         elif m.type == Maneuver.STRAIGHT:
             twist, done = self._straight(pose, m)
         elif m.type == Maneuver.PATH:
             twist, done = self._path(pose, m)
             # Ein Pfad dreht hoechstens einmal halb herum.
-            if not done and self._rotation_runaway(m, twist, math.pi):
+            if not done and self._rotation_runaway(m, twist, math.pi, pose):
                 return
         else:
             self.get_logger().warn(f'Unbekannte Grundbewegung {m.type} -- gilt als fertig.')
@@ -424,7 +440,8 @@ class control_driving(Node):
             self.get_logger().info(f'Grundbewegung {m.id} fertig.')
             self._finish_maneuver(m, True, '')
             return
-        if not self._publish_guarded(self._limit_wheels(twist))                 and time.monotonic() - self._guard_since >= GUARD_MANEUVER_FAIL_S:
+        self._last_sent = self._publish_guarded(self._limit_wheels(twist))
+        if not self._last_sent and time.monotonic() - self._guard_since >= GUARD_MANEUVER_FAIL_S:
             self.get_logger().warn(f'Grundbewegung {m.id} abgebrochen: Waechter haelt an.')
             self._finish_maneuver(m, False, 'Waechter: Kollision voraus')
 
@@ -432,7 +449,8 @@ class control_driving(Node):
         """Freifahren: freieste kleine Bewegung als STRAIGHT/ROTATE mit derselben id, None (und
         abgebrochen), wenn es keine gibt."""
         grid = self._fresh_costmap()
-        move = choose_unwedge(grid[0], grid[1], grid[2], pose) if grid else None
+        toward = self._path_direction(m.path, pose)
+        move = choose_unwedge(grid[0], grid[1], grid[2], pose, toward) if grid else None
         if move is None:
             reason = 'kein freier Ausweg' if grid else 'keine aktuelle local_costmap'
             self.get_logger().warn(f'Freifahren nicht moeglich: {reason}.')
@@ -446,24 +464,53 @@ class control_driving(Node):
                                f'{amount:+.2f}.')
         return m
 
+    @staticmethod
+    def _path_direction(path, pose):
+        """Richtung (rad, odom) vom Bot zum Wegpunkt UNWEDGE_LOOKAHEAD_M hinter dem naechsten
+        Punkt des Wegs; None ohne Weg."""
+        if path is None or len(path.poses) < 2:
+            return None
+        pts = np.array([[p.pose.position.x, p.pose.position.y] for p in path.poses])
+        i = int(np.argmin(np.hypot(pts[:, 0] - pose[0], pts[:, 1] - pose[1])))
+        steps = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts[i:], axis=0).T))])
+        j = i + int(np.searchsorted(steps, UNWEDGE_LOOKAHEAD_M))
+        target = pts[min(j, len(pts) - 1)]
+        if math.hypot(target[0] - pose[0], target[1] - pose[1]) < 0.05:
+            return None
+        return math.atan2(target[1] - pose[1], target[0] - pose[0])
+
     def _finish_maneuver(self, m, success, reason):
         self._last_status = ManeuverStatus(id=m.id, active=False, success=success, reason=reason)
         self._maneuver = None
         self.pub_maneuver_status.publish(self._last_status)
         self._publish_stop()
 
-    def _rotation_runaway(self, m, twist, planned):
-        """True (und Grundbewegung abgebrochen), wenn die Drehbefehle schon deutlich mehr als
-        die geplante Drehung (rad) ergeben: der Bot dreht sich im Kreis."""
+    def _rotation_runaway(self, m, twist, planned, pose):
+        """True (und Grundbewegung abgebrochen), wenn die Drehung nicht passt:
+        - Drehbefehle gesendet, aber kaum gemessen (IMU): der Bot dreht sich nicht;
+        - gemessen oder befohlen deutlich mehr als geplant (rad): dreht sich im Kreis."""
         now = time.monotonic()
-        if self._turn_time is not None:
+        if self._turn_time is not None and self._last_sent:
             self._turned += abs(twist.angular.z) * min(now - self._turn_time, 0.5)
         self._turn_time = now
-        if self._turned <= planned + math.radians(MANEUVER_ROTATE_EXTRA_DEG):
+        if self._turn_yaw is not None:
+            self._measured += abs(wrap_angle(pose[2] - self._turn_yaw))
+        self._turn_yaw = pose[2]
+        sent, measured = math.degrees(self._turned), math.degrees(self._measured)
+
+        if sent >= MANEUVER_STALL_CMD_DEG and measured < MANEUVER_STALL_FRACTION * sent:
+            self.get_logger().error(
+                f'Grundbewegung {m.id} abgebrochen: Drehbefehle fuer {sent:.0f} Grad gesendet, '
+                f'gemessen (IMU) nur {measured:.0f} -- Bot dreht sich nicht. Bot steht.')
+            self._finish_maneuver(m, False, 'Bot dreht sich nicht (Raeder/Motor?)')
+            return True
+        limit = planned + math.radians(MANEUVER_ROTATE_EXTRA_DEG)
+        if self._measured <= limit and self._turned <= limit:
             return False
         self.get_logger().error(
-            f'Grundbewegung {m.id} abgebrochen: {math.degrees(self._turned):.0f} Grad gedreht, '
-            f'geplant hoechstens {math.degrees(planned):.0f} -- dreht sich im Kreis. Bot steht.')
+            f'Grundbewegung {m.id} abgebrochen: gemessen {measured:.0f} Grad gedreht '
+            f'(Befehle {sent:.0f}), geplant hoechstens {math.degrees(planned):.0f} -- dreht sich '
+            'im Kreis. Bot steht.')
         self._finish_maneuver(m, False, 'dreht sich im Kreis (Odometrie?)')
         return True
 

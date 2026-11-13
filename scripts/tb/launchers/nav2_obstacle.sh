@@ -47,6 +47,8 @@ ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/nav2_obstacle-latest.log"
 
 # Fahrtprotokoll je Tunnelfahrt (tunnel_explorer_node): logs/tunnel/<Zeit>/.
 export TUNNEL_LOG_DIR="$REPO_ROOT/logs/tunnel"
+# Tagebuch je Obstacle-Abschnitt (nav2_goal_publisher): logs/obstacle/<Zeit>/.
+export OBSTACLE_LOG_DIR="$REPO_ROOT/logs/obstacle"
 
 # set -m: eigene Prozessgruppe, sonst ignoriert der Hintergrundjob SIGINT (siehe follow_lane.sh).
 set -m
