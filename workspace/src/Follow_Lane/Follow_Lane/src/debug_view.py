@@ -134,6 +134,9 @@ def tunnel_request(rect, point, control_mode):
 
 # Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
 CLICK_TOPIC = '/lokal/debug_view_mouse_left'
+# Das Rohbild-Debug zeigt dieselben Seitenpanels samt Buttons; seine Klicks kommen hier an
+# (13.11.: wurden nirgends ausgewertet -- STORAGE STARTEN im Rohbild-Fenster tat nichts).
+CLICK_TOPIC_RAW = '/lokal/debug_view_raw_mouse_left'
 
 # Welche Quelle control_driving je Modus auf /control/cmd_vel durchreicht; in allen
 # anderen Modi sendet er Null.
@@ -176,7 +179,9 @@ class debug_view(Node):
         self.sub_lane_obstacles = self.create_subscription(
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         self.sub_click = self.create_subscription(
-            Point, CLICK_TOPIC, self.cb_click, 1)
+            Point, CLICK_TOPIC, lambda p: self.cb_click(p, 'view'), 1)
+        self.sub_click_raw = self.create_subscription(
+            Point, CLICK_TOPIC_RAW, lambda p: self.cb_click(p, 'rawview'), 1)
         # Schranke: Zahl der blauen Pixel im Suchbereich und ob die Schwelle erreicht ist.
         self.sub_barrier_pixels = self.create_subscription(
             Int32, '/detect/barrier_pixels', self.cb_barrier_pixels, 1)
@@ -263,8 +268,9 @@ class debug_view(Node):
         self.bev = bev_geometry.load_bev_spec(
             os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
         # Lage der Buttons im zuletzt gesendeten Bild (x0, y0, x1, y1).
-        self._tunnel_button = None
-        self._storage_button = None
+        # Lage der Buttons im zuletzt gesendeten Bild je Ansicht ('view', 'rawview'):
+        # {'tunnel': (x0, y0, x1, y1), 'storage': ...}; die Bilder sind verschieden breit.
+        self._buttons = {}
         self.battery_icons = self._load_battery_icons()
 
         self.get_logger().info('Started debug_view Node.')
@@ -338,6 +344,7 @@ class debug_view(Node):
                 (Time.from_msg(msg.header.stamp) - Time.from_msg(d.raw_image.header.stamp))
                 .nanoseconds / 1e6)
         out = self.bridge.cv2_to_imgmsg(self.compose(raw, 'rawview'), encoding='bgr8')
+        self.note_buttons('rawview', raw.shape[1])
         out.header = msg.header
         self.pub_debug_raw.publish(out)
 
@@ -364,19 +371,30 @@ class debug_view(Node):
             # Erst jetzt: ohne Storage gibt es storage_zone_node nicht (sonst Warnungen).
             self.zone_params = SharedParams(self, 'storage_zone_node', ['side_near_m'])
 
-    def cb_click(self, point):
+    def cb_click(self, point, view='view'):
         if self.control_mode is None:
             return
+        buttons = self._buttons.get(view, {})
         # Ausdruecklich Start oder Abbruch, kein Umschalten: ein doppelt gezaehlter
         # Klick darf den Ablauf nicht sofort wieder beenden.
-        if self._inside(self._tunnel_button, point):
+        if self._inside(buttons.get('tunnel'), point):
             req = Bool(data=self.control_mode not in TUNNEL_MODES)
             self.pub_tunnel_request.publish(req)
             self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
-        elif self._inside(self._storage_button, point):
+        elif self._inside(buttons.get('storage'), point):
             req = Bool(data=self.storage_state in STORAGE_IDLE)
             self.pub_storage_request.publish(req)
             self.get_logger().info('Storage-Button: ' + ('Start' if req.data else 'Abbruch'))
+
+    def note_buttons(self, view, camera_w):
+        """Buttons liegen im rechten Seitenpanel (compose): Kamerabild + erstes Panel davor."""
+        if self.control_mode is None:
+            return
+        off_x, off_y = camera_w + PANEL_W, HEAD_H
+        self._buttons[view] = {
+            name: (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1)
+            for name, (bx0, by0, bx1, by1) in (('tunnel', TUNNEL_BUTTON),
+                                               ('storage', STORAGE_BUTTON))}
 
     @staticmethod
     def _inside(button, point):
@@ -406,11 +424,7 @@ class debug_view(Node):
         if fresh and self.follow_lane_debug.raw_image.header.stamp.sec:
             self.note_view('view', self.follow_lane_debug.raw_image.header.stamp)
         final_debug_image = self.compose(camera, 'view')
-        if self.control_mode is not None:
-            off_x, off_y = camera.shape[1] + PANEL_W, HEAD_H
-            for name, (bx0, by0, bx1, by1) in (('_tunnel_button', TUNNEL_BUTTON),
-                                               ('_storage_button', STORAGE_BUTTON)):
-                setattr(self, name, (off_x + bx0, off_y + by0, off_x + bx1, off_y + by1))
+        self.note_buttons('view', camera.shape[1])
 
         msg = self.bridge.cv2_to_imgmsg(final_debug_image, encoding='bgr8')
         age = self.lane_debug_age()

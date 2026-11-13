@@ -24,7 +24,14 @@ def generate_launch_description():
 
     detect_params/control_params/switch_control_params sind nur in follow_lane.launch.py
     deklariert, damit beide Zweige mit denselben Dateien fahren.
+
+    storage:=true (launchers/komplett.sh): zusaetzlich die Storage-Detektoren (Zonen, Schild,
+    Palette) mit ihren Werten aus Storage.yaml -- alle Buttons (Tunnel, Storage) funktionieren.
+    Der Startmodus Stop aus Storage.yaml gilt hier NICHT (switch_control startet in Lane);
+    Storage startet per Button. Solange Storage laeuft, gibt es weder Obstacle noch Tunnel.
     """
+    storage = IfCondition(LaunchConfiguration('storage'))
+    storage_params = LaunchConfiguration('storage_node_params')
     return LaunchDescription([
         DeclareLaunchArgument('lane_costmap_params',
             default_value=os.path.join(PARAM_DIR, 'Lane_Costmap.yaml')),
@@ -32,6 +39,9 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'nav2_params.yaml')),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('image_view', default_value='true'),
+        DeclareLaunchArgument('storage', default_value='false'),
+        DeclareLaunchArgument('storage_node_params',
+            default_value=os.path.join(PARAM_DIR, 'Storage.yaml')),
 
         # Basis: ingress_node_nav2, detect_lane_nav2, control_driving, switch_control, debug_view
         # obstacle:=true -- hier laeuft Nav2, also darf switch_control auf Obstacle schalten.
@@ -53,6 +63,15 @@ def generate_launch_description():
         Node(
             package='Follow_Lane', executable='tunnel_explorer_node', name='tunnel_explorer_node',
         ),
+        # Storage-Detektoren nur mit storage:=true (komplett.sh). Nur ihre Bloecke aus
+        # Storage.yaml wirken; der switch_control-Block (initial_mode: Stop) gehoert zu storage.sh.
+        Node(package='Follow_Lane', executable='storage_zone_node', name='storage_zone_node',
+             parameters=[storage_params], condition=storage),
+        Node(package='Follow_Lane', executable='storage_sign_node', name='storage_sign_node',
+             parameters=[storage_params], condition=storage),
+        Node(package='Follow_Lane', executable='pallet_node', name='pallet_node',
+             parameters=[storage_params], condition=storage),
+
         # Draufsicht: Karte, Bot, Pfad, Statuszeile mit Abbruchgrund (/nav2/view)
         Node(package='Follow_Lane', executable='nav2_view', name='nav2_view'),
 

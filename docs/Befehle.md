@@ -57,6 +57,7 @@ Selten gebrauchte Werkzeuge liegen im Untermenü **„Debug / Werkzeuge ...“**
 | `follow_lane.sh` | komplette Spurverfolgung (mit Kreuzung und Schranke) + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
 | `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel, MPPI), RViz und Draufsicht `/nav2/view` – Normalbetrieb |
 | `storage.sh` | Storage-Aufgabe (Palette): Spurverfolgung + Storage-Detektoren, ohne Nav2. Bot steht, bis im Debugbild **STORAGE STARTEN** geklickt wird |
+| `komplett.sh` | **alles in einem**: wie `nav2_obstacle.sh`, dazu die Storage-Detektoren – **TUNNEL STARTEN** und **STORAGE STARTEN** funktionieren beide. Start in Lane (nicht Stop wie `storage.sh`). Log: `logs/pipeline/komplett-<Zeit>.log` |
 | `rqt_debug.sh` | Bildanzeige (`/lokal/raw_image`, `/lokal/bev`, Debug-Bilder) |
 | `rqt_params.sh` | Parameter von `detect_lane` / `control_driving` live einstellen |
 | `rviz_3d.sh` | rviz: Roboter, TF, LiDAR, beide Costmaps, Pfade |
