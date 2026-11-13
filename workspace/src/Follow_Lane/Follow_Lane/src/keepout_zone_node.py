@@ -51,7 +51,8 @@ class keepout_zone_node(Node):
     (Start im Tunnel) gibt es keine Wand.
 
     Gesendet wird sie erst, wenn der Bot WALL_DELAY_M hinter der Tuer ist. Sonst stuende er
-    in ihr und MPPI saehe jede Bewegung als Kollision.
+    in ihr und Regler und Waechter saehen jede Bewegung als Kollision. Beim Verlassen des Tunnels
+    geht eine leere Wolke hinaus, sonst traegt die entrance_layer die Sperre weiter ein.
     """
 
     def __init__(self):
@@ -89,6 +90,8 @@ class keepout_zone_node(Node):
         if new_mode is None:
             return
         if (self.control_mode == ControlType.Tunnel) != (new_mode == ControlType.Tunnel):
+            if self._wall_active:
+                self._publish_empty()
             self._door = None
             self._wall_active = False
         if new_mode == ControlType.Tunnel and self.control_mode == ControlType.TunnelEntry:
@@ -107,10 +110,7 @@ class keepout_zone_node(Node):
             return
         # Leere Wolke zuerst: entrance_layer behaelt sonst die alte Wand im Puffer und traegt sie
         # nach dem Leeren der Costmaps (lane_costmap_node, 0,3 s spaeter) wieder ein.
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = ODOM_FRAME
-        self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, []))
+        self._publish_empty()
         self._wall_active = False
         self._door = self._door_at_robot('Taste L')
 
@@ -155,10 +155,7 @@ class keepout_zone_node(Node):
         if self._start_wall is None:
             return
         self._start_wall = None
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = ODOM_FRAME
-        self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, []))
+        self._publish_empty()
         self.clear_timer.reset()
         self.get_logger().info('Obstacle beendet -- Startsperre entfernt.')
 
@@ -183,6 +180,12 @@ class keepout_zone_node(Node):
         self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, self._wall_points()))
 
     # --- Hilfsmethoden ---
+
+    def _publish_empty(self):
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = ODOM_FRAME
+        self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, []))
 
     def _robot_pose(self):
         """(x, y, yaw) in odom oder None."""

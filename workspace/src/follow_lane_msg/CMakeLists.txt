@@ -15,6 +15,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PalletDetection.msg"
   "msg/StorageSign.msg"
   "msg/StorageZones.msg"
+  "msg/ManeuverRequest.msg"
+  "msg/ManeuverStatus.msg"
   DEPENDENCIES sensor_msgs std_msgs geometry_msgs nav_msgs
 )
 

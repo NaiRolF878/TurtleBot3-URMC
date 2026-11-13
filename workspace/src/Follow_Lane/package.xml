@@ -23,6 +23,7 @@
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>action_msgs</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
   <!-- Python-Modul tf2_ros -->
   <exec_depend>tf2_ros_py</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
@@ -41,7 +42,7 @@
   <exec_depend>nav2_planner</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_costmap_2d</exec_depend>
-  <exec_depend>nav2_mppi_controller</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
   <exec_depend>nav2_navfn_planner</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>rqt_image_view</exec_depend>

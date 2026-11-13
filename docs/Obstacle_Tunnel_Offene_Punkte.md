@@ -33,20 +33,20 @@ In `switch_control`, Werte aus `Parameter/Switch_Control.yaml` (live in rqt änd
 | `OBSTACLE_CLEAR_DEBOUNCE_S` | 1,0 s | so lange frei, bevor zurück zu Lane |
 
 Im Obstacle-Modus plant `planner_server` (NavFn) bei Bedarf einen Weg um die Hindernisse zu einem Punkt
-1 m voraus auf der Spurmitte; MPPI fährt ihn ab.
+1 m voraus auf der Spurmitte; RPP fährt ihn ab (seit 12.11. statt MPPI).
 
 Beim Wechsel Lane → Obstacle sendet `control_driving` sofort Null; der Bot steht, bis Nav2 den ersten
 Befehl schickt.
 
-Abstand beim Umfahren selbst: `inflation_radius` der Costmaps (lokal 0,20 m, global 0,3 m,
-`cost_scaling_factor` 3,0).
+Abstand beim Umfahren selbst: `inflation_radius` der global_costmap (0,25 m, `cost_scaling_factor`
+10,0); aktuelle Werte in `docs/Nav2_Costmap_Werte.md`, Abschnitt 3.
 
 ### 3. Fahrgeschwindigkeit über dem Limit des Burger – **beobachtet** (Lane-Modus)
 
 Aufzeichnung `logs/bags/bag-20261022-132414`: `control_driving` verlangte bis 0,40 m/s am äußeren Rad,
 der Burger schafft 0,22 m/s. Das schnellere Rad blieb stehen, der Bot drehte entgegen dem Lenkbefehl.
 `MAX_VEL` wurde auf 0,15 gesetzt.
-Nav2 selbst ist auf `vx_max: 0.22` begrenzt (betrifft nur Obstacle/Tunnel).
+Nav2 (RPP) fährt höchstens `desired_linear_vel` 0,12 m/s (betrifft nur Obstacle/Tunnel).
 `control_driving` hält das äußere Rad unter 0,22 m/s (`MAX_WHEEL_VEL`): im Lane-Modus durch kleineres v
 (Lenkung hat Vorrang), bei Nav2 durch gemeinsames Skalieren von v und ω (Bahn bleibt gleich).
 
@@ -62,8 +62,8 @@ Zurück: Wert in `nav2_params.yaml` auf 0,05.
 
 ### 5. Starten
 
-- Von Hand: im `rqt_image_view` mit `/lokal/debug_view` „Publish click location“ anhaken, Knopf
-  **TUNNEL STARTEN** im Bild klicken.
+- Von Hand: im `rqt_image_view` mit `/lokal/debug_view` oder `/nav2/view` „Publish click location“
+  anhaken, Knopf **TUNNEL STARTEN** im Bild klicken.
 - Per Befehl: `ros2 topic pub --once /control/tunnel_request std_msgs/msg/Bool "{data: true}"`
 - Automatisch: Schild-Wert 6 auf `/detect/sign`.
 - Kontrolle: `ros2 topic echo /control/mode` → 7 (Einfahrt), dann 6. Not-Aus muss auf FAHREN stehen.

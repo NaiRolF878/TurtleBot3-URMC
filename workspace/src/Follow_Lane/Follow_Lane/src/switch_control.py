@@ -1,13 +1,14 @@
 """Zustandsmaschine fuer den Fahrmodus, einziger Publisher von /control/mode.
 
-Ein:  /scan, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign, /control/tunnel_request,
-      /detect/lines_lost, /tunnel/outside, /detect/barrier, /intersection/active,
-      dazu die Eingaenge der Storage-Aufgabe (storage_sequence.py)
+Ein:  /scan_corrected, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign,
+      /control/tunnel_request, /detect/lines_lost, /tunnel/outside, /detect/barrier,
+      /intersection/active, dazu die Eingaenge der Storage-Aufgabe (storage_sequence.py)
 Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
       /control/obstacle_enabled (Bool, fuers Debugbild), /control/align_yaw (Float64, Align),
       dazu die Ausgaenge der Storage-Aufgabe (Zustand, Grundbewegungen, Magnet)
-Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier. Die Durchfahrt einer
-Engstelle im Tunnel (Grundbewegungen) steuert TunnelPassage (tunnel_passage.py).
+Schwellwerte und Entprellung fuer jeden Moduswechsel liegen nur hier. Ablaeufe aus
+Grundbewegungen in Obstacle und Tunnel (Engstelle, Freifahren, Weg genau abfahren) steuert
+ManeuverSequence (maneuver_sequence.py), die der Storage-Aufgabe StorageSequence.
 """
 import math
 import time
@@ -26,8 +27,8 @@ from tf2_ros import ConnectivityException, ExtrapolationException, LookupExcepti
 from Follow_Lane.src.common import (
     ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, require_params,
     run_node, scan_points, transform_points)
+from Follow_Lane.src.maneuver_sequence import SEQUENCE_MODES, ManeuverSequence
 from Follow_Lane.src.storage_sequence import StorageSequence
-from Follow_Lane.src.tunnel_passage import TunnelPassage
 
 # Zyklisch senden, damit auch spaeter startende Nodes den Modus bekommen.
 # control_driving haelt an, wenn er laenger als MODE_TIMEOUT nichts hoert.
@@ -101,8 +102,9 @@ class switch_control(Node):
     pfosten oder Stuetzen loesten ihn sonst aus) und keinen Tunnel. Nach Abbruch gilt
     initial_mode: Lane fuer die Strecke, Stop fuer den Start mit storage.launch.py.
 
-    Im Tunnel faehrt TunnelPassage auf Anfrage von tunnel_explorer_node eine Engstelle mit
-    Grundbewegungen; der Modus bleibt Tunnel, damit die Kamera aus bleibt.
+    In Obstacle und Tunnel faehrt ManeuverSequence auf Anfrage (tunnel_explorer_node bzw.
+    nav2_goal_publisher) Grundbewegungen: Engstelle ausgerichtet durchfahren, freifahren. Der
+    Modus bleibt dabei, im Tunnel also die Kamera aus.
 
     Lane -> Stop, wenn detect_lane BARRIER_CONFIRM Mal in Folge eine Schranke meldet
     (/detect/barrier); Stop -> Lane, wenn sie BARRIER_CLEAR_DEBOUNCE_S lang weg ist
@@ -134,7 +136,7 @@ class switch_control(Node):
 
         # --- Subscriber ---
         self.sub_scan = self.create_subscription(
-            LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
+            LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
         self.sub_lane_obstacles = self.create_subscription(
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         # Noch ohne Publisher: der Schild-Detektor ist nicht gebaut.
@@ -177,7 +179,7 @@ class switch_control(Node):
         self._scanner_poses = {}          # (Ziel-Frame, Scanner-Frame) -> (x, y, yaw)
         # Brauchen tf_buffer, daher zuletzt.
         self.storage = StorageSequence(self)
-        self.passage = TunnelPassage(self)
+        self.maneuvers = ManeuverSequence(self)
         self._barrier_hits = 0            # Schranken-Meldungen in Folge
         self._barrier_clear_since = None  # seit wann keine Schranke mehr (Stop)
 
@@ -225,8 +227,8 @@ class switch_control(Node):
 
     def cb_tunnel_outside(self, msg):
         if msg.data and self.control_mode == ControlType.Tunnel:
-            self.get_logger().info('Bot ist ausserhalb der Wand-Huelle.')
-            self._leave_tunnel()
+            self.get_logger().info('Bot ist aus dem Tunnelkasten hinausgefahren.')
+            self._leave_tunnel(ControlType.Lane)
 
     def cb_barrier(self, msg):
         # Storage steuert die Modi selbst (auch Stop beim Lesen/Greifen/Ablegen, Lane beim
@@ -284,8 +286,8 @@ class switch_control(Node):
         if new_mode == self.control_mode:
             return
         self.get_logger().info(f'{reason} -> {self.control_mode.name} => {new_mode.name}.')
-        if self.control_mode == ControlType.Tunnel:
-            self.passage.cancel()
+        if self.control_mode in SEQUENCE_MODES and new_mode not in SEQUENCE_MODES:
+            self.maneuvers.cancel()
         self.control_mode = new_mode
         # Entprell-Zeitstempel gelten nur fuer den Modus, in dem sie gesetzt wurden.
         self._obstacle_clear_since = None
@@ -340,8 +342,12 @@ class switch_control(Node):
             self._set_mode(ControlType.Tunnel,
                            f'Spurlinien enden (seit {LINES_NO_IMAGE_S:.1f} s kein Bild)')
 
-    def _leave_tunnel(self):
-        restored = self._mode_before_tunnel or ControlType.Lane
+    def _leave_tunnel(self, mode=None):
+        """Abbruch von Hand: zurueck in den Modus von vor dem Tunnel. Hinausgefahren (mode=Lane):
+        immer Follow Lane, auch wenn der Tunnel aus Obstacle heraus ausgeloest wurde -- Obstacle
+        faehrt ohne Spurmitte nur geradeaus; ein Hindernis in der Fahrbahn schaltet aus Lane
+        ohnehin wieder auf Obstacle."""
+        restored = mode or self._mode_before_tunnel or ControlType.Lane
         self._mode_before_tunnel = None
         self._tunnel_source = ''
         self._set_mode(restored, 'Tunnel verlassen')

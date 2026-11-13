@@ -62,6 +62,11 @@ def launch_setup(context, *args, **kwargs):
         # odom -> base_footprint ohne Radwert-Ausreisser; der Bot sendet die TF dafuer
         # nicht selbst (bot-up.sh, BOT_ODOM_TF=false).
         Node(package='Follow_Lane', executable='odom_filter', name='odom_filter'),
+        # /scan -> /scan_corrected (Entfernungsfehler, Bewegung im Umlauf); alle lesen diesen.
+        Node(
+            package='Follow_Lane', executable='scan_correct', name='scan_correct',
+            parameters=[LaunchConfiguration('scan_correct_params').perform(context)],
+        ),
         Node(package='Follow_Lane', executable='ingress_node_nav2', name='ingress_node'),
         Node(
             package='Follow_Lane', executable='detect_lane_nav2', name='detect_lane',
@@ -96,6 +101,8 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'Switch_Control.yaml')),
         DeclareLaunchArgument('intersection_params',
             default_value=os.path.join(PARAM_DIR, 'Intersection.yaml')),
+        DeclareLaunchArgument('scan_correct_params',
+            default_value=os.path.join(PARAM_DIR, 'Scan_Correct.yaml')),
         DeclareLaunchArgument('obstacle', default_value='false'),
         DeclareLaunchArgument('storage_params', default_value=''),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.

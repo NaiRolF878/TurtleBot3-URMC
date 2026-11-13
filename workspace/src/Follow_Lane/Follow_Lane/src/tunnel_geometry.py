@@ -7,14 +7,9 @@ import math
 import cv2
 import numpy as np
 
-from Follow_Lane.src.common import BOT_WIDTH, COSTMAP_BLOCKED  # noqa: F401 (BOT_WIDTH auch von hier importiert)
+from Follow_Lane.src.common import COSTMAP_BLOCKED
+from Follow_Lane.src.robot_geometry import BOT_LENGTH, BOT_WIDTH, FOOTPRINT, LETHAL_COST, transform
 
-# Umriss wie local_costmap.footprint in nav2_params.yaml (base_footprint).
-FOOTPRINT = np.array([[0.037, -0.069], [0.037, 0.069], [0.033, 0.089], [-0.033, 0.089],
-                      [-0.079, 0.069], [-0.092, 0.05], [-0.101, 0.028], [-0.101, -0.028],
-                      [-0.092, -0.05], [-0.079, -0.069], [-0.033, -0.089], [0.033, -0.089]])
-BOT_LENGTH = 0.138
-LETHAL_COST = 100
 # Schmaler als das (m) zaehlt eine freie Flaeche nicht als befahrbar: einzelne Strahlen ins
 # Unbekannte. Die Waende sind schon um robot_radius aufgeblasen, die Bot-Mitte darf schmal fahren.
 MIN_PASSAGE_M = 0.02
@@ -23,34 +18,39 @@ MAX_START_GAP_M = 0.15
 # Wandzellen mit einer Luecke bis hierhin (m je Seite) gehoeren zusammen: ab ~1,6 m liegen die
 # Strahlen (0,9 Grad) weiter als 2,5 cm auseinander.
 WALL_GAP_M = 0.025
-# So weit (m) hinter die Tuerlinie faehrt die Einfahrt: Heck 0.101 + footprint_padding 0.01 +
-# xy_goal_tolerance 0.15, damit der ganze Bot auch bei fruehem "erreicht" drin ist.
+# So weit (m) hinter die Tuerlinie faehrt die Einfahrt: Heck 0.101 + xy_goal_tolerance 0.15,
+# damit der ganze Bot auch bei fruehem "erreicht" drin ist, plus 1 cm.
 DOOR_DEPTH_M = 0.261
 # So weit (m) muss ein Strahl hinter der Huelle enden, damit er als "durch die Huelle" zaehlt.
 HULL_MARGIN_M = 0.05
-# Gibt der Regler auf einem Pfad auf, zaehlt dessen engste Stelle bis BLOCK_LOOKAHEAD_M voraus:
-# schmaler als PASSAGE_WIDTH_M kommt MPPI nicht sicher hindurch (Drehen auf der Stelle braucht
-# 0,238 m), dann faehrt switch_control sie mit Grundbewegungen; schmaler als BLOCK_WIDTH_M
-# (Bot 0,178 m) wird sie gesperrt.
-BLOCK_WIDTH_M = 0.21
-PASSAGE_WIDTH_M = 0.26
-# Gerade fuer die Durchfahrt (passage_line): um die Achse aus den Kanten bis so weit gedreht
-# (Grad) und quer verschoben (m), Footprint so weit (m) vor und hinter die Mitte geschoben.
-PASSAGE_ANGLE_DEG = 30
-PASSAGE_SHIFT_M = 0.03
-PASSAGE_SHIFT_STEP_M = 0.005
-PASSAGE_SWEEP_M = 0.12
-# Drehen auf der Stelle: Umkreis des Footprints 0,105 m plus 5 mm bis zur Wandzelle.
-ROTATE_CLEAR_M = 0.11
-# Engstelle entlang der Geraden: wo auf beiden Seiten Wandzellen bis so weit (m) neben dem Bot
-# liegen, gesucht bis PASSAGE_REACH_M vor und hinter der Mitte.
-FLANK_M = 0.04
-PASSAGE_REACH_M = 0.30
-# Tunnelwand hoechstens so dick (m, Angabe Team); ihre Rueckseite sieht der LiDAR von vorn nicht.
-# Das Ende liegt so weit dahinter, dass das Heck PASSAGE_EXIT_M Abstand hat.
-WALL_M = 0.02
-PASSAGE_EXIT_M = 0.03
-BLOCK_LOOKAHEAD_M = 0.6
+# Zielwahl (wie HKA): ein Ausgang liegt in einer Wand. Unbekanntes bis WALL_BAND_M innerhalb der
+# Huelle kann ihn verdecken, tiefer drin ist es Schatten hinter Hindernissen. Gezaehlt wird es bis
+# GAIN_RADIUS_M um ein Ziel; 1 m^2 davon ist GAIN_WEIGHT m Umweg wert.
+WALL_BAND_M = 0.3
+GAIN_RADIUS_M = 0.4
+GAIN_WEIGHT = 4.0
+# Ein Ausgang liegt zwischen zwei geraden Wandstuecken (auch in einer Ecke, dann stehen sie quer
+# zueinander); Hindernisse sind klein und meist rund. Je Seite zaehlen die Scanpunkte bis
+# WALL_SIDE_M ab der Kante, Nachbarpunkte hoechstens WALL_STEP_M auseinander (sonst anderes
+# Objekt). Gerade: mindestens WALL_MIN_LEN_M lang, Abweichung (RMS) von der Geraden hoechstens
+# WALL_MAX_RMS_M -- eine Flasche (7 cm) ist zu kurz, ein grosser Zylinder zu krumm.
+WALL_SIDE_M = 0.15
+WALL_STEP_M = 0.08
+WALL_MIN_LEN_M = 0.10
+WALL_MAX_RMS_M = 0.012
+# Der Kasten ist ein Rechteck aus vier geraden Waenden (box_rectangle). Wandlinie: Wandzellen in
+# einem Streifen von BOX_BIN_M, die mindestens BOX_WALL_RUN_M lang zusammenhaengen (Luecken bis
+# BOX_RUN_GAP_M) -- runde Hindernisse sind kuerzer. Jede Seite mindestens BOX_MIN_SIDE_M.
+BOX_BIN_M = 0.04
+BOX_WALL_RUN_M = 0.45
+BOX_RUN_GAP_M = 0.04
+BOX_MIN_SIDE_M = 0.40
+# Auf dem Rechteckrand gilt eine Stelle als Wand, wenn eine Wandzelle naeher als das (m) liegt.
+BOX_WALL_TOL_M = 0.025
+# Abtastschritt (m) auf dem Rechteckrand.
+BOX_STEP_M = 0.01
+# So weit (m) hinter einem Ausgang muss der Scan frei nach draussen gesehen haben.
+BOX_SEE_THROUGH_M = 0.12
 
 
 def scan_rays(angles, ranges):
@@ -129,14 +129,6 @@ def _contains_narrower(opening, openings, origin):
     return False
 
 
-def transform(pose, xy):
-    """Punkte (N, 2) aus dem Frame von pose = (x, y, yaw) in dessen Eltern-Frame."""
-    c, s = math.cos(pose[2]), math.sin(pose[2])
-    xy = np.asarray(xy, dtype=np.float64)
-    return np.column_stack([pose[0] + c * xy[:, 0] - s * xy[:, 1],
-                            pose[1] + s * xy[:, 0] + c * xy[:, 1]])
-
-
 def convex_hull(points):
     """Konvexe Huelle (K, 1, 2) float32, None bei weniger als 3 Punkten ohne Flaeche."""
     if len(points) < 3:
@@ -163,8 +155,10 @@ def hull_openings(hull, origin, angles, ranges):
     """Strahlen, die aus der Huelle hinausreichen, als Luecken in der Huelle.
 
     origin liegt in der Huelle, angles sind Weltwinkel. Ergebnis, breiteste zuerst:
-    [(mitte auf der Huelle, breite, richtung nach aussen)]. Graue Bereiche innerhalb der Huelle
-    sind Schatten hinter Hindernissen und tauchen hier nicht auf.
+    [(mitte auf der Huelle, breite, richtung nach aussen, wandende a, wandende b)]. Graue
+    Bereiche innerhalb der Huelle sind Schatten hinter Hindernissen und tauchen hier nicht auf.
+    Nur Luecken zwischen zwei geraden Wandstuecken zaehlen (straight_wall_sides); a und b sind
+    die Scanpunkte an deren Kanten, a-b ist die Tuerlinie des Ausgangs.
     """
     angles, ranges = scan_rays(angles, ranges)
     origin = np.asarray(origin, dtype=np.float64)
@@ -199,15 +193,221 @@ def hull_openings(hull, origin, angles, ranges):
     if current:
         groups.append(current)
 
+    finite = np.isfinite(ranges)
+    points = origin + dirs * np.where(finite, ranges, 0.0)[:, None]
     openings = []
     for group in groups:
+        side_a = _wall_side(points, finite, leaves, group[0], -1)
+        side_b = _wall_side(points, finite, leaves, group[-1], +1)
+        if not (straight_wall(side_a) and straight_wall(side_b)) \
+                or np.hypot(*(side_b[0] - side_a[0])) < BOT_WIDTH:
+            continue
         a, b = crossings[group[0]], crossings[group[-1]]
         width = float(np.hypot(*(b - a)))
         center = (a + b) / 2.0
         direction = center - origin
-        openings.append((center, width, direction / max(np.hypot(*direction), 1e-9)))
+        openings.append((center, width, direction / max(np.hypot(*direction), 1e-9),
+                         side_a[0], side_b[0]))
     openings.sort(key=lambda o: -o[1])
     return openings
+
+
+def _wall_side(points, finite, leaves, edge, step):
+    """Scanpunkte neben einer Luecke, ab dem Strahl hinter edge in Richtung step: solange sie
+    zusammenhaengen und hoechstens WALL_SIDE_M von der Kante entfernt liegen."""
+    n = len(points)
+    side = []
+    i = edge
+    for _ in range(n - 1):
+        i = (i + step) % n
+        if not finite[i] or leaves[i]:
+            break
+        p = points[i]
+        if side and (np.hypot(*(p - side[-1])) > WALL_STEP_M
+                     or np.hypot(*(p - side[0])) > WALL_SIDE_M):
+            break
+        side.append(p)
+    return np.array(side).reshape(-1, 2)
+
+
+def straight_wall(points):
+    """Liegen die Punkte auf einem geraden Stueck von mindestens WALL_MIN_LEN_M?"""
+    if len(points) < 3:
+        return False
+    centered = points - points.mean(axis=0)
+    _, _, axes = np.linalg.svd(centered, full_matrices=False)
+    along, across = centered @ axes[0], centered @ axes[1]
+    return np.ptp(along) >= WALL_MIN_LEN_M and math.sqrt(np.mean(across ** 2)) <= WALL_MAX_RMS_M
+
+
+def exit_line(a, b, inside):
+    """Tuerlinie a-b eines Ausgangs: (mitte, halbe breite, richtung entlang, normale nach
+    aussen), die Normale zeigt von inside weg."""
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    width = max(float(np.hypot(*(b - a))), 1e-9)
+    along = (b - a) / width
+    normal = np.array([-along[1], along[0]])
+    center = (a + b) / 2.0
+    if normal @ (center - np.asarray(inside, dtype=np.float64)) < 0:
+        normal = -normal
+    return center, width / 2.0, along, normal
+
+
+def _rotate(points, angle):
+    c, s = math.cos(angle), math.sin(angle)
+    return np.asarray(points, dtype=np.float64) @ np.array([[c, -s], [s, c]])
+
+
+def box_orientation(points):
+    """Winkel (rad, 0..90 Grad) der Rechteckachsen: dort haeufen sich die Wandzellen in den
+    Projektionen auf beide Achsen am staerksten (schmale, hohe Spitzen)."""
+    def score(angle):
+        uv = _rotate(points, angle)
+        total = 0.0
+        for k in (0, 1):
+            h = np.bincount(np.floor((uv[:, k] - uv[:, k].min()) / 0.01).astype(np.int64))
+            total += float(np.sum(h.astype(np.float64) ** 2))
+        return total
+    coarse = max(np.radians(np.arange(0.0, 90.0, 1.0)), key=score)
+    fine = coarse + np.radians(np.arange(-1.0, 1.01, 0.1))
+    return float(max(fine, key=score)) % (math.pi / 2)
+
+
+def _longest_run(values, gap):
+    if values.size == 0:
+        return 0.0
+    v = np.sort(values)
+    breaks = np.nonzero(np.diff(v) > gap)[0]
+    starts = np.concatenate([[0], breaks + 1])
+    ends = np.concatenate([breaks, [v.size - 1]])
+    return float((v[ends] - v[starts]).max())
+
+
+def _wall_lines(along_axis, across_axis):
+    """Lagen (Koordinate auf along_axis) gerader Wandlinien quer zu dieser Achse."""
+    lines = []
+    lo, hi = along_axis.min(), along_axis.max()
+    step = BOX_BIN_M / 2.0
+    for start in np.arange(lo, hi + step, step):
+        sel = (along_axis >= start) & (along_axis < start + BOX_BIN_M)
+        if np.count_nonzero(sel) * 0.01 < BOX_WALL_RUN_M:
+            continue
+        if _longest_run(across_axis[sel], BOX_RUN_GAP_M) >= BOX_WALL_RUN_M:
+            lines.append(float(np.median(along_axis[sel])))
+    return lines
+
+
+def box_rectangle(walls_xy, inside_xy):
+    """Rechteck des Kastens um inside_xy (ein Punkt sicher im Kasten): je Richtung die naechste
+    gerade Wandlinie. Laeuft eine Kastenwand als Streckenbegrenzung weiter, ist das dieselbe
+    Linie -- das Rechteck endet trotzdem an der Querwand. Ergebnis (4, 1, 2) float32 wie eine
+    Kontur (fuer pointPolygonTest), None solange eine Seite fehlt."""
+    walls_xy = np.asarray(walls_xy, dtype=np.float64).reshape(-1, 2)
+    if len(walls_xy) < 4 * BOX_WALL_RUN_M / 0.01:
+        return None
+    inside_xy = np.asarray(inside_xy, dtype=np.float64)
+    angle = box_orientation(walls_xy - inside_xy)
+    uv = _rotate(walls_xy - inside_xy, angle)
+    u_lines = _wall_lines(uv[:, 0], uv[:, 1])
+    v_lines = _wall_lines(uv[:, 1], uv[:, 0])
+    sides = []
+    for lines, sign in ((u_lines, 1), (u_lines, -1), (v_lines, 1), (v_lines, -1)):
+        beyond = [c for c in lines if c * sign > 0.0]
+        if not beyond:
+            return None
+        sides.append(min(beyond, key=abs))
+    u1, u0, v1, v0 = sides
+    if u1 - u0 < BOX_MIN_SIDE_M or v1 - v0 < BOX_MIN_SIDE_M:
+        return None
+    corners = np.array([[u0, v0], [u1, v0], [u1, v1], [u0, v1]])
+    xy = _rotate(corners, -angle) + inside_xy
+    return xy.astype(np.float32).reshape(-1, 1, 2)
+
+
+def box_exit(rect, walls_xy, known, exclude_xy, exclude_r):
+    """Der Ausgang des Kastens: das breiteste Stueck Rechteckrand ohne Wand, mindestens
+    BOT_WIDTH breit, auf beiden Seiten von Wand begrenzt (nicht von Unbekanntem) und nicht am
+    Eingang (naeher als exclude_r an exclude_xy). known(points) -> bool-Maske: Zelle gescannt.
+    Ergebnis (a, b) in odom oder None."""
+    corners = rect.reshape(-1, 2).astype(np.float64)
+    samples = []
+    for p, q in zip(corners, np.roll(corners, -1, axis=0)):
+        n = max(1, int(math.ceil(np.hypot(*(q - p)) / BOX_STEP_M)))
+        samples.append(p + (q - p) * (np.arange(n)[:, None] / n))
+    samples = np.vstack(samples)
+    walls_xy = np.asarray(walls_xy, dtype=np.float64).reshape(-1, 2)
+
+    # Wand: Wandzelle naeher als BOX_WALL_TOL_M -- Abstandsbild um das Rechteck (1 cm).
+    cell = 0.01
+    margin = BOX_SEE_THROUGH_M + 2 * BOX_WALL_TOL_M
+    lo = samples.min(axis=0) - margin
+    shape = (np.ceil((samples.max(axis=0) + margin - lo) / cell).astype(np.int64) + 1)[::-1]
+    free = np.ones(shape, np.uint8)
+    wc = np.floor((walls_xy - lo) / cell).astype(np.int64)
+    ok = (wc >= 0).all(axis=1) & (wc[:, 0] < shape[1]) & (wc[:, 1] < shape[0])
+    free[wc[ok, 1], wc[ok, 0]] = 0
+    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5) * cell
+    sc = np.floor((samples - lo) / cell).astype(np.int64)
+    wall = dist[sc[:, 1], sc[:, 0]] < BOX_WALL_TOL_M
+    state = np.where(wall, 1, np.where(known(samples), 0, 2))   # 0 offen, 1 Wand, 2 unbekannt
+    if not (state == 1).any():
+        return None
+
+    n = len(samples)
+    start = int(np.argmax(state == 1))
+    best = None
+    k = 0
+    while k < n:
+        i = (start + k) % n
+        if state[i] != 0:
+            k += 1
+            continue
+        run = []
+        while k < n and state[(start + k) % n] == 0:
+            run.append((start + k) % n)
+            k += 1
+        before, after = state[(run[0] - 1) % n], state[(run[-1] + 1) % n]
+        if before != 1 or after != 1:
+            continue
+        a, b = samples[run[0]], samples[run[-1]]
+        width = float(np.hypot(*(b - a)))
+        if width < BOT_WIDTH - 2 * BOX_WALL_TOL_M:
+            continue
+        if exclude_xy is not None and \
+                np.min(np.hypot(*(samples[run] - np.asarray(exclude_xy)).T)) < exclude_r:
+            continue
+        if not _sees_through(samples[run], corners.mean(axis=0), known, dist, lo, cell):
+            continue
+        if best is None or width > best[2]:
+            best = (a, b, width)
+    return None if best is None else (best[0], best[1])
+
+
+def _sees_through(gap, box_center, known, dist, lo, cell):
+    """Hat der LiDAR durch die Luecke nach draussen gesehen? Hinter der mittleren Haelfte
+    (bis BOX_SEE_THROUGH_M) muss die Flaeche gescannt und wandfrei sein. Ein Loch in einer
+    schraeg gesehenen Wand (Scanpunkte zu weit auseinander) hat dahinter nichts Gescanntes."""
+    a, b = gap[0], gap[-1]
+    along = (b - a) / max(np.hypot(*(b - a)), 1e-9)
+    normal = np.array([-along[1], along[0]])
+    if normal @ ((a + b) / 2.0 - box_center) < 0:
+        normal = -normal
+    k = len(gap)
+    middle = gap[k // 4: k - k // 4]
+    probes = np.vstack([middle + normal * d for d in np.arange(BOX_WALL_TOL_M, BOX_SEE_THROUGH_M + 1e-9, 0.02)])
+    pc = np.floor((probes - lo) / cell).astype(np.int64)
+    clear = known(probes) & (dist[pc[:, 1], pc[:, 0]] >= BOX_WALL_TOL_M)
+    return np.mean(clear) >= 0.8
+
+
+def bot_past_exit(line, pose, margin):
+    """Steht der ganze Bot-Umriss mindestens margin hinter der Tuerlinie und nicht weiter als
+    eine Bot-Laenge seitlich neben dem Ausgang?"""
+    center, half_width, along, normal = line
+    rel = transform(pose, FOOTPRINT) - center
+    if np.abs(rel @ along).min() > half_width + BOT_LENGTH:
+        return False
+    return bool((rel @ normal).min() >= margin)
 
 
 def reachable_free(grid, info_res, origin_xy, robot_xy):
@@ -306,134 +506,22 @@ def side_wall_seeds(grid, info_res, origin_xy, pose):
     return np.array(seeds, dtype=np.int64)
 
 
-def narrowest_ahead(path_xy, grid, info_res, origin_xy, robot_xy):
-    """Engste Stelle auf dem Pfad ab dem Bot bis BLOCK_LOOKAHEAD_M: (Punkt, Pfadrichtung,
-    Breite) oder None. Breite quer zum Pfad: bis zur Wand links plus bis zur Wand rechts;
-    fehlt eine Seite innerhalb PASSAGE_WIDTH_M, ist dort keine Engstelle."""
-    lethal = grid == LETHAL_COST
-    if not lethal.any() or len(path_xy) < 3:
-        return None
-    start = int(np.argmin(np.hypot(*(path_xy - np.asarray(robot_xy)).T)))
-    seg = np.hypot(*np.diff(path_xy[start:], axis=0).T)
-    end = min(len(path_xy), start + int(np.searchsorted(np.cumsum(seg), BLOCK_LOOKAHEAD_M)) + 2)
-    tangent = np.gradient(path_xy, axis=0)[start:end]
-    tangent /= np.maximum(np.hypot(tangent[:, 0], tangent[:, 1]), 1e-9)[:, None]
-    ahead = path_xy[start:end]
-    if len(ahead) < 2:
-        return None
-    normal = np.column_stack([-tangent[:, 1], tangent[:, 0]])
-    steps = np.arange(1, int(PASSAGE_WIDTH_M / info_res) + 1) * info_res
-    h, w = grid.shape
-
-    def wall_distance(side):
-        pts = ahead[:, None, :] + side * normal[:, None, :] * steps[None, :, None]
-        cells = np.floor((pts - np.asarray(origin_xy)) / info_res).astype(np.int64)
-        ok = (cells[..., 0] >= 0) & (cells[..., 0] < w) & (cells[..., 1] >= 0) & (cells[..., 1] < h)
-        hit = np.zeros(ok.shape, dtype=bool)
-        hit[ok] = lethal[cells[ok][:, 1], cells[ok][:, 0]]
-        return np.where(hit.any(axis=1), steps[np.argmax(hit, axis=1)], np.inf)
-
-    width = wall_distance(1.0) + wall_distance(-1.0)
-    i = int(np.argmin(width))
-    if not np.isfinite(width[i]):
-        return None
-    return ahead[i], tangent[i], float(width[i])
+def wall_band_unknown(grid, hull, info_res, origin_xy):
+    """Maske der unbekannten Zellen in der Huelle bis WALL_BAND_M von ihrem Rand."""
+    inside = hull_mask(hull, grid.shape, info_res, origin_xy).astype(np.uint8)
+    depth = cv2.distanceTransform(inside, cv2.DIST_L2, 5) * info_res
+    return (grid == -1) & (inside > 0) & (depth <= WALL_BAND_M)
 
 
-def gap_edges(grid, info_res, origin_xy, point, direction):
-    """Lage einer Engstelle aus ihren Kanten: je Seite des Pfads die Wandzelle naechst point
-    (bis PASSAGE_WIDTH_M). (Mitte, Achse in Pfadrichtung, Breite) oder None. Die Achse steht
-    senkrecht auf der Verbindung der Kanten, auch wenn der Pfad schraeg hindurchfuehrt. Breite
-    von Zellmitte zu Zellmitte: die Wandflaeche liegt im Mittel dort."""
-    rows, cols = np.nonzero(grid == LETHAL_COST)
-    cells = np.asarray(origin_xy) + (np.column_stack([cols, rows]) + 0.5) * info_res
-    rel = cells - np.asarray(point)
-    dist = np.hypot(rel[:, 0], rel[:, 1])
-    left_of_path = direction[0] * rel[:, 1] - direction[1] * rel[:, 0]
-    edges = []
-    for side in (left_of_path > 0.0, left_of_path < 0.0):
-        near = side & (dist <= PASSAGE_WIDTH_M)
-        if not near.any():
-            return None
-        edges.append(cells[near][np.argmin(dist[near])])
-    left, right = edges
-    across = left - right
-    length = float(np.hypot(*across))
-    if length <= info_res:
-        return None
-    axis = np.array([across[1], -across[0]]) / length
-    if axis @ np.asarray(direction) < 0.0:
-        axis = -axis
-    return (left + right) / 2.0, axis, length
-
-
-def passage_line(grid, info_res, origin_xy, center, axis):
-    """Gerade fuer die Durchfahrt einer Engstelle: (Start, Ende, Luft in m) oder None.
-
-    Richtung und Lage: den Footprint +-PASSAGE_SWEEP_M um center entlang schieben, um axis und
-    center variiert (PASSAGE_ANGLE_DEG, PASSAGE_SHIFT_M); es gewinnt der groesste Abstand zur
-    naechsten Wandzelle, bei fast gleichem der naechste an axis und center.
-    Engstelle: der zusammenhaengende Abschnitt um center, in dem links und rechts Wandzellen
-    bis FLANK_M neben dem Bot liegen (eine Wand nur auf einer Seite zaehlt nicht). Start: letzter
-    Punkt davor mit ROTATE_CLEAR_M Platz (dort dreht der Bot auf der Stelle), sonst None. Ende:
-    das Heck PASSAGE_EXIT_M hinter der Wand, mindestens WALL_M dick angenommen."""
-    free = (grid != LETHAL_COST).astype(np.uint8)
-    clearance = cv2.distanceTransform(free, cv2.DIST_L2, 5) * info_res
-    h, w = grid.shape
-
-    def lookup(pts):
-        cells = np.floor((pts - np.asarray(origin_xy)) / info_res).astype(np.int64)
-        inside = (cells[..., 0] >= 0) & (cells[..., 0] < w) \
-            & (cells[..., 1] >= 0) & (cells[..., 1] < h)
-        out = np.full(inside.shape, np.inf)
-        out[inside] = clearance[cells[inside][:, 1], cells[inside][:, 0]]
-        return out
-
-    corners = np.vstack([FOOTPRINT, FOOTPRINT[:1]])
-    outline = np.vstack([np.linspace(a, b, max(2, int(np.hypot(*(b - a)) / info_res) + 1))
-                         for a, b in zip(corners[:-1], corners[1:])])
-    sweep = np.arange(-PASSAGE_SWEEP_M, PASSAGE_SWEEP_M + info_res / 2, info_res)
-    base = math.atan2(axis[1], axis[0])
-    shifts = np.arange(-PASSAGE_SHIFT_M, PASSAGE_SHIFT_M + PASSAGE_SHIFT_STEP_M / 2,
-                       PASSAGE_SHIFT_STEP_M)
-    normal = np.array([-axis[1], axis[0]])
-    best = None
-    for a in base + np.radians(np.arange(-PASSAGE_ANGLE_DEG, PASSAGE_ANGLE_DEG + 1)):
-        d = np.array([math.cos(a), math.sin(a)])
-        body = outline @ np.array([[d[0], d[1]], [-d[1], d[0]]])
-        for sh in shifts:
-            point = np.asarray(center) + sh * normal
-            score = float(lookup(point + sweep[:, None, None] * d + body[None, :, :]).min())
-            penalty = abs(a - base) + abs(sh)
-            if best is None or score > best[0] + info_res / 4 or \
-                    (score > best[0] - info_res / 4 and penalty < best[3]):
-                best = (score, point, d, penalty)
-    score, point, d, _ = best
-
-    rows, cols = np.nonzero(grid == LETHAL_COST)
-    rel = np.asarray(origin_xy) + (np.column_stack([cols, rows]) + 0.5) * info_res - point
-    along = rel @ d
-    across = rel @ np.array([-d[1], d[0]])
-    near = (np.abs(across) <= BOT_WIDTH / 2.0 + FLANK_M) & (np.abs(along) <= PASSAGE_REACH_M)
-    s = np.arange(-PASSAGE_REACH_M, PASSAGE_REACH_M + info_res / 2, info_res)
-    index = np.clip(np.round((along[near] + PASSAGE_REACH_M) / info_res).astype(np.int64),
-                    0, s.size - 1)
-    flanked = np.ones(s.size, dtype=bool)
-    for side in (across[near] > 0.0, across[near] < 0.0):
-        hit = np.zeros(s.size + 2, dtype=bool)
-        hit[index[side] + 1] = True
-        flanked &= hit[:-2] | hit[1:-1] | hit[2:]
-    if not flanked.any():
-        return None
-    mid = int(np.argmin(np.where(flanked, np.abs(s), np.inf)))
-    first = last = mid
-    while first > 0 and flanked[first - 1]:
-        first -= 1
-    while last < s.size - 1 and flanked[last + 1]:
-        last += 1
-    roomy = lookup(point + s[:, None] * d) >= ROTATE_CLEAR_M
-    before = np.flatnonzero(roomy[:first + 1])
-    if before.size == 0:
-        return None
-    s_end = max(s[last], s[first] + WALL_M) - FOOTPRINT[:, 0].min() + PASSAGE_EXIT_M
-    return point + s[before[-1]] * d, point + s_end * d, score
+def frontier_gain(band, info_res, origin_xy, target):
+    """Unbekannte Flaeche an der Wand (m^2) bis GAIN_RADIUS_M um target."""
+    r = int(math.ceil(GAIN_RADIUS_M / info_res))
+    c = int((target[0] - origin_xy[0]) / info_res)
+    row = int((target[1] - origin_xy[1]) / info_res)
+    h, w = band.shape
+    r0, r1, c0, c1 = max(0, row - r), min(h, row + r + 1), max(0, c - r), min(w, c + r + 1)
+    if r0 >= r1 or c0 >= c1:
+        return 0.0
+    rows, cols = np.mgrid[r0:r1, c0:c1]
+    disk = np.hypot(rows - row, cols - c) <= r
+    return float(np.count_nonzero(band[r0:r1, c0:c1] & disk)) * info_res * info_res

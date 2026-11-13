@@ -56,7 +56,6 @@ Selten gebrauchte Werkzeuge liegen im Untermenü **„Debug / Werkzeuge ...“**
 |---|---|
 | `follow_lane.sh` | komplette Spurverfolgung (mit Kreuzung und Schranke) + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
 | `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel, MPPI), RViz und Draufsicht `/nav2/view` – Normalbetrieb |
-| `nav2_obstacle_rpp_test.sh` | Testprofil: wie `nav2_obstacle.sh`, aber Nav2 mit Regulated Pure Pursuit **ohne** Kollisionsprüfung (`nav2_params_rpp_test.yaml`) |
 | `storage.sh` | Storage-Aufgabe (Palette): Spurverfolgung + Storage-Detektoren, ohne Nav2. Bot steht, bis im Debugbild **STORAGE STARTEN** geklickt wird |
 | `rqt_debug.sh` | Bildanzeige (`/lokal/raw_image`, `/lokal/bev`, Debug-Bilder) |
 | `rqt_params.sh` | Parameter von `detect_lane` / `control_driving` live einstellen |

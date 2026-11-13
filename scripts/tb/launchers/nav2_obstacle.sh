@@ -15,7 +15,7 @@
 
 # Laeuft schon eine Pipeline? Zwei gleichzeitig senden auf dieselben Topics, und ein
 # zweiter Not-Aus im STOPP schickt dauernd Null an den Bot.
-PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view|image_recorder|intersection_node)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
+PATTERN='lib/Follow_Lane/(ingress_node(_nav2)?|detect_lane(_nav2)?|control_driving|switch_control|debug_view|notaus|odom_filter|scan_correct|lane_costmap_node|nav2_goal_publisher|keepout_zone_node|tunnel_explorer_node|nav2_view|image_recorder|intersection_node)( |$)|lib/nav2_(controller|planner|lifecycle_manager)/'
 if pgrep -f "$PATTERN" >/dev/null; then
     echo "Es laeuft bereits eine Pipeline:"
     ps -eo pid,etime,args | grep -E "$PATTERN" | grep -v grep | sed 's#/[^ ]*/lib/[^/]*/##; s# --ros-args.*##'
@@ -46,9 +46,14 @@ mkdir -p "$REPO_ROOT/logs/pipeline"
 NODE_LOG="$REPO_ROOT/logs/pipeline/nav2_obstacle-$(date +%Y%m%d-%H%M%S).log"
 ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/nav2_obstacle-latest.log"
 
+# Fahrtprotokoll je Tunnelfahrt (tunnel_explorer_node): logs/tunnel/<Zeit>/.
+export TUNNEL_LOG_DIR="$REPO_ROOT/logs/tunnel"
+# Tagebuch je Obstacle-Abschnitt (nav2_goal_publisher): logs/obstacle/<Zeit>/.
+export OBSTACLE_LOG_DIR="$REPO_ROOT/logs/obstacle"
+
 # set -m: eigene Prozessgruppe, sonst ignoriert der Hintergrundjob SIGINT (siehe follow_lane.sh).
 set -m
-# "$@": zusaetzliche Launch-Argumente, z.B. nav2_params:=... (nav2_obstacle_rpp_test.sh).
+# "$@": zusaetzliche Launch-Argumente, z.B. nav2_params:=...
 ros2 launch Follow_Lane nav2_obstacle.launch.py "$@" > "$NODE_LOG" 2>&1 &
 LAUNCH_PID=$!
 set +m
@@ -69,8 +74,8 @@ trap cleanup EXIT
 
 echo "Pipeline startet im Hintergrund (Log der Knoten: logs/pipeline/$(basename "$NODE_LOG"))."
 echo ""
-echo "Tunnel von Hand: im Fenster rqt_image_view einmal \"Publish click location\""
-echo "anhaken, dann im Debugbild auf TUNNEL STARTEN klicken."
+echo "Tunnel von Hand: in einem der beiden rqt_image_view-Fenster (Debugbild oder Nav2-Draufsicht)"
+echo "einmal \"Publish click location\" anhaken, dann auf TUNNEL STARTEN klicken."
 echo "Das zweite Bildfenster zeigt die Nav2-Draufsicht mit Statuszeile (/nav2/view)."
 echo ""
 echo "Not-Aus: LEERTASTE = Fahren/Stopp, q = beenden."

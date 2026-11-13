@@ -55,6 +55,7 @@ setup(
             'pallet_node          = Follow_Lane.src.pallet_node:main',
             'storage_sign_node    = Follow_Lane.src.storage_sign_node:main',
             'storage_zone_node    = Follow_Lane.src.storage_zone_node:main',
+            'scan_correct         = Follow_Lane.src.scan_correct:main',
             'switch_control       = Follow_Lane.src.switch_control:main',
             'tunnel_explorer_node = Follow_Lane.src.tunnel_explorer_node:main',
         ],

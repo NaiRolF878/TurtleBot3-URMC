@@ -1,8 +1,9 @@
 """Draufsicht fuer den Nav2-Zweig: was Nav2 sieht und plant, als Bild.
 
 Ein:  /local_costmap/costmap bzw. im Tunnel /global_costmap/costmap, Footprint, Pfade,
-      Eingangssperre, /scan, /detect/lane_mask, /control/mode, /nav2/status, /rosout
-Aus:  /nav2/view (sensor_msgs/Image, z.B. in rqt_image_view)
+      Eingangssperre, /scan_corrected, /detect/lane_mask, /control/mode, /nav2/status, /rosout,
+      Klicks aus rqt_image_view (/nav2/view_mouse_left)
+Aus:  /nav2/view (sensor_msgs/Image, z.B. in rqt_image_view), /control/tunnel_request (Bool, Button)
 """
 import math
 import os
@@ -13,19 +14,20 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PolygonStamped
+from geometry_msgs.msg import Point, PolygonStamped
 from nav_msgs.msg import OccupancyGrid, Path
 from rcl_interfaces.msg import Log
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import String, UInt8
+from std_msgs.msg import Bool, String, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from follow_lane_msg.msg import LaneMask
 from Follow_Lane.src import bev_geometry
+from Follow_Lane.src.debug_view import draw_tunnel_button, tunnel_request
 from Follow_Lane.src.common import (
     ControlType, bev_pixels_to_ground, control_mode_from_msg, run_node,
     yaw_from_quaternion)
@@ -44,14 +46,16 @@ PATH = (255, 0, 255)
 OUTLINE = (30, 30, 30)
 WALL = (0, 140, 255)
 SCAN = (255, 190, 120)
+EXIT = (0, 255, 255)          # gelb mit dunklem Rand: erkannter Tunnel-Ausgang
+BOX = (255, 255, 255)         # weiss mit dunklem Rand: Rechteck des Tunnelkastens
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
 VIEW_PERIOD_S = 0.2
 # Groesse der laengeren Kartenkante im Bild (px).
 CANVAS_SIZE_PX = 600
-# Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot, 1.2 m je Richtung. Deckt die
-# MPPI-Vorausschau (~1 m) mit Rand. Zentriert, nicht in Fahrtrichtung verschoben, sonst springt
+# Ausschnitt ausserhalb des Tunnels: Quadrat um den Bot, 1.2 m je Richtung. Deckt das Planziel
+# im Obstacle-Modus (~1 m) mit Rand. Zentriert, nicht in Fahrtrichtung verschoben, sonst springt
 # das Bild bei jedem Lenkausschlag.
 LOCAL_VIEW_SIZE_M = 2.4
 # Im Tunnel: nur die schon gesehene Flaeche plus dieser Rand, damit das Bild anfangs gross ist
@@ -60,13 +64,19 @@ TUNNEL_VIEW_MARGIN_M = 0.3
 # Nur Warnungen dieser Knoten zaehlen als Abbruchgrund. nav2_goal_publisher fehlt: was er tut,
 # kommt ueber /nav2/status.
 REASON_NODES = ('controller_server', 'planner_server', 'local_costmap', 'global_costmap',
-                'tunnel_explorer_node', 'lane_costmap_node', 'keepout_zone_node')
+                'tunnel_explorer_node', 'lane_costmap_node', 'keepout_zone_node',
+                'control_driving', 'switch_control')
 
 # Spurlinien aelter als das werden nicht mehr gezeichnet.
 LANE_FRESH_S = 1.0
 
 HEADER_H = 52
 FOOTER_H = 26
+# Leiste ganz unten mit dem Tunnel-Button (wie im Debugbild), Rand um den Button (px).
+BUTTON_BAR_H = 48
+BUTTON_MARGIN = 6
+# Klickposition aus rqt_image_view ("Publish click location"): <Bildtopic>_mouse_left.
+CLICK_TOPIC = '/nav2/view_mouse_left'
 
 # Wie lange eine Warnung aus /rosout rot angezeigt wird, danach grau.
 REASON_FRESH_S = 10.0
@@ -100,11 +110,17 @@ class nav2_view(Node):
         blau   Umriss des Bots (published_footprint der local_costmap), schwarz Fahrtrichtung
         magenta Pfad, dem Nav2 gerade folgt, mit Ziel (X); nur waehrend einer Fahrt
         orange Eingangssperre     hellblau LiDAR-Punkte
+        weiss  Rechteck des Tunnelkastens (vier gerade Waende); steht der Bot ganz ausserhalb,
+               schaltet der Tunnel auf Lane
+        gelb   der Ausgang: Randstueck des Rechtecks ohne Wand; ganz dahinter -> Lane
 
     Oben eine Statuszeile: Modus, was nav2_goal_publisher gerade tut, und die letzte
     Warnung der Nav2-Knoten aus /rosout. Das ist der Abbruchgrund: das
     FollowPath-Ergebnis meldet in Humble nur "abgebrochen", den Grund schreibt
     controller_server nur ins Log.
+
+    Unten der Tunnel-Button wie im Debugbild: im rqt_image_view-Fenster "Publish click
+    location" anhaken, dann Klick = Start bzw. im Tunnel Abbruch (/control/tunnel_request).
 
     Feste Ausrichtung: odom-X nach rechts, odom-Y nach oben. Die Karte liegt ohnehin
     in odom; so stehen Waende still und nur der Bot bewegt sich.
@@ -126,17 +142,21 @@ class nav2_view(Node):
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(PointCloud2, '/detect/tunnel_entrance_obstacle',
                                  self.cb_entrance, 1)
-        self.create_subscription(LaserScan, '/scan', self.cb_scan, qos_profile_sensor_data)
+        self.create_subscription(PolygonStamped, '/tunnel/exits', self.cb_exits, latched)
+        self.create_subscription(PolygonStamped, '/tunnel/box', self.cb_box, latched)
+        self.create_subscription(LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
         self.create_subscription(UInt8, '/control/mode', self.cb_control_mode, 1)
         self.create_subscription(String, '/control/tunnel_source', self.cb_tunnel_source, 1)
         self.create_subscription(String, '/nav2/status', self.cb_nav2_status, 1)
         self.create_subscription(Log, '/rosout', self.cb_rosout, 50)
         self.create_subscription(LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
+        self.create_subscription(Point, CLICK_TOPIC, self.cb_click, 1)
 
         # --- Publisher ---
         # Image statt CompressedImage: rqt_image_view bricht sonst mit "incompatible type" ab.
         # Beide laufen auf dem Laptop, das Bild geht nicht uebers Netz.
         self.pub_view = self.create_publisher(Image, '/nav2/view', 1)
+        self.pub_tunnel_request = self.create_publisher(Bool, '/control/tunnel_request', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(VIEW_PERIOD_S, self.cb_timer)
@@ -149,12 +169,15 @@ class nav2_view(Node):
         self.footprint = None
         self.active_path = None
         self.entrance = None
+        self.exits = []             # [((ax, ay), (bx, by))] Tuerlinien in odom
+        self.box = []               # Ecken des Tunnelkastens in odom
         self.scan = None
         self.control_mode = None
         self.tunnel_source = ''
         self.nav2_status = ''
         self.reason = None          # (Zeit, Knoten, Text)
         self.lane = None            # (Empfangszeit, gelb (N,2), weiss (N,2)) in base_footprint [m]
+        self._tunnel_button = None  # (x0, y0, x1, y1) im zuletzt gesendeten Bild
         try:
             self._bev = bev_geometry.load_bev_spec(
                 os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
@@ -190,6 +213,16 @@ class nav2_view(Node):
             cloud, field_names=('x', 'y'), skip_nans=True)]
         self.entrance = (cloud.header.frame_id, pts)
 
+    def cb_exits(self, msg):
+        if msg.header.frame_id != ODOM_FRAME:
+            return
+        pts = [(p.x, p.y) for p in msg.polygon.points]
+        self.exits = list(zip(pts[0::2], pts[1::2]))
+
+    def cb_box(self, msg):
+        if msg.header.frame_id == ODOM_FRAME:
+            self.box = [(p.x, p.y) for p in msg.polygon.points]
+
     def cb_scan(self, msg):
         self.scan = msg
 
@@ -200,6 +233,13 @@ class nav2_view(Node):
 
     def cb_tunnel_source(self, msg):
         self.tunnel_source = msg.data
+
+    def cb_click(self, point):
+        req = tunnel_request(self._tunnel_button, point, self.control_mode)
+        if req is None:
+            return
+        self.pub_tunnel_request.publish(req)
+        self.get_logger().info('Tunnel-Button: ' + ('Start' if req.data else 'Abbruch'))
 
     def cb_nav2_status(self, msg):
         self.nav2_status = msg.data
@@ -260,6 +300,8 @@ class nav2_view(Node):
         self.draw_lane(body, px)
         self.draw_scan(body, px)
         self.draw_entrance(body, px)
+        self.draw_box(body, px)
+        self.draw_exits(body, px)
         # Lane-Modus: nav2_goal_publisher hat den Pfad beim Verlassen geleert.
         self.draw_path(body, px, self.active_path)
         self.draw_robot(body, px)
@@ -347,6 +389,24 @@ class nav2_view(Node):
         line = np.array([px(x, y) for x, y in pts], np.int32)
         cv2.polylines(body, [line], False, WALL, 3, cv2.LINE_AA)
 
+    def draw_box(self, body, px):
+        """Rechteck des Tunnelkastens; bleibt nach dem Tunnel stehen wie der Ausgang."""
+        if len(self.box) < 3:
+            return
+        poly = np.array([px(x, y) for x, y in self.box], np.int32)
+        cv2.polylines(body, [poly], True, OUTLINE, 5, cv2.LINE_AA)
+        cv2.polylines(body, [poly], True, BOX, 2, cv2.LINE_AA)
+
+    def draw_exits(self, body, px):
+        """Gemerkte Tunnel-Ausgaenge; bleiben nach dem Tunnel stehen, bis der naechste beginnt."""
+        for a, b in self.exits:
+            pa, pb = px(*a), px(*b)
+            cv2.line(body, pa, pb, OUTLINE, 7, cv2.LINE_AA)
+            cv2.line(body, pa, pb, EXIT, 4, cv2.LINE_AA)
+            label = ((pa[0] + pb[0]) // 2 + 6, (pa[1] + pb[1]) // 2 - 6)
+            cv2.putText(body, 'Ausgang', label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, OUTLINE, 3, cv2.LINE_AA)
+            cv2.putText(body, 'Ausgang', label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, EXIT, 1, cv2.LINE_AA)
+
     def draw_path(self, body, px, path):
         if path is None or len(path.poses) < 2:
             return
@@ -418,7 +478,13 @@ class nav2_view(Node):
             x += 22 + cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0]
             if x > w - 40:
                 break
-        return np.vstack([header, body, footer, legend])
+        buttons = np.full((BUTTON_BAR_H, w, 3), (40, 40, 40), np.uint8)
+        if self.control_mode is not None:
+            rect = (BUTTON_MARGIN, BUTTON_MARGIN, w - BUTTON_MARGIN, BUTTON_BAR_H - BUTTON_MARGIN)
+            draw_tunnel_button(buttons, rect, self.control_mode)
+            top = HEADER_H + body.shape[0] + 2 * FOOTER_H
+            self._tunnel_button = (rect[0], top + rect[1], rect[2], top + rect[3])
+        return np.vstack([header, body, footer, legend, buttons])
 
     @staticmethod
     def fit(text, width, scale=0.55):

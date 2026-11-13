@@ -7,7 +7,7 @@ docs/Storage_Retrieval_Konzept.md.
 Ein:  /control/storage_request (Bool, Button), /detect/zone_boundaries,
       und /detect/zone_cross_lines
       (PoseArray, odom), /detect/storage_sign (StorageSign), /detect/pallet
-      (PalletDetection), /detect/pallet_grip (Float32), /control/maneuver_status (UInt32), TF
+      (PalletDetection), /detect/pallet_grip (Float32), /control/maneuver_status (ManeuverStatus), TF
 Aus:  /control/storage_state (String, Name aus StorageState), /control/storage_info
       (String, Klartext fuer debug_view), /control/storage_zones (StorageZones, Anzeige
       in storage_zone_node), /control/maneuver (Maneuver), /lokal/magnet_control (Bool)
@@ -20,10 +20,11 @@ import rclpy
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import Bool, Float32, String, UInt32
+from std_msgs.msg import Bool, Float32, String
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
-from follow_lane_msg.msg import Maneuver, PalletDetection, StorageSign, StorageZones
+from follow_lane_msg.msg import (
+    Maneuver, ManeuverStatus, PalletDetection, StorageSign, StorageZones)
 from Follow_Lane.src.common import (
     MAGNET_FRONT_M, ControlType, StorageState, frange, irange, pose2d_from_transform, require_params,
     wrap_angle, yaw_from_quaternion)
@@ -198,7 +199,7 @@ class StorageSequence:
         node.create_subscription(PalletDetection, '/detect/pallet', self.cb_pallet, 1)
         node.create_subscription(Float32, '/detect/pallet_grip', self.cb_grip, 1)
         node.create_subscription(Float32, '/detect/pallet_still', self.cb_still, 1)
-        node.create_subscription(UInt32, '/control/maneuver_status', self.cb_maneuver_status, 1)
+        node.create_subscription(ManeuverStatus, '/control/maneuver_status', self.cb_maneuver_status, 1)
 
         # --- Publisher ---
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -322,8 +323,12 @@ class StorageSequence:
     def cb_maneuver_status(self, msg):
         if self.state not in MANEUVER_STATES or not self._queue:
             return
-        if msg.data != self._queue[0].id:
+        if msg.id != self._queue[0].id:
             return
+        if not msg.success:
+            # control_driving bricht Grundbewegungen ab (Sicherung, Pose veraltet, dreht sich
+            # nicht/im Kreis); Storage faehrt wie bisher mit der naechsten weiter.
+            self.node.get_logger().warn(f'Storage: Grundbewegung abgebrochen ({msg.reason}).')
         self._queue.pop(0)
         if self._queue:
             self._publish_maneuver()

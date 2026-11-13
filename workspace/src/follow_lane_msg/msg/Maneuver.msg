@@ -1,9 +1,10 @@
-# Grundbewegung fuer den Fahrmodus Maneuver: switch_control gibt sie vor,
-# control_driving faehrt sie in odom ab und meldet die id auf /control/maneuver_status.
+# Grundbewegung: switch_control gibt sie vor, control_driving faehrt sie in odom ab und meldet
+# das Ende auf /control/maneuver_status (ManeuverStatus).
 
 uint8 ROTATE = 1     # auf der Stelle auf den Gierwinkel yaw (rad, odom) drehen
 uint8 STRAIGHT = 2   # distance (m) geradeaus, < 0 = rueckwaerts, Richtung beim Start halten
 uint8 PATH = 3       # die Punkte von path nacheinander anfahren, ohne an Zwischenpunkten zu halten
+uint8 UNWEDGE = 4    # freifahren: control_driving waehlt die freieste kleine Bewegung
 
 std_msgs/Header header
 
