@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: rviz: Roboter, LiDAR, Costmaps, Pfade
 # Aufruf: keine Argumente
 # Startet rviz2 mit der Projekt-Konfiguration: Roboter, TF, LaserScan, beide Costmaps
 # und die geplanten Pfade.

@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: Storage-Aufgabe (Palette), Start per Button im Debugbild
 # Aufruf: keine Argumente
 # Startet die Storage-Aufgabe (Palette): Spurverfolgung plus storage_zone_node, storage_sign_node,
 # pallet_node (storage.launch.py) im Hintergrund und den NOT-AUS (notaus)

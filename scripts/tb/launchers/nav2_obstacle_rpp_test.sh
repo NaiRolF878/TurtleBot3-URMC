@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: wie nav2_obstacle, aber Nav2 mit RPP ohne Kollisionspruefung (Test)
 # Aufruf: keine Argumente
 # TESTPROFIL: wie nav2_obstacle.sh, aber Nav2 faehrt mit Regulated Pure Pursuit OHNE eigene
 # Kollisionspruefung (Parameter/nav2_params_rpp_test.yaml). Der Plan von NavFn gilt als wahr,

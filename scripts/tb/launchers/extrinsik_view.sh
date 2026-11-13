@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: Kalibrierung pruefen: Bodengitter im Kamerabild
 # Aufruf: keine Argumente (optional: zusaetzliche Argumente fuer extrinsics-view.py)
 # Sichtpruefung der extrinsischen Kalibrierung: Bodengitter mit cm-Massen im Kamerabild.
 #

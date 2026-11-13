@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: Fotos fuer einen Datensatz aufnehmen (p = Foto)
 # Aufruf: [--label NAME] [--keep-res] [--undistorted] [--no-window]
 # Bilder fuer einen Vision-Datensatz aufnehmen: Livebild, p = Foto speichern, q = beenden.
 # Ablage: dataset/<label>/...

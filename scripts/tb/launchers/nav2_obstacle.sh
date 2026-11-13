@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: Spurfolge + Nav2 fuer Hindernisse und Tunnel (MPPI) -- Normalbetrieb
 # Aufruf: ohne Argumente; weitere werden an ros2 launch durchgereicht (nav2_params:=...)
 # Startet den Nav2-Zweig fuer Hindernisse und Tunnel -- inklusive der Spurverfolgung,
 # auf die er angewiesen ist -- im Hintergrund und den NOT-AUS (notaus) im Vordergrund

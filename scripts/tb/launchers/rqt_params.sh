@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: Parameter von detect_lane/control_driving live einstellen
 # Aufruf: keine Argumente
 # Startet rqt_reconfigure zum Einstellen der Parameter von detect_lane und control_driving.
 

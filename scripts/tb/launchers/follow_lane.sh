@@ -1,4 +1,5 @@
 #!/bin/bash
+# Kurz: Spurfolge (PID) mit Kreuzung und Schranke, ohne Nav2
 # Aufruf: keine Argumente
 # Startet die komplette Follow-Lane-Pipeline (ingress_node, detect_lane, control_driving, switch_control,
 # debug_view) im Hintergrund und den NOT-AUS (notaus) im Vordergrund dieses Terminals.

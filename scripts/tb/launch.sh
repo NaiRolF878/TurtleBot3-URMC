@@ -30,23 +30,67 @@ echo "$BUILD_LOG" | grep -E "^Summary:"
 # Neu sourcen, damit neu hinzugekommene Pakete/Programme gefunden werden
 source "$REPO_ROOT/workspace/install/setup.bash"
 
-shopt -s nullglob
-launchers=("$SCRIPT_DIR/launchers/"*.sh)
+# Diese Launcher stehen im Untermenue "Debug / Werkzeuge" statt im Hauptmenue. Die Dateien
+# bleiben in launchers/ (relative Pfade und Doku verweisen dorthin).
+DEBUG_LAUNCHERS=(dataset_capture.sh extrinsik_view.sh follow_lane_record.sh)
+DEBUG_ENTRY="Debug / Werkzeuge ..."
 
-if [ ${#launchers[@]} -eq 0 ]; then
+shopt -s nullglob
+all=("$SCRIPT_DIR/launchers/"*.sh)
+if [ ${#all[@]} -eq 0 ]; then
     echo "Keine Launcher gefunden in launchers/"
     exit 1
 fi
-
-echo ""
-echo "Verfuegbare Launcher:"
-PS3="Auswahl (Nummer): "
-select launcher in "${launchers[@]#$SCRIPT_DIR/launchers/}"; do
-    if [ -z "$launcher" ]; then
-        echo "Ungueltige Auswahl."
-        continue
+main_launchers=()
+debug_launchers=()
+for f in "${all[@]}"; do
+    name=$(basename "$f")
+    if [[ " ${DEBUG_LAUNCHERS[*]} " == *" $name "* ]]; then
+        debug_launchers+=("$name")
+    else
+        main_launchers+=("$name")
     fi
+done
 
+# Menuezeile: Name und die Zeile "# Kurz:" aus dem Launcher.
+label() {
+    local kurz
+    kurz=$(grep -m1 '^# *Kurz:' "$SCRIPT_DIR/launchers/$1" | sed 's/^# *Kurz: *//')
+    printf '%-28s %s' "$1" "$kurz"
+}
+
+# Zeigt ein Menue aus Launcher-Namen (plus optional einem Extra-Eintrag), setzt $choice.
+pick() {
+    local title=$1 extra=$2; shift 2
+    local items=("$@") labels=() i
+    for i in "${items[@]}"; do labels+=("$(label "$i")"); done
+    [ -n "$extra" ] && labels+=("$extra")
+    echo ""
+    echo "$title"
+    PS3="Auswahl (Nummer): "
+    choice=""
+    select entry in "${labels[@]}"; do
+        if [ -z "$entry" ]; then
+            echo "Ungueltige Auswahl."
+            continue
+        fi
+        if [ -n "$extra" ] && [ "$entry" == "$extra" ]; then
+            choice="$extra"
+        else
+            choice="${items[$((REPLY - 1))]}"
+        fi
+        break
+    done
+}
+
+pick "Verfuegbare Launcher:" "$DEBUG_ENTRY" "${main_launchers[@]}"
+if [ "$choice" == "$DEBUG_ENTRY" ]; then
+    pick "Debug / Werkzeuge:" "" "${debug_launchers[@]}"
+fi
+launcher="$choice"
+[ -z "$launcher" ] && exit 1
+
+{
     usage=$(grep -m1 '^# *Aufruf:' "$SCRIPT_DIR/launchers/$launcher" | sed 's/^# *//')
     [ -n "$usage" ] && echo "  $usage"
     read -r -p "Argumente (leer = keine): " args
@@ -67,5 +111,4 @@ select launcher in "${launchers[@]#$SCRIPT_DIR/launchers/}"; do
 
     # $args bewusst ohne Anfuehrungszeichen: soll in einzelne Argumente zerlegt werden.
     bash "$SCRIPT_DIR/launchers/$launcher" $args
-    break
-done
+}

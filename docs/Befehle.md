@@ -43,18 +43,31 @@ landown        # optional: LAN-Adresse am Laptop wieder entfernen
 ## Pipeline und Werkzeuge (Menü)
 
 ```bash
-tb             # Menü mit allen Launchern
+tb             # Menü mit allen Launchern (Werkzeuge im Untermenü "Debug / Werkzeuge")
 ```
+
+Im Menü steht hinter jedem Launcher seine Kurzbeschreibung (Zeile `# Kurz:` im Skript).
+Selten gebrauchte Werkzeuge liegen im Untermenü **„Debug / Werkzeuge ...“** (Liste
+`DEBUG_LAUNCHERS` in `scripts/tb/launch.sh`); die Dateien bleiben in `scripts/tb/launchers/`.
+
+**Hauptmenü**
 
 | Launcher | Was er macht |
 |---|---|
-| `follow_lane.sh` | komplette Spurverfolgung + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
-| `follow_lane_record.sh` | wie `follow_lane.sh`, dazu während der Fahrt jede Sekunde ein YOLO-Trainingsbild, abwechselnd Original (`_roh`) und entzerrt (`_entzerrt`), nach `dataset/fahrt_<datum>_<zeit>/` (nicht im Stand/Tunnel) |
-| `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel), RViz und Draufsicht `/nav2/view` |
+| `follow_lane.sh` | komplette Spurverfolgung (mit Kreuzung und Schranke) + **Not-Aus** im selben Terminal – Bot fährt erst nach **Leertaste** |
+| `nav2_obstacle.sh` | wie `follow_lane.sh`, dazu Nav2 (Obstacle/Tunnel, MPPI), RViz und Draufsicht `/nav2/view` – Normalbetrieb |
+| `nav2_obstacle_rpp_test.sh` | Testprofil: wie `nav2_obstacle.sh`, aber Nav2 mit Regulated Pure Pursuit **ohne** Kollisionsprüfung (`nav2_params_rpp_test.yaml`) |
 | `storage.sh` | Storage-Aufgabe (Palette): Spurverfolgung + Storage-Detektoren, ohne Nav2. Bot steht, bis im Debugbild **STORAGE STARTEN** geklickt wird |
-| `extrinsik_view.sh` | Kamerabild mit 10-cm-Bodengitter + Vogelperspektive, Brett wird live vermessen |
 | `rqt_debug.sh` | Bildanzeige (`/lokal/raw_image`, `/lokal/bev`, Debug-Bilder) |
 | `rqt_params.sh` | Parameter von `detect_lane` / `control_driving` live einstellen |
+| `rviz_3d.sh` | rviz: Roboter, TF, LiDAR, beide Costmaps, Pfade |
+
+**Debug / Werkzeuge**
+
+| Launcher | Was er macht |
+|---|---|
+| `follow_lane_record.sh` | wie `follow_lane.sh`, dazu während der Fahrt jede Sekunde ein YOLO-Trainingsbild, abwechselnd Original (`_roh`) und entzerrt (`_entzerrt`), nach `dataset/fahrt_<datum>_<zeit>/` (nicht im Stand/Tunnel) |
+| `extrinsik_view.sh` | Kamerabild mit 10-cm-Bodengitter + Vogelperspektive, Brett wird live vermessen |
 | `dataset_capture.sh` | Fotos für einen Datensatz aufnehmen (`p` = Foto, `q` = Ende) |
 
 ### Not-Aus (Fahrfreigabe)
