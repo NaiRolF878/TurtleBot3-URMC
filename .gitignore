@@ -30,8 +30,9 @@ Thumbs.db
 # Doku-Bilder (Screenshots, Mockups, generierte Debug-Previews)
 docs/images/
 
-# Lokale Test-/Preview-Skripte
-workspace/src/Follow_Lane/test/
+# Lokale Test-/Preview-Skripte; die Selbstpruefung der Geometrie gehoert ins Repo.
+workspace/src/Follow_Lane/test/*
+!workspace/src/Follow_Lane/test/test_geometry.py
 
 # Claude-spezifisch (nur lokales Arbeitsgedaechtnis, gehoert nicht ins Repo).
 # Liegt im gemounteten Workspace und ueberlebt daher einen Container-Rebuild --

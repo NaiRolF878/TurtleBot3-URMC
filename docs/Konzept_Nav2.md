@@ -47,8 +47,11 @@ tunnel_explorer_node --Pfad--> nav2_goal_publisher;  beide --/control/maneuver_r
 Wer auf Kollision prüft, nimmt den echten Umriss des Burgers ohne Polster
 (`robot_geometry.FOOTPRINT` = `local_costmap.footprint`): RPP, der Wächter, das Freifahren und
 die Pfadprüfung. Nur NavFn plant für einen Kreis (`robot_radius` 0,09 m plus 1 cm Polster). Er
-hält die Bot-Mitte 0,0988 m von jeder Wand fern; das reicht seitlich, beim Drehen auf der Stelle
-aber nicht (hintere Ecken 10,5 cm). Das fangen die Prüfungen mit dem Umriss ab.
+hält die Bot-Mitte 0,0988 m von Hindernissen fern, von Spurlinien nur 0,03 m (`lane_inflation`,
+damit er zwischen Linie und Hindernis überhaupt plant); das reicht seitlich bzw. an Linien nicht,
+beim Drehen auf der Stelle ebenfalls nicht (hintere Ecken 10,5 cm). Das fangen die Prüfungen mit
+dem Umriss ab. Selbstprüfung der Geometrie ohne ROS:
+`python workspace/src/Follow_Lane/test/test_geometry.py`.
 
 ## Challenges
 
@@ -74,8 +77,9 @@ alles kommt ohne Maße der Enclosure aus.
 ## Engstellen, Abbrüche, Neuplanung (Obstacle und Tunnel)
 
 **Vor dem Losfahren prüfen.** Jeder neue Pfad wird bis 1 m voraus mit dem Umriss in
-Pfadrichtung abgefahren (`passage_geometry.check_path`). Stößt er an einer Engstelle an, sucht
-die Prüfung die Gerade mit dem meisten Abstand zu den Wänden:
+Pfadrichtung abgefahren (`passage_geometry.check_path`). Berührt er nur eine Seite (z. B. eine
+Linie, an der der Weg entlangführt), prüft sie weiter voraus. Stößt er an einer Engstelle an
+(Wand links und rechts), sucht die Prüfung die Gerade mit dem meisten Abstand zu den Wänden:
 - passt der Bot ausgerichtet hindurch: RPP fährt bis zum Start der Geraden (dort ist Platz zum
   Drehen), switch_control dreht ihn auf die Gerade und fährt langsam gerade hindurch, danach
   wird neu geplant;

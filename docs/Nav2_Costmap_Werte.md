@@ -202,15 +202,20 @@ Wert von der Korridorbreite ab:
   Bewegung ist verboten, wenn der Umriss eine belegte Zelle (Linie, Hindernis, Wand, Sperre)
   berührt, und erlaubt, wenn er dazwischen passt, egal wie breit der Bereich ist. Was er schon
   berührt, zählt beim Wächter und beim Freifahren nicht, sonst käme er nie wieder weg.
-- **NavFn** kennt nur einen Kreis: Zellen bis `robot_radius` + Polster (0,0988 m) um jede
-  belegte Zelle sind für ihn Wand, danach fällt der Saum der Inflation ab. Er zieht den Weg
-  zur Mitte, ist aber kein Kollisionskriterium für den Umriss.
+- **NavFn** kennt nur einen Kreis: Zellen bis `robot_radius` + Polster (0,0988 m) um jedes
+  Hindernis sind für ihn Wand, um Spurlinien nur 0,03 m (siehe unten), danach fällt der Saum
+  der Inflation ab. Er zieht den Weg zur Mitte, ist aber kein Kollisionskriterium für den Umriss.
 
-### Warum der `lane_layer` vor dem `inflation_layer` steht
+### Reihenfolge von `lane_layer` und `inflation_layer`
 
-Nur was vor dem `inflation_layer` eingetragen ist, bekommt einen Saum. Stünde der `lane_layer`
-dahinter, hätten die Linien in der global_costmap keine Sperrzone, und NavFn plante Wege, auf
-denen die Bot-Mitte direkt neben einer Linie liegt.
+Nur was vor dem `inflation_layer` eingetragen ist, bekommt dessen Saum.
+- **local_costmap:** `lane_layer` davor. Die Inflation dient dort nur der Anzeige; RPP und
+  Wächter prüfen den Umriss gegen die Linienzellen selbst.
+- **global_costmap:** `lane_layer` dahinter, danach `lane_inflation` (0,03 m). Linien haben für
+  NavFn also nur 3 cm Sperrzone statt 0,0988 m (13.11.: mit voller Sperrzone plante er zwischen
+  Linie und Hindernis keine Lücke, durch die der Bot passt). Den Abstand des Umrisses zur Linie
+  regeln die Pfadprüfung (Abschnitt 6), das Verschieben in die Mitte und die Tor-Prüfung in
+  `nav2_goal_publisher`.
 
 ### `inflation_radius` und `cost_scaling_factor`
 - **Was sie bewirken:** Um jede belegte Zelle (LiDAR-Hindernis, Spurlinie,
@@ -236,7 +241,8 @@ Zellabstand); W = Abstand der Wandflächen, je nach Lage zum Raster eine Zelle m
 | Stufe | braucht | Herkunft |
 |---|---|---|
 | Bot real | 0,178 m gerade | Umriss |
-| NavFn | W > 0,19, sicher ab 0,20 m | Pfadzelle ≥ 10 Zellen von jeder Wand (Saum 0,0988) |
+| NavFn | W > 0,19, sicher ab 0,20 m | Pfadzelle ≥ 10 Zellen von jedem Hindernis (Saum 0,0988) |
+| NavFn zwischen Linie und Hindernis | W > 0,13 m | Saum 0,0988 am Hindernis, 0,03 an der Linie (`lane_inflation`); schmaler als der Bot: die Pfadprüfung sperrt |
 | Umriss gerade (RPP, Wächter) | W > 0,18, sicher ab 0,19 m | 18 freie Zellen |
 | Umriss 15° / 30° / 45° schräg | 0,19–0,20 / 0,20–0,21 / 0,20–0,21 m | Umriss ohne Polster |
 | Drehen auf der Stelle | 0,210 m | Umkreis 0,105 |
@@ -277,7 +283,8 @@ Raster im odom-Frame (`MEMORY_RESOLUTION`, = `resolution` der Costmaps):
   vom bot-nahen Ende aus in Schritten von `TRACE_STEP` verfolgt (Median der Pixel
   voraus, höchstens `TRACE_MAX_TURN_DEG` Drehung je Schritt, Lücken bis
   `TRACE_MAX_GAP`), Weiß rechts von Gelb. Nur Pixel bis `line_margin` um diese
-  Mitte zählen; knickt eine Linie gegen die andere um mehr als
+  Mitte zählen (0.0: Wand ist die Linienmitte; Berühren der Linie ist erlaubt, Überqueren
+  nicht, so bleibt die halbe Bandbreite Reserve); knickt eine Linie gegen die andere um mehr als
   `TRACE_PARALLEL_DEG` ab, endet sie dort. Querlinien, Papier und helle Flächen
   neben der Strecke werden so keine Wand. Pixel am Hindernis und in seinem
   LiDAR-Schatten fallen vorher weg: Die BEV zieht hohe helle Gegenstände lang.
@@ -484,9 +491,11 @@ belegte Zellen; Konstanten im Code, keine Parameter.
   (wie Kollision); eine Grundbewegung gilt nach `GUARD_MANEUVER_FAIL_S` als gescheitert.
 - **Pfadprüfung** (`passage_geometry.check_path`, Obstacle und Tunnel): der Umriss in
   Pfadrichtung (gemittelt über ±5 cm) entlang des neuen Pfads, ab `CHECK_SKIP_M` vom Bot (dort
-  entscheidet RPP selbst) bis `CHECK_AHEAD_M`. An der ersten Engstelle, an der er anstößt: die
-  Gerade mit dem meisten Abstand (±30°, ±3 cm), Start mit `ROTATE_CLEAR_M` Platz zum Drehen.
-  Luft auf der Geraden → ausrichten und durchfahren, keine Luft → sperren (`/nav2/blocked`).
+  entscheidet RPP selbst) bis `CHECK_AHEAD_M`. Berührt er nur eine Seite (eine Linie allein),
+  geht die Prüfung weiter. An der ersten Engstelle (Wand links und rechts): die Gerade mit dem
+  meisten Abstand (±30°, ±3 cm), Start mit `ROTATE_CLEAR_M` Platz zum Drehen. Luft auf der
+  Geraden → ausrichten und durchfahren, keine Luft → sperren (`/nav2/blocked`).
+  Selbstprüfung: `workspace/src/Follow_Lane/test/test_geometry.py`.
 - **Freifahren** (`control_driving`, auf Anfrage nach Kollisionsgefahr): die Bewegung aus
   `UNWEDGE_MOVES`, nach der der Umriss am weitesten von allem Belegten weg ist und die
   unterwegs nirgends neu anstößt. Gibt es keine, bleibt der Bot stehen und meldet das.

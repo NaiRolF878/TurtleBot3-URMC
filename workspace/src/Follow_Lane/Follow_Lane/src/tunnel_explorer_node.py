@@ -41,8 +41,8 @@ from Follow_Lane.src.common import (
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
 TICK_S = 0.5
-# Antwortet planner_server so lange nicht, gilt die Anfrage als verloren.
-PLAN_TIMEOUT_S = 5.0
+# Neuplanung im Takt, Planungs-Timeout, Engstellen: pg.REPLAN_PERIOD_S, pg.PLAN_TIMEOUT_S,
+# pg.PASSAGE_NEAR_M, pg.SAME_GAP_M (gleich fuer Obstacle und Tunnel).
 # Karten aus der Zeit vor dem Leeren (lane_costmap_node, 0,3 s) nicht verwenden; die
 # global_costmap sendet mit 2 Hz.
 MAP_SETTLE_S = 1.5
@@ -57,15 +57,8 @@ EXIT_CONFIRM_S = 1.0
 ENTRANCE_EXCLUDE_M = 0.35
 # Um diesen Radius (m) gilt eine Stelle als dieselbe: xy_goal_tolerance des Reglers.
 SAME_TARGET_M = 0.15
-# Engstellen naeher als das (m) sind dieselbe.
-SAME_GAP_M = 0.05
-# Liegt der Start einer Engstelle so nah (m), beginnen die Grundbewegungen sofort.
-PASSAGE_NEAR_M = 0.10
 # Besuchte und gescheiterte Ziele werden so lange (s) gemieden, nicht fuer immer (wie HKA).
 AVOID_S = 15.0
-# Neuplanung zum selben Ziel im Takt (s); der neue Pfad gilt nur bei gleicher Richtung
-# (passage_geometry.same_direction) oder wenn der alte blockiert ist.
-REPLAN_PERIOD_S = 1.0
 # So oft je Ziel wird nach Kollisionsgefahr freigefahren, danach gilt das Ziel als gescheitert.
 UNWEDGE_MAX = 2
 # Tunnel-Uhr: Reglement 60 s fuer die Ausfahrt. Ab TUNNEL_HURRY_S zaehlt bei der Zielwahl nur
@@ -292,7 +285,7 @@ class tunnel_explorer_node(Node):
             return
 
         if self._planning_since is not None:
-            if time.monotonic() - self._planning_since < PLAN_TIMEOUT_S:
+            if time.monotonic() - self._planning_since < pg.PLAN_TIMEOUT_S:
                 return
             self.get_logger().warn('planner_server antwortet nicht -- neue Anfrage.',
                                    throttle_duration_sec=5.0)
@@ -660,7 +653,7 @@ class tunnel_explorer_node(Node):
         if verdict == pg.ALIGN:
             start = info[0]
             self._pending_passage = info
-            if math.hypot(start[0] - pose[0], start[1] - pose[1]) < PASSAGE_NEAR_M:
+            if math.hypot(start[0] - pose[0], start[1] - pose[1]) < pg.PASSAGE_NEAR_M:
                 self._path = None
                 self._request(ManeuverRequest.PASSAGE)
                 return
@@ -721,7 +714,7 @@ class tunnel_explorer_node(Node):
     def _replan_periodic(self):
         if self._target is None or self._planning_since is not None \
                 or self._waiting_for is not None or self._pending_passage is not None \
-                or time.monotonic() - self._last_plan < REPLAN_PERIOD_S:
+                or time.monotonic() - self._last_plan < pg.REPLAN_PERIOD_S:
             return
         self._request_path(self._target, periodic=True)
 
@@ -866,7 +859,7 @@ class tunnel_explorer_node(Node):
 
     @staticmethod
     def _near(point, others):
-        return any(math.hypot(point[0] - o[0], point[1] - o[1]) < SAME_GAP_M for o in others)
+        return any(math.hypot(point[0] - o[0], point[1] - o[1]) < pg.SAME_GAP_M for o in others)
 
     def _robot_pose(self):
         try:

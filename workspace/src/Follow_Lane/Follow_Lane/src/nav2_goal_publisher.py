@@ -91,6 +91,8 @@ CENTER_SMOOTH = 5
 # gerade (13.11.: die Mitte je Wegpunkt glich gegen das jeweils naechste Hindernis aus, bei
 # versetzten Flaschen eine schraeg hinter dem Bot -- der Weg klebte an der gemeinsamen Flasche).
 # Gesperrte gerade Stuecke (Kosten >= 99) bleiben auf dem NavFn-Weg. Nur bis GATE_RANGE_M voraus.
+# Stoesst der Umriss auf dem Tor-Weg an, ohne dass die Pfadpruefung eine Engstelle sieht (eine
+# Linie allein), gilt stattdessen der in die Mitte geschobene Weg (_touches_one_side).
 GATE_JOIN_M = 0.02
 GATE_MIN_HALF_M = 0.10
 GATE_MAX_M = 0.70
@@ -113,22 +115,15 @@ WATCHDOG_PERIOD_S = 0.5
 PLAN_MODES = (ControlType.Obstacle,)
 ACTIVE_MODES = PLAN_MODES + (ControlType.Tunnel,)
 
-# Antwortet planner_server so lange nicht, gilt die Anfrage als verloren.
-PLAN_TIMEOUT_S = 5.0
 # lane_costmap_node sendet die Spurmitte erst ab dem Umschalten, also ab dem naechsten
 # Kamerabild. So lange (s) wartet die erste Planung darauf, bevor sie geradeaus zielt.
 CENTER_PATH_WAIT_S = 0.5
-# Obstacle: Neuplanung im Takt (s); der neue Pfad gilt nur bei gleicher Richtung
-# (passage_geometry.same_direction) oder wenn der alte blockiert ist.
-REPLAN_PERIOD_S = 1.0
 # Haelt der Waechter so lange (s) an, wird das Ziel abgebrochen wie bei einer Kollision.
 GUARD_ABORT_S = 1.0
 # Abbruchgrund: Meldungen von controller_server so lange (s) vor dem Ergebnis zaehlen.
 ABORT_REASON_WINDOW_S = 2.0
-# Liegt der Start einer Engstelle so nah (m), beginnen die Grundbewegungen sofort.
-PASSAGE_NEAR_M = 0.10
-# Engstellen naeher als das (m) sind dieselbe.
-SAME_GAP_M = 0.05
+# Neuplanung im Takt, Planungs-Timeout, Engstellen: pg.REPLAN_PERIOD_S, pg.PLAN_TIMEOUT_S,
+# pg.PASSAGE_NEAR_M, pg.SAME_GAP_M (gleich fuer Obstacle und Tunnel).
 
 # Klartext der Statuscodes aus action_msgs/GoalStatus, nur fuer das Log.
 GOAL_STATUS_TEXT = {
@@ -151,7 +146,7 @@ class nav2_goal_publisher(Node):
     aelter als CENTER_PATH_MAX_AGE_S, liegt das Ziel geradeaus. planner_server (NavFn)
     rechnet auf der global_costmap (LiDAR + Spurgedaechtnis) einen Weg darum herum, RPP
     faehrt ihn ab. Neu geplant wird, wenn eine gesperrte Zelle auf dem Pfad liegt, wenn er bis
-    auf goal_distance/2 abgefahren ist, wenn die Fahrt endet, und im Takt REPLAN_PERIOD_S (dann
+    auf goal_distance/2 abgefahren ist, wenn die Fahrt endet, und im Takt pg.REPLAN_PERIOD_S (dann
     nur bei gleicher Richtung).
 
     Jeder neue Pfad wird vor dem Losfahren mit dem Umriss geprueft (passage_geometry):
@@ -444,6 +439,9 @@ class nav2_goal_publisher(Node):
             return
         points = np.array([[p.pose.position.x, p.pose.position.y] for p in path.poses])
         gated = self._gate_path(points)
+        if gated is not None and self._touches_one_side(gated, robot):
+            self._event('gates_rejected')
+            gated = None
         centered = gated if gated is not None else self._center_path(points)
         if centered is not None:
             self._raw_points = points
@@ -556,7 +554,7 @@ class nav2_goal_publisher(Node):
         if verdict == pg.ALIGN:
             start = info[0]
             self._pending_passage = info
-            if math.hypot(start[0] - robot[0], start[1] - robot[1]) < PASSAGE_NEAR_M:
+            if math.hypot(start[0] - robot[0], start[1] - robot[1]) < pg.PASSAGE_NEAR_M:
                 self._cancel_goal()
                 self._request(ManeuverRequest.PASSAGE, info[:2])
                 return
@@ -691,6 +689,15 @@ class nav2_goal_publisher(Node):
         if used == 0:
             return None
         return result
+
+    def _touches_one_side(self, points, robot):
+        """Stoesst der Umriss auf dem Weg an, ohne dass die Pfadpruefung eine Engstelle sieht
+        (z.B. eine Spurlinie allein)? Die geraden Tor-Stuecke pruefen nur die Bot-Mitte, an
+        Linien sind das 3 cm (lane_inflation); dort haelt sonst erst RPP an."""
+        cells, res, origin = self._grid()
+        if pg.first_contact(points, cells, res, origin, robot[:2]) is None:
+            return False
+        return pg.check_path(points, cells, res, origin, robot[:2])[0] == pg.FREE
 
     def _center_path(self, points):
         """NavFn-Weg (N, 2) in die Mitte zwischen den Hindernissen links und rechts geschoben,
@@ -836,12 +843,12 @@ class nav2_goal_publisher(Node):
             return
         now = time.monotonic()
         if self._plan_requested is not None:
-            if now - self._plan_requested < PLAN_TIMEOUT_S:
+            if now - self._plan_requested < pg.PLAN_TIMEOUT_S:
                 return
             self.get_logger().warn('planner_server antwortet nicht -- neue Anfrage.')
         if not self._goal_active or self._path_needs_replan():
             self._request_plan(periodic=False)
-        elif self._pending_passage is None and now - self._last_plan >= REPLAN_PERIOD_S:
+        elif self._pending_passage is None and now - self._last_plan >= pg.REPLAN_PERIOD_S:
             self._request_plan(periodic=True)
 
     def _path_needs_replan(self):
@@ -1090,7 +1097,7 @@ class nav2_goal_publisher(Node):
 
     @staticmethod
     def _near(point, others):
-        return any(math.hypot(point[0] - o[0], point[1] - o[1]) < SAME_GAP_M for o in others)
+        return any(math.hypot(point[0] - o[0], point[1] - o[1]) < pg.SAME_GAP_M for o in others)
 
     def _set_status(self, text):
         if text != self._status:

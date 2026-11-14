@@ -1,10 +1,12 @@
 """Sperrt im Tunnel den Eingang, damit der Bot dort nicht wieder hinausfaehrt, und im
 Obstacle-Modus die Strasse hinter dem Startpunkt, damit NavFn nicht rueckwaerts plant.
 
-Ein:  /control/mode, /control/clear_maps (Taste L: Sperre neu an der aktuellen Pose), TF
+Ein:  /control/mode, /control/clear_maps (Taste L: Sperre neu an der aktuellen Pose),
+      /detect/lane_obstacles (Spurgedaechtnis: Breite der Startsperre), TF
 Aus:  /detect/tunnel_entrance_obstacle (PointCloud2, odom; beide Sperren, entrance_layer)
 """
 import math
+import time
 
 import numpy as np
 
@@ -18,7 +20,7 @@ from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, pose2d_from_transform, run_node)
+    ControlType, cloud_xy, control_mode_from_msg, pose2d_from_transform, run_node)
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
@@ -36,9 +38,15 @@ WALL_POINT_STEP_M = 0.01
 # Startsperre im Obstacle-Modus (12.11.: NavFn plante wieder rueckwaerts durch den Startpunkt;
 # max_path_backward in nav2_goal_publisher verwirft solche Plaene nur, verhindert sie nicht).
 # Quer zur Fahrtrichtung beim Wechsel Lane -> Obstacle, so weit hinter der Radachse, dass sie
-# sofort frei hinter dem Heck liegt (>= WALL_DELAY_M), breit genug fuer beide Spuren samt Linien.
+# sofort frei hinter dem Heck liegt (>= WALL_DELAY_M). Je Seite reicht sie bis zur naechsten
+# gemerkten Spurlinie (Punkte bis OBSTACLE_WALL_BAND_M neben der Wandlinie) plus
+# OBSTACLE_WALL_OVERLAP_M; ohne Linie auf einer Seite (oder ohne frisches Spurgedaechtnis,
+# LANE_MAX_AGE_S) bis OBSTACLE_WALL_SEARCH_M. Keine feste Spurbreite.
 OBSTACLE_WALL_BACK_M = 0.20
-OBSTACLE_WALL_WIDTH_M = 0.6
+OBSTACLE_WALL_BAND_M = 0.05
+OBSTACLE_WALL_OVERLAP_M = 0.05
+OBSTACLE_WALL_SEARCH_M = 1.0
+LANE_MAX_AGE_S = 0.5
 # Beim Verlassen von Obstacle und Tunnel: erst leere Wolke, nach so vielen s beide Costmaps leeren
 # (sonst bleibt die Wand eingetragen; Linien und LiDAR kommen im naechsten Zyklus wieder).
 COSTMAP_CLEAR_DELAY_S = 0.3
@@ -47,8 +55,7 @@ COSTMAP_CLEAR_DELAY_S = 0.3
 class keepout_zone_node(Node):
     """Sendet eine virtuelle Wand an der Stelle, an der switch_control von TunnelEntry nach
     Tunnel wechselt (Spurlinien enden = Eingang): quer zur Fahrtrichtung durch die Radachse,
-    WALL_WIDTH_M lang, im odom-Frame, damit sie ortsfest bleibt. Ohne TunnelEntry davor
-    (Start im Tunnel) gibt es keine Wand.
+    WALL_WIDTH_M lang, im odom-Frame, damit sie ortsfest bleibt.
 
     Gesendet wird sie erst, wenn der Bot WALL_DELAY_M hinter der Tuer ist. Sonst stuende er
     in ihr und Regler und Waechter saehen jede Bewegung als Kollision. Beim Verlassen des Tunnels
@@ -63,6 +70,8 @@ class keepout_zone_node(Node):
             UInt8, '/control/mode', self.cb_control_mode, 1)
         self.sub_clear_maps = self.create_subscription(
             Empty, '/control/clear_maps', self.cb_clear_maps, 1)
+        self.sub_lane = self.create_subscription(
+            PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         self.pub_entrance = self.create_publisher(PointCloud2, '/detect/tunnel_entrance_obstacle', 1)
         self.timer = self.create_timer(PUBLISH_PERIOD_S, self.cb_timer)
 
@@ -72,6 +81,7 @@ class keepout_zone_node(Node):
         self._door = None               # (kante a, kante b, mitte, normale nach innen)
         self._wall_active = False
         self._start_wall = None         # Obstacle: (kante a, kante b) in odom
+        self._lane = None               # (monotonic, frame, (N, 2)) Spurgedaechtnis
 
         self.clear_clients = {
             'local_costmap': self.create_client(
@@ -141,8 +151,15 @@ class keepout_zone_node(Node):
                 continue
             client.call_async(ClearEntireCostmap.Request())
 
+    def cb_lane_obstacles(self, cloud):
+        try:
+            self._lane = (time.monotonic(), cloud.header.frame_id, cloud_xy(cloud))
+        except ValueError:
+            self._lane = None
+
     def _start_wall_at_robot(self):
-        """Startsperre: Linie quer zur Fahrtrichtung, OBSTACLE_WALL_BACK_M hinter der Radachse."""
+        """Startsperre: Linie quer zur Fahrtrichtung, OBSTACLE_WALL_BACK_M hinter der Radachse,
+        links und rechts bis zur Spurlinie (_wall_reach)."""
         pose = self._robot_pose()
         if pose is None:
             self.get_logger().warn('Keine Pose beim Wechsel in Obstacle -- keine Startsperre.')
@@ -150,10 +167,30 @@ class keepout_zone_node(Node):
         x, y, yaw = pose
         normal = np.array([math.cos(yaw), math.sin(yaw)])
         center = np.array([x, y]) - normal * OBSTACLE_WALL_BACK_M
-        side = np.array([-normal[1], normal[0]]) * OBSTACLE_WALL_WIDTH_M / 2.0
+        left = np.array([-normal[1], normal[0]])
+        reach_left, reach_right = self._wall_reach()
         self.get_logger().info(f'Obstacle: Startsperre {OBSTACLE_WALL_BACK_M * 100:.0f} cm hinter '
-                               f'dem Bot bei x={center[0]:.2f} y={center[1]:.2f} (odom).')
-        return (center - side, center + side)
+                               f'dem Bot bei x={center[0]:.2f} y={center[1]:.2f} (odom), '
+                               f'{reach_left:.2f} m links, {reach_right:.2f} m rechts.')
+        return (center - left * reach_right, center + left * reach_left)
+
+    def _wall_reach(self):
+        """(links, rechts) in m von der Wandmitte bis zur naechsten Spurlinie an der Wandlinie
+        plus OBSTACLE_WALL_OVERLAP_M; ohne Linie OBSTACLE_WALL_SEARCH_M. Spurgedaechtnis im
+        Bot-Frame zum Bildzeitpunkt: die Fahrt seit dem Bild (ein Bild, wenige cm) verschiebt
+        die Punkte vor allem laengs der Wand-Normalen, nicht quer."""
+        reach = [OBSTACLE_WALL_SEARCH_M, OBSTACLE_WALL_SEARCH_M]
+        lane = self._lane
+        if lane is None or lane[1] != ROBOT_FRAME \
+                or time.monotonic() - lane[0] > LANE_MAX_AGE_S:
+            return tuple(reach)
+        pts = lane[2]
+        near = pts[np.abs(pts[:, 0] + OBSTACLE_WALL_BACK_M) <= OBSTACLE_WALL_BAND_M]
+        for i, side in enumerate((near[:, 1], -near[:, 1])):
+            hits = side[side > 0.0]
+            if hits.size:
+                reach[i] = min(OBSTACLE_WALL_SEARCH_M, float(hits.min()) + OBSTACLE_WALL_OVERLAP_M)
+        return tuple(reach)
 
     def _remove_start_wall(self):
         if self._start_wall is None:

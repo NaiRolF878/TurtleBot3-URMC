@@ -4,6 +4,8 @@ check_path legt den Umriss in Pfadrichtung auf den Pfad. Stoesst er an einer Eng
 entscheidet die Gerade mit dem meisten Abstand (passage_line): passt der Bot ausgerichtet
 hindurch, faehrt er vorher im Freien auf ihren Start und dreht sich auf sie; sonst wird die
 Engstelle gesperrt. Keine festen Breiten: es zaehlt nur, ob der Umriss passt.
+
+Dazu Ablaufwerte, die nav2_goal_publisher (Obstacle) und tunnel_explorer_node gleich nutzen.
 """
 import math
 
@@ -43,6 +45,14 @@ BLOCK_POINT_STEP_M = 0.01
 # hoechstens SAME_DIRECTION_DEG anders zeigt (kein Kippen links/rechts um ein Hindernis).
 SAME_DIRECTION_M = 0.3
 SAME_DIRECTION_DEG = 45.0
+# Neuplanung zum selben Ziel im Takt (s); antwortet planner_server so lange (s) nicht, gilt die
+# Anfrage als verloren.
+REPLAN_PERIOD_S = 1.0
+PLAN_TIMEOUT_S = 5.0
+# Liegt der Start einer Engstelle so nah (m), beginnen die Grundbewegungen sofort; Engstellen
+# naeher als SAME_GAP_M (m) sind dieselbe.
+PASSAGE_NEAR_M = 0.10
+SAME_GAP_M = 0.05
 
 FREE = 'frei'
 ALIGN = 'ausrichten'
@@ -58,13 +68,17 @@ def path_headings(path_xy, window):
     return np.arctan2(d[:, 1], d[:, 0])
 
 
-def gap_edges(grid, info_res, origin_xy, point, direction):
-    """Lage einer Engstelle aus ihren Kanten: je Seite des Pfads die Wandzelle naechst point
-    (bis GAP_SEARCH_M). (Mitte, Achse in Pfadrichtung, Breite) oder None. Die Achse steht
-    senkrecht auf der Verbindung der Kanten, auch wenn der Pfad schraeg hindurchfuehrt. Breite
-    von Zellmitte zu Zellmitte: die Wandflaeche liegt im Mittel dort."""
+def wall_cells(grid, info_res, origin_xy):
+    """Mitten (N, 2) aller belegten Zellen."""
     rows, cols = np.nonzero(grid == LETHAL_COST)
-    cells = np.asarray(origin_xy) + (np.column_stack([cols, rows]) + 0.5) * info_res
+    return np.asarray(origin_xy) + (np.column_stack([cols, rows]) + 0.5) * info_res
+
+
+def gap_edges(cells, info_res, point, direction):
+    """Lage einer Engstelle aus ihren Kanten: je Seite des Pfads die Wandzelle (cells, aus
+    wall_cells) naechst point (bis GAP_SEARCH_M). (Mitte, Achse in Pfadrichtung, Breite) oder
+    None. Die Achse steht senkrecht auf der Verbindung der Kanten, auch wenn der Pfad schraeg
+    hindurchfuehrt. Breite von Zellmitte zu Zellmitte: die Wandflaeche liegt im Mittel dort."""
     rel = cells - np.asarray(point)
     dist = np.hypot(rel[:, 0], rel[:, 1])
     left_of_path = direction[0] * rel[:, 1] - direction[1] * rel[:, 0]
@@ -155,11 +169,32 @@ def passage_line(grid, info_res, origin_xy, center, axis):
     return point + s[before[-1]] * d, point + s_end * d, score
 
 
+def contacts(path_xy, grid, res, origin, robot_xy):
+    """Jede Stelle (Punkt, Fahrtrichtung rad) zwischen CHECK_SKIP_M und CHECK_AHEAD_M voraus, an
+    der der Umriss in Pfadrichtung eine belegte Zelle beruehrt, der Reihe nach."""
+    path_xy = np.asarray(path_xy, dtype=np.float64)
+    if len(path_xy) < 2:
+        return
+    start = int(np.argmin(np.hypot(*(path_xy - np.asarray(robot_xy)).T)))
+    ahead = path_xy[start:]
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(ahead, axis=0).T))])
+    headings = path_headings(ahead, HEADING_WINDOW_M)
+    from_bot = np.hypot(*(ahead - np.asarray(robot_xy)).T)
+    for i in np.flatnonzero((from_bot > CHECK_SKIP_M) & (s <= CHECK_AHEAD_M)):
+        if lethal_cells(grid, res, origin, (ahead[i, 0], ahead[i, 1], headings[i])):
+            yield ahead[i], headings[i]
+
+
+def first_contact(path_xy, grid, res, origin, robot_xy):
+    """Erste Stelle aus contacts, None ohne Beruehrung."""
+    return next(contacts(path_xy, grid, res, origin, robot_xy), None)
+
+
 def check_path(path_xy, grid, res, origin, robot_xy):
     """Passt der Bot auf dem Pfad (N, 2) bis CHECK_AHEAD_M voraus?
 
-    (FREE, None): der Umriss stoesst in Pfadrichtung nirgends an, oder nicht an einer Engstelle
-    (dann entscheiden Regler und Waechter).
+    (FREE, None): der Umriss stoesst in Pfadrichtung nirgends an, nur einseitig (z.B. an eine
+    Linie allein), oder nicht an einer Engstelle (dann entscheiden Regler und Waechter).
     (ALIGN, (start, end, center, axis, width)): an einer Engstelle nur ausgerichtet; vorher auf
     start, drehen, gerade bis end.
     (BLOCK, (center, axis, width)): passt auch ausgerichtet nicht hindurch.
@@ -167,19 +202,15 @@ def check_path(path_xy, grid, res, origin, robot_xy):
     path_xy = np.asarray(path_xy, dtype=np.float64)
     if len(path_xy) < 3:
         return FREE, None
-    start = int(np.argmin(np.hypot(*(path_xy - np.asarray(robot_xy)).T)))
-    ahead = path_xy[start:]
-    s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(ahead, axis=0).T))])
-    headings = path_headings(ahead, HEADING_WINDOW_M)
-    from_bot = np.hypot(*(ahead - np.asarray(robot_xy)).T)
-    for i in np.flatnonzero((from_bot > CHECK_SKIP_M) & (s <= CHECK_AHEAD_M)):
-        pose = (ahead[i, 0], ahead[i, 1], headings[i])
-        if not lethal_cells(grid, res, origin, pose):
-            continue
-        direction = np.array([math.cos(headings[i]), math.sin(headings[i])])
-        gap = gap_edges(grid, res, origin, ahead[i], direction)
+    walls = None
+    for point, heading in contacts(path_xy, grid, res, origin, robot_xy):
+        if walls is None:
+            walls = wall_cells(grid, res, origin)
+        gap = gap_edges(walls, res, point, np.array([math.cos(heading), math.sin(heading)]))
         if gap is None:
-            return FREE, None
+            # Nur eine Seite (z.B. eine Linie, an der der Weg entlangfuehrt): weiter vorn kann
+            # die Engstelle liegen, an der der Bot nicht vorbeikommt.
+            continue
         center, axis, width = gap
         line = passage_line(grid, res, origin, center, axis)
         if line is None:
