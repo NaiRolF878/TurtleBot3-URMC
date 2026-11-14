@@ -39,8 +39,8 @@ WALL_POINT_STEP_M = 0.01
 # sofort frei hinter dem Heck liegt (>= WALL_DELAY_M), breit genug fuer beide Spuren samt Linien.
 OBSTACLE_WALL_BACK_M = 0.20
 OBSTACLE_WALL_WIDTH_M = 0.6
-# Beim Verlassen von Obstacle: erst leere Wolke, nach so vielen s beide Costmaps leeren (sonst
-# bleibt die Wand eingetragen; Linien und LiDAR kommen im naechsten Zyklus wieder).
+# Beim Verlassen von Obstacle und Tunnel: erst leere Wolke, nach so vielen s beide Costmaps leeren
+# (sonst bleibt die Wand eingetragen; Linien und LiDAR kommen im naechsten Zyklus wieder).
 COSTMAP_CLEAR_DELAY_S = 0.3
 
 
@@ -52,7 +52,8 @@ class keepout_zone_node(Node):
 
     Gesendet wird sie erst, wenn der Bot WALL_DELAY_M hinter der Tuer ist. Sonst stuende er
     in ihr und Regler und Waechter saehen jede Bewegung als Kollision. Beim Verlassen des Tunnels
-    geht eine leere Wolke hinaus, sonst traegt die entrance_layer die Sperre weiter ein.
+    geht eine leere Wolke hinaus, sonst traegt die entrance_layer die Sperre weiter ein, und
+    COSTMAP_CLEAR_DELAY_S spaeter werden beide Costmaps geleert.
     """
 
     def __init__(self):
@@ -94,6 +95,9 @@ class keepout_zone_node(Node):
                 self._publish_empty()
             self._door = None
             self._wall_active = False
+            if self.control_mode == ControlType.Tunnel:
+                # Eingangssperre und gesperrte Engstellen stehen sonst weiter in den Karten.
+                self.clear_timer.reset()
         if new_mode == ControlType.Tunnel and self.control_mode == ControlType.TunnelEntry:
             self._door = self._door_at_robot('Wechsel TunnelEntry -> Tunnel')
         if new_mode == ControlType.Obstacle and self.control_mode != ControlType.Obstacle:
@@ -132,8 +136,8 @@ class keepout_zone_node(Node):
         self.clear_timer.cancel()
         for name, client in self.clear_clients.items():
             if not client.service_is_ready():
-                self.get_logger().error(f'{name}-Clear-Service nicht erreichbar -- Startsperre '
-                                        'bleibt in der Karte.')
+                self.get_logger().error(f'{name}-Clear-Service nicht erreichbar -- Sperren '
+                                        'bleiben in der Karte.')
                 continue
             client.call_async(ClearEntireCostmap.Request())
 

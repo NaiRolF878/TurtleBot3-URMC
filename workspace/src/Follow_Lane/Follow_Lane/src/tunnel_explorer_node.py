@@ -18,7 +18,8 @@ import rclpy
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
 from nav2_msgs.action import ComputePathToPose
 from nav_msgs.msg import OccupancyGrid, Path
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -34,7 +35,8 @@ from Follow_Lane.src import passage_geometry as pg
 from Follow_Lane.src import tunnel_geometry as geo
 from Follow_Lane.src.mission_log import MissionLog, scan_record
 from Follow_Lane.src.common import (
-    ControlType, control_mode_from_msg, path_blocked, pose2d_from_transform, run_node)
+    ControlType, control_mode_from_msg, path_blocked, pose2d_from_transform, require_params,
+    run_node)
 
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
@@ -69,18 +71,15 @@ UNWEDGE_MAX = 2
 # Tunnel-Uhr: Reglement 60 s fuer die Ausfahrt. Ab TUNNEL_HURRY_S zaehlt bei der Zielwahl nur
 # noch die Naehe, nicht mehr der Gewinn.
 TUNNEL_HURRY_S = 40.0
-# Reglerwerte im Tunnel, beim Verlassen zurueck auf NORMAL (= nav2_params.yaml): lockerer
-# Fortschritt (Mindestweg m in Sekunden) und langsamer zwischen den engen Waenden.
-TUNNEL_CONTROLLER = {
-    'progress_checker.required_movement_radius': 0.05,
-    'progress_checker.movement_time_allowance': 6.0,
-    'FollowPath.desired_linear_vel': 0.10,
-}
-NORMAL_CONTROLLER = {
-    'progress_checker.required_movement_radius': 0.1,
-    'progress_checker.movement_time_allowance': 3.0,
-    'FollowPath.desired_linear_vel': 0.12,
-}
+# Reglerwerte des controller_server, die im Tunnel anders sind. Die Tunnelwerte stehen in
+# nav2_params.yaml unter tunnel_explorer_node (TUNNEL_PREFIX + Name), die normalen unter
+# controller_server: beim Eintritt gelesen und beim Verlassen zurueckgeschrieben.
+CONTROLLER_PARAMS = (
+    'progress_checker.required_movement_radius',
+    'progress_checker.movement_time_allowance',
+    'FollowPath.desired_linear_vel',
+)
+TUNNEL_PREFIX = 'tunnel_controller.'
 # Fahrtprotokoll: Verzeichnis aus dieser Umgebungsvariable (launchers/nav2_obstacle.sh).
 LOG_DIR_ENV = 'TUNNEL_LOG_DIR'
 
@@ -103,8 +102,8 @@ class tunnel_explorer_node(Node):
     Die Tuer wird nur einmal je Tunnelfahrt gesucht und bleibt danach fest, auch wenn das
     Ziel dahinter scheitert.
 
-    Im Tunnel faehrt der Regler langsamer und prueft den Fortschritt lockerer
-    (TUNNEL_CONTROLLER); ausserhalb gilt wieder nav2_params.yaml (NORMAL_CONTROLLER).
+    Im Tunnel gelten fuer CONTROLLER_PARAMS die Tunnelwerte aus nav2_params.yaml; die Werte des
+    controller_server davor werden beim Eintritt gelesen und beim Verlassen zurueckgeschrieben.
 
     Zielwahl in fester Reihenfolge: (1) Strahlen durch die Huelle nach aussen zeigen auf eine
     Oeffnung, nicht die am Eingang. (2) Frontier in der Huelle mit Unbekanntem an der Wand
@@ -119,7 +118,8 @@ class tunnel_explorer_node(Node):
     gar nicht oder ist die Durchfahrt dort gescheitert, wird die Engstelle gesperrt
     (/nav2/blocked, entrance_layer beider Karten) bis zum Ende der Tunnelfahrt oder Taste L.
 
-    Abbruch des Reglers: bei Kollisionsgefahr freifahren (hoechstens UNWEDGE_MAX je Ziel), sonst
+    Abbruch des Reglers: bei Kollisionsgefahr freifahren, zuerst zur Wegrichtung (hoechstens
+    UNWEDGE_MAX je Ziel), sonst
     einmal neu planen; danach gilt das Ziel als gescheitert. Ein Ziel wechselt bei Ankunft, wenn
     es unerreichbar wird oder wenn eine Oeffnung auftaucht. Zum selben Ziel wird im Takt
     REPLAN_PERIOD_S neu geplant, der neue Pfad gilt aber nur bei gleicher Richtung.
@@ -127,6 +127,12 @@ class tunnel_explorer_node(Node):
 
     def __init__(self):
         super().__init__('tunnel_explorer_node')
+
+        # Werte nur in nav2_params.yaml (Block tunnel_explorer_node).
+        self._tunnel_names = [TUNNEL_PREFIX + name for name in CONTROLLER_PARAMS]
+        for name in self._tunnel_names:
+            self.declare_parameter(name, Parameter.Type.DOUBLE)
+        require_params(self, self._tunnel_names)
 
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.sub_control_mode = self.create_subscription(
@@ -156,6 +162,7 @@ class tunnel_explorer_node(Node):
         self.pub_request = self.create_publisher(ManeuverRequest, '/control/maneuver_request', 1)
         self.plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
         self.controller_params = self.create_client(SetParameters, '/controller_server/set_parameters')
+        self.controller_get = self.create_client(GetParameters, '/controller_server/get_parameters')
 
         self.timer = self.create_timer(TICK_S, self.cb_timer)
 
@@ -166,6 +173,8 @@ class tunnel_explorer_node(Node):
         self.latest_scan = None
         self._saw_lines = False
         self._log = None
+        # Werte des controller_server vor dem Tunnel; bleibt, bis das Zurueckschreiben klappt.
+        self._normal_controller = None
         self._reset()
 
         self.get_logger().info('Started tunnel_explorer_node Node.')
@@ -183,10 +192,10 @@ class tunnel_explorer_node(Node):
             self.latest_costmap = None
             self._tunnel_since = time.monotonic()
             self._phase = ENTERING if self._saw_lines else EXPLORING
-            self._set_controller_params(TUNNEL_CONTROLLER, 'Tunnel')
+            self._enter_tunnel_controller()
             self._open_log()
         elif self.control_mode == ControlType.Tunnel:
-            self._set_controller_params(NORMAL_CONTROLLER, 'normal')
+            self._leave_tunnel_controller()
             self._close_log(f'Modus {new_mode.name}')
             # Leere Wolke: die entrance_layer tragen sonst die Sperren weiter ein.
             self._blocked = []
@@ -668,6 +677,9 @@ class tunnel_explorer_node(Node):
         msg = ManeuverRequest(type=kind)
         if kind == ManeuverRequest.PASSAGE:
             msg.path = self._path_msg(self._pending_passage[:2])
+        elif kind == ManeuverRequest.UNWEDGE and self._path is not None:
+            # Wie in Obstacle: zuerst auf der Stelle zum Weg drehen, wenn das frei ist.
+            msg.path = self._path
         self._waiting_for = kind
         self._event('maneuver', maneuver=int(kind))
         self.pub_request.publish(msg)
@@ -732,7 +744,50 @@ class tunnel_explorer_node(Node):
 
     # --- Hilfsmethoden ---
 
-    def _set_controller_params(self, values, label):
+    def _enter_tunnel_controller(self):
+        """Werte des controller_server merken, dann die Tunnelwerte setzen. Ohne gemerkte Werte
+        keine Tunnelwerte, sonst kaeme der Regler nicht zurueck."""
+        if self._normal_controller is not None:
+            # Das letzte Zurueckschreiben ist gescheitert: der Regler hat noch die Tunnelwerte.
+            self._set_tunnel_values()
+            return
+        if not self.controller_get.service_is_ready():
+            self.get_logger().warn('controller_server/get_parameters nicht erreichbar -- Tunnel '
+                                   'faehrt mit den normalen Reglerwerten.')
+            return
+
+        def done(future):
+            res = future.result()
+            if res is None or len(res.values) != len(CONTROLLER_PARAMS) \
+                    or any(v.type != ParameterType.PARAMETER_DOUBLE for v in res.values):
+                self.get_logger().warn('Reglerwerte des controller_server nicht lesbar -- Tunnel '
+                                       'faehrt mit den normalen Werten.')
+                return
+            if self.control_mode != ControlType.Tunnel:
+                return          # Tunnel schon wieder verlassen
+            self._normal_controller = {name: v.double_value
+                                       for name, v in zip(CONTROLLER_PARAMS, res.values)}
+            self._set_tunnel_values()
+
+        req = GetParameters.Request(names=list(CONTROLLER_PARAMS))
+        self.controller_get.call_async(req).add_done_callback(done)
+
+    def _set_tunnel_values(self):
+        self._set_controller_params(
+            {name: self.get_parameter(TUNNEL_PREFIX + name).value for name in CONTROLLER_PARAMS},
+            'Tunnel')
+
+    def _leave_tunnel_controller(self):
+        """Die beim Eintritt gemerkten Werte zurueckschreiben."""
+        if self._normal_controller is None:
+            return
+
+        def restored():
+            self._normal_controller = None
+
+        self._set_controller_params(self._normal_controller, 'normal', restored)
+
+    def _set_controller_params(self, values, label, on_success=None):
         """Reglerwerte des controller_server zur Laufzeit umstellen (SimpleProgressChecker
         und RPP nehmen sie dynamisch an; Humble kennt nur einen progress_checker)."""
         if not self.controller_params.service_is_ready():
@@ -751,6 +806,8 @@ class tunnel_explorer_node(Node):
                 self.get_logger().warn(f'Reglerwerte ({label}) nicht gesetzt: {reasons}')
             else:
                 self.get_logger().info(f'Reglerwerte {label}: {text}.')
+                if on_success is not None:
+                    on_success()
 
         self.controller_params.call_async(req).add_done_callback(done)
 

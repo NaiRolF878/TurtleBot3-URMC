@@ -188,7 +188,7 @@ gescheitert ist (`/nav2/blocked`: im Tunnel von `tunnel_explorer_node`, in Obsta
 |---|---|---|
 | Kollisionsprüfung | RPP (`use_collision_detection`), Wächter, Pfadprüfung: Umriss | – (NavFn: Kreis über die Inflation) |
 | `footprint_padding` | 0.0 | 0.01 |
-| `inflation_radius` | 0.13 m | 0.25 m |
+| `inflation_radius` | 0.13 m | 0.20 m |
 | `cost_scaling_factor` | 20.0 | 10.0 |
 
 ### Das Prinzip
@@ -215,10 +215,11 @@ denen die Bot-Mitte direkt neben einer Linie liegt.
 ### `inflation_radius` und `cost_scaling_factor`
 - **Was sie bewirken:** Um jede belegte Zelle (LiDAR-Hindernis, Spurlinie,
   Enclosure-Wand, Sperre) zieht der `inflation_layer` einen Kostengradienten.
-  - global: 0,25 m (wie HKA), Faktor 10. Nähe ist teuer, mit Abstand wird es schnell billig;
+  - global: 0,20 m, Faktor 10. Nähe ist teuer, mit Abstand wird es schnell billig;
     NavFn bevorzugt die Mitte von Lücken und hält Abstand zu Hindernissen. *Woher:* gewählt;
     mit Faktor 3 war der ganze Saum fast gleich teuer (Kosten 230–247 in jeder Lücke von
-    0,21–0,26 m), und Wege klebten an Hindernissen.
+    0,21–0,26 m), und Wege klebten an Hindernissen. Radius 13.11.: 0,25 (wie HKA) → 0,13 →
+    Wege zu knapp an Hindernissen → 0,20.
   - local: nur zur Anzeige (`nav2_view`); RPP prüft den Umriss direkt gegen belegte Zellen,
     `use_cost_regulated_linear_velocity_scaling` ist aus.
 - **Bedingung:** global `inflation_radius` ≥ `robot_radius` + Polster (0,0988 m), sonst warnt
@@ -424,7 +425,7 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
 | `lookahead_dist` / `min_` / `max_` | nav2_params | 0.20 / 0.15 / 0.35 m |
 | `use_collision_detection` | nav2_params | true |
 | `max_allowed_time_to_collision_up_to_carrot` | nav2_params | 1.0 s |
-| `rotate_to_heading_min_angle` / `_angular_vel` | nav2_params | 0.785 rad / 1.2 rad/s |
+| `rotate_to_heading_min_angle` / `_angular_vel` | nav2_params | 0.35 rad (20°) / 1.2 rad/s |
 | `failure_tolerance` | nav2_params (`controller_server`) | 0.3 s |
 | `goal_distance` | Lane_Costmap (`/nav2_goal_publisher`) | 1.0 m (Abstand des Planziels) |
 | `CENTER_PATH_MAX_AGE_S` | `nav2_goal_publisher.py` | 1.0 s |
@@ -435,7 +436,11 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
   (`regulated_linear_scaling_min_radius` 0,9 m, bis 0,05 m/s) und dreht auf der Stelle, wenn der
   Pfad mehr als `rotate_to_heading_min_angle` abweicht. Er weicht nicht aus. *Woher:* gewählt,
   Test 12.11.: kam durch Lücken, an denen MPPI scheiterte. `allow_reversing` geht nicht
-  zusammen mit `use_rotate_to_heading`.
+  zusammen mit `use_rotate_to_heading`. Drehschwelle 20° statt 45° (13.11.: bei 45° bog er
+  schräg auf Hindernisse neben der Spur zu, statt sich erst auszurichten). Im Obstacle-Modus ist
+  der Pfad nicht der rohe NavFn-Weg: `nav2_goal_publisher` legt ihn durch die Mitte von Toren
+  zwischen zwei Hindernissen bzw. schiebt ihn in die Mitte (siehe `Nav2LocalCoastmap_Doku.md`,
+  Abschnitt 6).
 - **`use_collision_detection` / `max_allowed_time_to_collision_up_to_carrot`:** Vor jedem
   Befehl rechnet RPP die Bewegung bis 1 s voraus (höchstens bis zum Zielpunkt) und prüft den
   Umriss gegen belegte Zellen der local_costmap, beim Drehen auf der Stelle die Drehwinkel.
@@ -443,7 +448,7 @@ Rechnung, nicht die Genauigkeit der Extrinsik:
 - **`failure_tolerance`:** So lange sendet `controller_server` bei dieser Meldung Null, erst
   dann bricht er das Ziel ab. Eine einzelne flackernde Zelle beendet die Fahrt nicht.
 - **`lookahead_dist`:** Kürzer schneidet weniger Kurven, länger fährt ruhiger. Im Tunnel
-  bremst `desired_linear_vel` 0,10 (`TUNNEL_CONTROLLER`).
+  bremst `desired_linear_vel` 0,10 (`tunnel_explorer_node.tunnel_controller` in nav2_params).
 - **Ziel im Obstacle-Modus:** ein Punkt `goal_distance` (1,0 m) voraus auf der
   Spurmitte (Abschnitt 4), über ihr Ende (~0,6 m) hinaus in ihrer Richtung
   verlängert, solange sie jünger ist als `CENTER_PATH_MAX_AGE_S` (Empfangszeit,
@@ -501,7 +506,7 @@ belegte Zellen; Konstanten im Code, keine Parameter.
 | `publish_frequency` | global_costmap | 2.0 Hz | gewählt |
 | `required_movement_radius` | progress_checker | 0.1 m (Tunnel 0.05 m) | gewählt |
 | `movement_time_allowance` | progress_checker | 3.0 s (Tunnel 6.0 s) | gewählt |
-| `FollowPath.desired_linear_vel` | im Tunnel | 0.10 m/s | gewählt |
+| `FollowPath.desired_linear_vel` | im Tunnel (`tunnel_controller`) | 0.10 m/s | gewählt |
 | `xy_goal_tolerance` | goal_checker | 0.15 m | nicht dokumentiert |
 | `yaw_goal_tolerance` | goal_checker | 3.15 rad | gewählt |
 
@@ -515,8 +520,10 @@ belegte Zellen; Konstanten im Code, keine Parameter.
 - **`movement_time_allowance` / `required_movement_radius`:** Bewegt sich der
   Bot 3 s lang nicht um mindestens 0,1 m, bricht der Regler das Ziel ab, und
   `nav2_goal_publisher` plant neu. Im Tunnel stellt `tunnel_explorer_node` per
-  `SetParameters` auf 0,05 m in 6 s und `desired_linear_vel` 0,10 m/s um
-  (`TUNNEL_CONTROLLER`), beim Verlassen zurück. *Was kaputtgeht:* zu lang, und RPP drückt lange
+  `SetParameters` auf 0,05 m in 6 s und `desired_linear_vel` 0,10 m/s um (Block
+  `tunnel_explorer_node` → `tunnel_controller` in nav2_params, gleiche Namen wie bei
+  `controller_server`). Die Werte davor liest er beim Eintritt vom `controller_server` und
+  schreibt sie beim Verlassen zurück; beide Sätze stehen nur in der YAML. *Was kaputtgeht:* zu lang, und RPP drückt lange
   gegen ein Hindernis; zu kurz im Tunnel, und jedes Kriechen zwischen engen Wänden bricht ab.
 - **`xy_goal_tolerance`:** Ab dieser Entfernung gilt das Ziel als erreicht, und
   das nächste wird gesetzt. Damit endet jedes Segment bei ~0,15 m; den Rest bis zum Start einer

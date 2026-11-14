@@ -419,6 +419,9 @@ class switch_control(Node):
         restored = mode or self._mode_before_tunnel or ControlType.Lane
         self._mode_before_tunnel = None
         self._tunnel_source = ''
+        # Spurgedaechtnis ist im Tunnel geloescht: Obstacle erst wieder mit neuen Linien, wie beim
+        # Start -- sonst zaehlt ohne Linienfilter jede Wand am Ausgang als Hindernis.
+        self._lane_time = None
         self._set_mode(restored, 'Tunnel verlassen')
 
     def _update_obstacle_exit(self, scan):

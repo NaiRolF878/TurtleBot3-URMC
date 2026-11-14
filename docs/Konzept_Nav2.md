@@ -20,7 +20,7 @@ Variante mit Zonenaufteilung für den Obstacle-Modus liegt auf `LDS03-Doku`.
 
 | Modus         | Auslöser (switch_control)                                         | Fahrbefehl (control_driving) |
 |---------------|--------------------------------------------------------------------|------------------------------|
-| `Lane`        | Start, Ende von Obstacle; nach dem Tunnel der Modus davor          | PID auf den Spurfehler       |
+| `Lane`        | Start, Ende von Obstacle, Ausfahrt aus dem Tunnel (von Hand abgebrochen: Modus davor) | PID auf den Spurfehler |
 | `Obstacle`    | LiDAR-Punkt im Kegel voraus näher als `obstacle_trigger_distance`, keine Spurlinie dazwischen | RPP (`/nav2/cmd_vel`); Engstelle, Freifahren: Grundbewegungen |
 | `Align`       | Ende von Obstacle, Bot steht mehr als 15° schräg zur Spur          | auf der Stelle drehen        |
 | `TunnelEntry` | Button im Debugbild oder Tunnelschild                              | PID auf den Spurfehler       |
@@ -58,8 +58,9 @@ Spurerkennung in LAB (detect_lane_nav2) → PID in control_driving. Kalibrierung
 
 **Hindernisse auf der Strecke (Obstacle).** lane_costmap_node merkt sich die gelbe und
 die weiße Spurlinie als virtuelle Wände (verfolgt, Querlinien und helle Flächen
-nicht), NavFn plant zwischen ihnen um das Hindernis herum, RPP fährt den Weg ab und prüft dabei
-den Umriss, auch beim Drehen.
+nicht), NavFn plant zwischen ihnen um das Hindernis herum, nav2_goal_publisher legt den Weg durch
+die Mitte der Lücken zwischen den Hindernissen, RPP fährt ihn ab und prüft dabei den Umriss, auch
+beim Drehen.
 
 **Tunnel (TunnelEntry, Tunnel).** Einfahrt mit Kamera und PID auf der 20-cm-Spur (dort
 passt der Bot für Nav2 nicht zwischen die Spurwände), bis die Linien an der Öffnung
@@ -84,10 +85,14 @@ die Prüfung die Gerade mit dem meisten Abstand zu den Wänden:
 Es gibt keine festen Breiten: Es zählt nur, ob der Umriss passt.
 
 **Abbruch.** Bricht das Ziel wegen Kollisionsgefahr ab (Meldung von RPP oder Wächter länger als
-1 s), fährt der Bot frei: control_driving probiert kleine Bewegungen (5 cm vor oder zurück, 15°
-drehen) gegen die local_costmap und fährt die, nach der er am weitesten von allem weg ist. Gibt es
-keine, bleibt er stehen und meldet das. Andere Abbrüche: neu planen, im Tunnel gilt das Ziel nach
-dem zweiten als gescheitert und wird 15 s gemieden.
+1 s), fährt der Bot frei: control_driving dreht ihn zuerst auf der Stelle zum Weg, wenn das frei
+ist; sonst probiert er kleine Bewegungen (5 cm vor oder zurück, 15° drehen) gegen die local_costmap
+und fährt die, nach der er am weitesten von allem weg ist. Gibt es keine, bleibt er stehen und
+meldet das. In Obstacle fährt er vorher, wenn der Weg frei ist und der Umriss nichts berührt, die
+nächsten 0,5 m des Wegs mit Grundbewegungen genau ab (RPP schneidet an engen Stellen die Kurve).
+Andere Abbrüche: neu planen. Im Tunnel wird höchstens zweimal je Ziel freigefahren und einmal neu
+geplant, danach gilt das Ziel als gescheitert und wird 15 s gemieden (die Tür bleibt fest); in
+Obstacle gibt es keine Grenze.
 
 **Neuplanung.** Zum selben Ziel wird jede Sekunde neu geplant. Der neue Pfad gilt nur, wenn er
 30 cm voraus höchstens 45° anders zeigt oder der alte blockiert ist (kein Kippen links/rechts um
@@ -115,7 +120,8 @@ greifen, per odom in die Zielzone. Eigenes Konzept: `Storage_Retrieval_Konzept.m
 ## Start
 
 ```bash
-bash scripts/tb/launchers/nav2_obstacle.sh   # alles inkl. Nav2, Not-Aus im Vordergrund
+bash scripts/tb/launchers/komplett.sh        # alles: Spurfolge, Kreuzung, Nav2, Storage, alle Buttons
+bash scripts/tb/launchers/nav2_obstacle.sh   # alles inkl. Nav2 ohne Storage, Not-Aus im Vordergrund
 bash scripts/tb/launchers/follow_lane.sh     # nur Spurfolge, ohne Nav2
 bash scripts/tb/launchers/storage.sh         # Storage-Aufgabe, Start per Button im Debugbild
 ```

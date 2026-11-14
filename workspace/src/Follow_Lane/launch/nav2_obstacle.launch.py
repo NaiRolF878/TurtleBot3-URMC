@@ -62,6 +62,7 @@ def generate_launch_description():
         ),
         Node(
             package='Follow_Lane', executable='tunnel_explorer_node', name='tunnel_explorer_node',
+            parameters=[LaunchConfiguration('nav2_params')],
         ),
         # Storage-Detektoren nur mit storage:=true (komplett.sh). Nur ihre Bloecke aus
         # Storage.yaml wirken; der switch_control-Block (initial_mode: Stop) gehoert zu storage.sh.

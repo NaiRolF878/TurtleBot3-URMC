@@ -1,4 +1,4 @@
-# Obstacle- und Tunnel-Modus – offene Punkte (Stand 23.10.2026)
+# Obstacle- und Tunnel-Modus – offene Punkte (Stand 14.11.2026)
 
 Branch `Nav2-Costmap-Fix`. Gesammelt aus den Tests vom 22./23.10. –
 **beobachtet** = am Bot gesehen, **vermutet** = Ursache aus Code/Konfiguration abgeleitet, noch nicht bestätigt.
@@ -27,7 +27,7 @@ In `switch_control`, Werte aus `Parameter/Switch_Control.yaml` (live in rqt änd
 
 | Parameter | Wert | Bedeutung |
 |---|---|---|
-| `obstacle_trigger_distance` | **0,30 m** (Code-Default 0,4) | LiDAR-Punkt im Prüfkegel näher als das → Obstacle, wenn keine Spurlinie dazwischen liegt |
+| `obstacle_trigger_distance` | **0,30 m** | LiDAR-Punkt im Prüfkegel näher als das → Obstacle, wenn keine Spurlinie dazwischen liegt |
 | `obstacle_check_angle_deg` | 45° | halber Öffnungswinkel nach vorn (±45°) |
 | `obstacle_clear_distance` / `OBSTACLE_CLEAR_ANGLE_DEG` | 0,40 m / 135° | Austritt: nichts näher als das im Bereich ±135° (270°, ohne den Keil hinten) |
 | `OBSTACLE_CLEAR_DEBOUNCE_S` | 1,0 s | so lange frei, bevor zurück zu Lane |
@@ -38,7 +38,7 @@ Im Obstacle-Modus plant `planner_server` (NavFn) bei Bedarf einen Weg um die Hin
 Beim Wechsel Lane → Obstacle sendet `control_driving` sofort Null; der Bot steht, bis Nav2 den ersten
 Befehl schickt.
 
-Abstand beim Umfahren selbst: `inflation_radius` der global_costmap (0,25 m, `cost_scaling_factor`
+Abstand beim Umfahren selbst: `inflation_radius` der global_costmap (0,20 m, `cost_scaling_factor`
 10,0); aktuelle Werte in `docs/Nav2_Costmap_Werte.md`, Abschnitt 3.
 
 ### 3. Fahrgeschwindigkeit über dem Limit des Burger – **beobachtet** (Lane-Modus)
@@ -52,9 +52,9 @@ Nav2 (RPP) fährt höchstens `desired_linear_vel` 0,12 m/s (betrifft nur Obstacl
 
 ### 4. Feinere Costmap – **ungetestet**
 
-`local_costmap.resolution` 0,05 → 0,025 m (~4× Zellen). Prüfen, ob `controller_server` die 20 Hz hält
+`local_costmap.resolution` 0,01 m (4 × 4 m, 400 × 400 Zellen). Prüfen, ob `controller_server` die 20 Hz hält
 (Warnung „Control loop missed its desired rate“ in `nav2_view` bzw. `logs/pipeline/nav2_obstacle-latest.log`).
-Zurück: Wert in `nav2_params.yaml` auf 0,05.
+Gröber: Wert in `nav2_params.yaml` erhöhen.
 
 ---
 
@@ -73,18 +73,19 @@ Zurück: Wert in `nav2_params.yaml` auf 0,05.
   Linien, folgt `Tunnel`: Kamera aus, Karten geleert. `tunnel_explorer_node` findet die Tür im Scan und fährt
   hindurch, danach sperrt `keepout_zone_node` sie.
 - Verlassen: automatisch, wenn der ganze Bot außerhalb der Wand-Hülle ist und vorher einmal drin war, oder
-  Knopf/Befehl mit `false`.
+  Knopf/Befehl mit `false`. Automatisch geht es immer zu Lane, von Hand zurück in den Modus davor.
 
-### 6. Beim Betreten werden beide Karten geleert – **so gewollt**, beobachten
+### 6. Beim Betreten und Verlassen werden beide Karten geleert – **so gewollt**, beobachten
 
 `lane_costmap_node` sendet zuerst eine leere Spurwolke und leert 0,3 s später beide Karten. Danach baut
-der LiDAR die Tunnelkarte neu auf. Alles, was vorher über die Umgebung bekannt war, ist dann weg.
+der LiDAR die Tunnelkarte neu auf. Alles, was vorher über die Umgebung bekannt war, ist dann weg. Beim Verlassen leert `keepout_zone_node`
+beide Karten 0,3 s nach der leeren Wolke, damit Eingangssperre und gesperrte Engstellen nicht stehen bleiben.
 
 ### 7. Feinere Tunnelkarte – **ungetestet**
 
-`global_costmap.resolution` 0,05 → 0,025 m (280×280 Zellen).
+`global_costmap.resolution` 0,01 m (7 × 7 m, 700 × 700 Zellen).
 Die Frontier-Mindestgröße rechnet `tunnel_explorer_node` aus Bot-Breite und Zellgröße. Prüfen: Kommt der Pfad
-rechtzeitig, warnt `planner_server`? Zurück: beide Werte zurücksetzen (Kommentar in der YAML).
+rechtzeitig, warnt `planner_server`?
 
 ### 8. Tunnel-Einfahrt: Tür falsch erkannt, wenn der Bot schon im Eingang steht – **offen** (13.11.)
 
