@@ -7,12 +7,27 @@ FROM osrf/ros:humble-desktop-full
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
+# --- Schwere, praktisch nie geaenderte Schichten ZUERST -------------------------------
+# TensorRT laedt ein 3,7-GB-Wheel (ohne Fortschrittsanzeige, "Preparing metadata" wirkt
+# wie haengengeblieben). Es steht deshalb ganz oben in einer eigenen Schicht: Aenderungen
+# an apt-Paketen, Node, Python-Tools usw. weiter unten bauen es NICHT neu.
+# Hier nichts einfuegen oder aendern, ausser TensorRT selbst soll sich aendern.
+# pip fehlt im Basis-Image, daher die Mini-Schicht davor.
+RUN apt-get update && apt-get install -y python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Version fest: .engine-Dateien laufen nur mit der TensorRT-Version, mit der sie gebaut wurden.
+# Laeuft nur mit NVIDIA-GPU im Container (hostRequirements.gpu in devcontainer.json);
+# ohne GPU geht der Import, das Ausfuehren nicht.
+RUN python3 -m pip install --no-cache-dir tensorrt==10.15.1.29
+# ---------------------------------------------------------------------------------------
+
 # Basis-Tools, ROS-Pakete (TurtleBot3/ROBOTIS-Doku, Nav2 inkl. der Plugins aus
 # nav2_params.yaml) und Python-Bibliotheken aus den package.xml
 RUN apt-get update && apt-get install -y \
     python3-colcon-common-extensions \
     python3-rosdep \
-    python3-pip \
+    sudo \
     git \
     wget \
     curl \
@@ -47,23 +62,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# TensorRT fuer YOLO-Modelle (.engine). Laeuft nur mit NVIDIA-GPU im Container
-# (hostRequirements.gpu in devcontainer.json); ohne GPU geht der Import, das Ausfuehren nicht.
-# Version fest: .engine-Dateien laufen nur mit der TensorRT-Version, mit der sie gebaut wurden.
 # cuda-python: GPU-Speicher/Kopien fuer TensorRT (Follow_Lane/src/yolo_trt.py).
 # py-spy: Profiler fuer scripts/tb/measure-load.sh.
 RUN python3 -m pip install --no-cache-dir \
-    tensorrt==10.15.1.29 \
     cuda-python==13.0.3 \
     py-spy==0.4.3
 
 # TurtleBot3-Workspace (frueher im postCreateCommand -> bei jedem Rebuild neu geklont
-# und gebaut). Pfad /root/turtlebot3_ws bleibt, devcontainer.json verweist darauf.
-RUN mkdir -p /root/turtlebot3_ws/src && cd /root/turtlebot3_ws/src \
+# und gebaut). Liegt unter /opt (fuer alle User lesbar), nicht mehr unter /root.
+RUN mkdir -p /opt/turtlebot3_ws/src && cd /opt/turtlebot3_ws/src \
     && git clone --depth 1 -b humble https://github.com/ROBOTIS-GIT/DynamixelSDK.git \
     && git clone --depth 1 -b humble https://github.com/ROBOTIS-GIT/turtlebot3_msgs.git \
     && git clone --depth 1 -b humble https://github.com/ROBOTIS-GIT/turtlebot3.git \
-    && cd /root/turtlebot3_ws \
+    && cd /opt/turtlebot3_ws \
     && source /opt/ros/humble/setup.bash \
     && colcon build --symlink-install
 
@@ -73,6 +84,16 @@ ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc && \
     echo "source /usr/share/gazebo/setup.sh" >> /etc/bash.bashrc && \
-    echo "source /root/turtlebot3_ws/install/setup.bash" >> /etc/bash.bashrc
+    echo "source /opt/turtlebot3_ws/install/setup.bash" >> /etc/bash.bashrc
+
+# Nicht-root-User fuer VS Code (remoteUser in devcontainer.json). Vorher lief alles als
+# root -> Dateien im Repo gehoerten root und waren auf dem Host nicht mehr editierbar.
+# VS Code passt die UID beim Start automatisch an den Host-User an (updateRemoteUserUID).
+# sudo ohne Passwort fuer ip/chronyd/apt im Container. dialout/video/plugdev: /dev-Zugriff.
+RUN groupadd --gid 1000 ros \
+    && useradd --uid 1000 --gid 1000 -m -s /bin/bash ros \
+    && usermod -aG sudo,dialout,video,plugdev ros \
+    && echo "ros ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ros \
+    && chmod 0440 /etc/sudoers.d/ros
 
 WORKDIR /workspace

@@ -6,6 +6,8 @@
 # Warum: Ohne Bot-WLAN hat der Bot kein NTP, seine Uhr laeuft frei weg (gemessen ~5 ms/min).
 # sync-time.sh stellt sie nur einmal; timesyncd fuehrt sie hiermit laufend nach.
 # Der Container laeuft mit --network=host, chronyd ist also direkt unter LAPTOP_LAN_IP erreichbar.
+# Container laeuft als User "ros": ip/chronyd brauchen root -> sudo (ohne Passwort im Container).
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/bot.conf" || exit 1
 CONF="$SCRIPT_DIR/chrony-laptop.conf"
@@ -14,7 +16,7 @@ DROPIN=/etc/systemd/timesyncd.conf.d/urmc-laptop.conf
 
 if [ "$1" = "status" ]; then
     pgrep -x chronyd >/dev/null && echo "Laptop: chronyd laeuft" || echo "Laptop: chronyd laeuft NICHT"
-    chronyc -n clients 2>/dev/null | tail -n +3
+    $SUDO chronyc -n clients 2>/dev/null | tail -n +3
     ssh -o BatchMode=yes "$BOT_USER@$BOT_IP" "timedatectl timesync-status | grep -E 'Server|Offset|Poll|Frequency'"
     exit 0
 fi
@@ -25,7 +27,7 @@ if ! command -v chronyd >/dev/null; then
     exit 1
 fi
 if ! pgrep -x chronyd >/dev/null; then
-    chronyd -x -f "$CONF" && echo "  Zeitserver auf dem Laptop gestartet ($LAPTOP_LAN_IP)."
+    $SUDO chronyd -x -f "$CONF" && echo "  Zeitserver auf dem Laptop gestartet ($LAPTOP_LAN_IP)."
 fi
 
 # --- Bot: Laptop als Zeitquelle (Internet-NTP bleibt Ersatz, falls das Bot-WLAN an ist) ---
