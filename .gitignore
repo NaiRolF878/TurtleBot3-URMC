@@ -60,3 +60,6 @@ misc/
 
 # Von VS Code/Pylance erzeugte Typ-Stubs (z.B. cv2), lokal erzeugbar
 typings/
+
+# RF-DETR-Modelle der Kollegen (.onnx/.engine, zu gross fuers Repo) -- separat verteilen.
+rfdetr/

@@ -101,12 +101,21 @@ FAR_MAX_LANE_WIDTH_M = 0.30
 EXIT_FAR_S = 5.0
 # Schranken-Debugbild (Rohbild) hoechstens so oft (s).
 BARRIER_DEBUG_PERIOD_S = 0.1
-# YOLO (Schilder, andere Bots, Startlinie) auf dem Rohbild: TensorRT-Engine relativ zum
-# Repo-Ordner (muss mit der TensorRT-Version im Container gebaut sein, siehe yolo_trt.py).
-# Ohne Engine oder GPU laeuft der Node ohne YOLO weiter.
-YOLO_ENGINE = 'Yolo/yolo26s_640_data1311/weights/best_trt10.15_fp16.engine'
-YOLO_CONF = 0.25      # Mindest-Konfidenz einer Box
+# Objekterkennung (Schilder, andere Bots, Startlinie) auf dem Rohbild: YOLO oder RF-DETR als
+# TensorRT-Engine, relativ zum Repo-Ordner (muss mit der TensorRT-Version im Container gebaut
+# sein, siehe yolo_trt.py). Parameter 'detector' (YAML oder live per ros2 param set) waehlt
+# einen Kurznamen hieraus, einen Pfad (.engine) oder 'aus' ('off' nur in Anfuehrungszeichen,
+# sonst liest YAML es als false). Ohne Engine oder GPU laeuft der Node ohne Objekterkennung
+# weiter. Gemessen 15.11. (RTX 2080, FP16): yolo640 ~8 ms, rfdetr384 ~6 ms, rfdetr704 ~16 ms.
+DETECTORS = {
+    'yolo640': 'Yolo/yolo26s_640_data1311/weights/best_trt10.15_fp16.engine',
+    'yolo800': 'Yolo/yolo26s_800/weights/best_trt10.15_fp16.engine',
+    'rfdetr384': 'rfdetr/rfdetr-nano_500_trt10.15_fp16.engine',
+    'rfdetr704': 'rfdetr/rfdetr-nano-704_500_trt10.15_fp16.engine',
+}
+YOLO_CONF = 0.25      # Mindest-Konfidenz einer Box (YOLO)
 YOLO_IOU = 0.7        # Ueberlappung, ab der NMS die schwaechere Box derselben Klasse verwirft
+RFDETR_CONF = 0.5     # Mindest-Konfidenz einer Box (RF-DETR, Werte liegen anders als bei YOLO)
 # Aelter (s) darf das Rohbild fuer YOLO nicht sein.
 YOLO_MAX_AGE_S = 0.5
 # Zeitmessung (/detect/timing) so oft (s) senden, jede TIMING_LOG_EVERY-te auch ins Log.
@@ -156,10 +165,17 @@ class detect_lane(Node):
         # Schranke: ab so vielen blauen Pixeln im Suchbereich des Rohbilds gilt sie als da.
         # Die aktuelle Zahl steht im Debugbild, danach einstellen.
         self.declare_parameter('thresh_blue_pixel', Parameter.Type.INTEGER, irange(0, 500000))
+        # Objekterkennung: Kurzname aus DETECTORS, Pfad zu einer .engine oder 'aus'. Live
+        # umschaltbar (ros2 param set /detect_lane detector rfdetr384), laedt dann neu (~1 s).
+        self.declare_parameter('detector', Parameter.Type.STRING)
+        # Hoechstens so oft (Hz) laeuft die Objekterkennung, 0 = auf jedem Rohbild. Dazwischen
+        # wird nichts gesendet; die Empfaenger behalten die letzten Boxen (siehe vision_detection).
+        self.declare_parameter('detector_rate_hz', Parameter.Type.DOUBLE, frange(0.0, 60.0))
         self._param_names += ['detection_row_factor', 'min_lane_width',
                               'clahe_clip_limit', 'clahe_tile_grid_size',
-                              'thresh_blue_pixel']
+                              'thresh_blue_pixel', 'detector', 'detector_rate_hz']
         require_params(self, self._param_names)
+        read_params(self, ['detector', 'detector_rate_hz'])
         try:
             self._bev = bev_geometry.load_bev_spec(
                 os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter'))
@@ -227,8 +243,10 @@ class detect_lane(Node):
         # dazu, Zeitpunkt (monotonic); None = keine.
         self._held = None
         self._odom_pose = None
-        self.yolo = self.load_yolo()
+        self._detector_name = self.detector
+        self.yolo = self.load_detector(self.detector)
         self._yolo_times = []    # Dauer je Bild (ms) fuers gedrosselte Log
+        self._detect_last = None   # monotonic des letzten Laufs (detector_rate_hz)
         self._timing = defaultdict(list)   # Messreihe -> Werte seit dem letzten publish_timing
         self._last_arrival = {}            # 'raw'/'bev'/'pid' -> monotonic der letzten Ankunft
         self._timing_count = 0
@@ -236,34 +254,57 @@ class detect_lane(Node):
 
         self.get_logger().info('Started detect_lane Node (Nav2-Zweig).')
 
-    def load_yolo(self):
-        """YoloTRT oder None (keine Engine, keine GPU, falsche TensorRT-Version)."""
-        # Repo-Ordner: vom Install-Ordner des Pakets aufwaerts, bis Yolo/ auftaucht.
-        path = None
+    def load_detector(self, name):
+        """YoloTRT/RfDetrTRT oder None ('aus', keine Engine, keine GPU, falsche
+        TensorRT-Version). name: Kurzname aus DETECTORS oder Pfad relativ zum Repo-Ordner."""
+        if not name or name.lower() in ('aus', 'none', 'off'):
+            self.get_logger().info('Objekterkennung aus (detector: aus).')
+            return None
+        rel = DETECTORS.get(name, name)
+        # Repo-Ordner: vom Install-Ordner des Pakets aufwaerts, bis die Datei auftaucht.
+        path = rel if os.path.isabs(rel) and os.path.isfile(rel) else None
         d = get_package_share_directory('Follow_Lane')
-        while d != os.path.dirname(d):
-            if os.path.isfile(os.path.join(d, YOLO_ENGINE)):
-                path = os.path.join(d, YOLO_ENGINE)
-                break
+        while path is None and d != os.path.dirname(d):
+            if os.path.isfile(os.path.join(d, rel)):
+                path = os.path.join(d, rel)
             d = os.path.dirname(d)
         if path is None:
-            self.get_logger().warn(f'{YOLO_ENGINE} nicht gefunden -- YOLO aus.')
+            self.get_logger().warn(f'{rel} nicht gefunden (Kurznamen: {", ".join(DETECTORS)}) '
+                                   '-- Objekterkennung aus.')
             return None
         try:
             from Follow_Lane.src.yolo_trt import YoloTRT
-            yolo = YoloTRT(path, conf=YOLO_CONF, iou=YOLO_IOU)
+            from Follow_Lane.src.rfdetr_trt import RfDetrTRT
+            if 'rfdetr' in os.path.basename(path).lower():
+                model = RfDetrTRT(path, conf=RFDETR_CONF)
+            else:
+                model = YoloTRT(path, conf=YOLO_CONF, iou=YOLO_IOU)
         except Exception as e:  # noqa: BLE001 -- ohne GPU/TensorRT laeuft der Rest weiter
-            self.get_logger().warn(f'YOLO nicht ladbar ({e}) -- YOLO aus.')
+            self.get_logger().warn(f'{path} nicht ladbar ({e}) -- Objekterkennung aus.')
             return None
-        self.get_logger().info(f'YOLO geladen: {path} ({len(yolo.names)} Klassen, '
-                               f'Eingang {yolo.in_w}x{yolo.in_h}).')
-        return yolo
+        self.get_logger().info(f'{model.kind} geladen: {path} ({len(model.names)} Klassen, '
+                               f'Eingang {model.in_w}x{model.in_h}).')
+        return model
+
+    def switch_detector(self):
+        """Parameter 'detector' live geaendert -> altes Modell freigeben, neues laden."""
+        if self.detector == self._detector_name:
+            return
+        self._detector_name = self.detector
+        if self.yolo is not None:
+            self.yolo.close()
+        self.yolo = self.load_detector(self.detector)
+        self._yolo_times = []
+        # Boxen des alten Modells nicht stehen lassen.
+        self.publish_detections([])
 
     # --- Callbacks ---
 
     def cbGetRawImage(self, img):
         self.raw_image = img
         self.note_arrival('raw', img.header.stamp)
+        read_params(self, ['detector', 'detector_rate_hz'])
+        self.switch_detector()
         self.detectBarrier()
         self.vision_detection()
 
@@ -960,9 +1001,16 @@ class detect_lane(Node):
         return cv2.merge((clahe.apply(l_channel), a_channel, b_channel))
 
     def vision_detection(self):
-        """YOLO auf dem letzten Rohbild, Boxen auf /detect/objects. Im Tunnel aus
-        (Reglement), wie die Schranke. Gibt die Liste (x0, y0, x1, y1, score, class_id,
-        name) zurueck, None ohne Bild/YOLO."""
+        """Objekterkennung (YOLO/RF-DETR) auf dem letzten Rohbild, Boxen auf /detect/objects.
+        Im Tunnel aus (Reglement), wie die Schranke. Gibt die Liste (x0, y0, x1, y1, score,
+        class_id, name) zurueck, None ohne Bild/Modell oder wenn dieses Bild uebersprungen wird.
+
+        Mit detector_rate_hz > 0 laeuft sie nur auf jedem so-vielten Bild. Fuer die Bilder
+        dazwischen wird NICHTS gesendet (die alten Boxen also nicht wiederholt): die Empfaenger
+        speichern ohnehin die letzte Nachricht (intersection_node bis 1 s alt, debug_view
+        zeichnet sie bis 1 s Abstand zum Rohbild), und switch_control zaehlt fuer die Ziellinie
+        Nachrichten in Folge -- wiederholte Boxen wuerden dort als neue Bestaetigung zaehlen.
+        Header-Stempel = Bild, auf dem die Boxen gefunden wurden."""
         if self.yolo is None or self.raw_image is None \
                 or self.control_mode in (None, ControlType.Tunnel):
             return None
@@ -970,6 +1018,11 @@ class detect_lane(Node):
         age = (self.get_clock().now() - Time.from_msg(self.raw_image.header.stamp)).nanoseconds / 1e9
         if age > YOLO_MAX_AGE_S:
             return None
+        now = time.monotonic()
+        if self.detector_rate_hz > 0.0 and self._detect_last is not None \
+                and now - self._detect_last < 1.0 / self.detector_rate_hz - 0.005:
+            return None
+        self._detect_last = now
         try:
             cv_image = self.bridge.imgmsg_to_cv2(self.raw_image, desired_encoding='bgr8')
             t0 = time.monotonic()
@@ -981,10 +1034,18 @@ class detect_lane(Node):
             return None
         if len(self._yolo_times) >= 100:
             self.get_logger().info(
-                f'YOLO: {np.mean(self._yolo_times):.1f} ms/Bild (Mittel), '
+                f'{self.yolo.kind}: {np.mean(self._yolo_times):.1f} ms/Bild (Mittel), '
                 f'max {np.max(self._yolo_times):.1f} ms')
             self._yolo_times = []
+        self.publish_detections(detections)
+        self._timing['yolo_age_ms'].append(self.age_ms(self.raw_image.header.stamp))
+        return detections
 
+    def publish_detections(self, detections):
+        """Boxen auf /detect/objects und die Start-/Ziellinie auf /detect/start_line,
+        Header = der des letzten Rohbilds."""
+        if self.raw_image is None:
+            return
         out = Detection2DArray()
         out.header = self.raw_image.header
         for x0, y0, x1, y1, score, _, name in detections:
@@ -1004,8 +1065,6 @@ class detect_lane(Node):
         boxes = [v for x0, y0, x1, y1, score, _, name in detections if name == 'start_line'
                  for v in (h - y1, x0 / w, x1 / w)]
         self.pub_start_line.publish(Float32MultiArray(data=[float(v) for v in boxes]))
-        self._timing['yolo_age_ms'].append(self.age_ms(self.raw_image.header.stamp))
-        return detections
 
     # --- Zeitmessung ---
 

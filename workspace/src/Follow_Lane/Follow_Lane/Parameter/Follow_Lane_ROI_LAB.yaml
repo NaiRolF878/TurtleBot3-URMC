@@ -1,6 +1,16 @@
 clahe_clip_limit: 2.0
 clahe_tile_grid_size: 8
 detection_row_factor: 0.85
+# Objekterkennung (Schilder, Bots, Startlinie). Live: ros2 param set /detect_lane detector rfdetr384
+#   yolo640    YOLO, Datensatz 13.11. (Standard)   ~8 ms/Bild
+#   yolo800    YOLO, aelterer Datensatz 02.11.      ~12 ms/Bild
+#   rfdetr384  RF-DETR nano 384 (Kollegen)          ~6 ms/Bild
+#   rfdetr704  RF-DETR nano 704 (Kollegen)          ~16 ms/Bild
+#   aus        keine Objekterkennung (NICHT 'off', das liest YAML als false)
+#   oder Pfad zu einer .engine relativ zum Repo-Ordner; neue Kurznamen: DETECTORS in detect_lane_nav2.py
+detector: yolo640
+# Hoechstens so oft pro Sekunde laeuft die Objekterkennung (Last sparen); 0.0 = auf jedem Kamerabild.
+detector_rate_hz: 0.0
 lab_a_blue_h: 200
 lab_a_blue_l: 127
 lab_a_white_h: 182

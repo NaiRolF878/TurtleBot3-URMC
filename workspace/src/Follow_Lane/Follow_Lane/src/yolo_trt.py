@@ -58,19 +58,27 @@ class _Cuda:
         self._check(cudart.cudaStreamSynchronize(self.stream), 'cudaStreamSynchronize')
 
 
-class YoloTRT:
-    """detect(bgr) -> Liste (x0, y0, x1, y1, score, class_id, name) in Pixeln des
-    uebergebenen Bilds. Nicht threadsicher: immer aus demselben Thread aufrufen."""
+def read_engine_file(engine_path):
+    """Engine-Bytes und Ultralytics-Metadaten (dict, leer ohne). Ultralytics schreibt
+    4 Byte Laenge + JSON-Metadaten vor die Engine."""
+    with open(engine_path, 'rb') as f:
+        data = f.read()
+    n = int.from_bytes(data[:4], 'little')
+    if 0 < n < 100000 and data[4:5] == b'{':
+        try:
+            return data[4 + n:], json.loads(data[4:4 + n])
+        except ValueError:
+            pass
+    return data, {}
 
-    def __init__(self, engine_path, conf=0.25, iou=0.7):
-        self.conf = conf
-        self.iou = iou
+
+class TrtModel:
+    """TensorRT-Engine mit einem Eingang (1, 3, H, W) und festen Ein-/Ausgabepuffern.
+    Nicht threadsicher: immer aus demselben Thread aufrufen."""
+
+    def __init__(self, engine_path):
         self.cuda = _Cuda()
-        self.names = list(CLASS_NAMES)
-
-        with open(engine_path, 'rb') as f:
-            data = f.read()
-        data = self._strip_ultralytics_header(data)
+        data, self.meta = read_engine_file(engine_path)
         self._logger = trt.Logger(trt.Logger.WARNING)
         self._runtime = trt.Runtime(self._logger)
         self.engine = self._runtime.deserialize_cuda_engine(data)
@@ -79,8 +87,8 @@ class YoloTRT:
                                f'Container hat {trt.__version__})')
         self.context = self.engine.create_execution_context()
 
-        # Ein Ein- und ein Ausgang: images (1, 3, H, W), output0 (1, 4 + Klassen, Anker).
         self._buffers = {}
+        self.out_names = []
         for i in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(i)
             shape = tuple(self.engine.get_tensor_shape(name))
@@ -90,26 +98,54 @@ class YoloTRT:
             if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
                 self._in_name = name
             else:
-                self._out_name = name
+                self.out_names.append(name)
             self._buffers[name] = (host, dptr)
         _, _, self.in_h, self.in_w = self._buffers[self._in_name][0].shape
-        n_cls = self._buffers[self._out_name][0].shape[1] - 4
+
+    def output_shape(self, name):
+        return self._buffers[name][0].shape
+
+    def infer(self, chw):
+        """chw: (3, in_h, in_w) float. Gibt {Ausgang: Array ohne Batch-Achse} zurueck
+        (Kopien, der naechste Aufruf ueberschreibt sie nicht)."""
+        host_in, d_in = self._buffers[self._in_name]
+        host_in[0] = chw.astype(host_in.dtype, copy=False)
+        self.cuda.make_current()
+        self.cuda.to_device(d_in, host_in)
+        if not self.context.execute_async_v3(int(self.cuda.stream)):
+            raise RuntimeError('TensorRT execute_async_v3 fehlgeschlagen')
+        for name in self.out_names:
+            host_out, d_out = self._buffers[name]
+            self.cuda.to_host(host_out, d_out)
+        self.cuda.sync()
+        return {name: self._buffers[name][0][0].astype(np.float32) for name in self.out_names}
+
+    def close(self):
+        for _, dptr in self._buffers.values():
+            self.cuda.free(dptr)
+        self._buffers = {}
+
+
+class YoloTRT(TrtModel):
+    """detect(bgr) -> Liste (x0, y0, x1, y1, score, class_id, name) in Pixeln des
+    uebergebenen Bilds. Nicht threadsicher: immer aus demselben Thread aufrufen."""
+
+    kind = 'YOLO'
+
+    def __init__(self, engine_path, conf=0.25, iou=0.7):
+        super().__init__(engine_path)
+        self.conf = conf
+        self.iou = iou
+        # Ein Ein- und ein Ausgang: images (1, 3, H, W), output0 (1, 4 + Klassen, Anker).
+        self._out_name = self.out_names[0]
+        names = self.meta.get('names')
+        if isinstance(names, dict):
+            self.names = [names[k] for k in sorted(names, key=int)]
+        else:
+            self.names = list(CLASS_NAMES)
+        n_cls = self.output_shape(self._out_name)[1] - 4
         if n_cls != len(self.names):
             self.names = [str(i) for i in range(n_cls)]
-
-    def _strip_ultralytics_header(self, data):
-        """Ultralytics schreibt 4 Byte Laenge + JSON-Metadaten vor die Engine."""
-        n = int.from_bytes(data[:4], 'little')
-        if 0 < n < 100000 and data[4:5] == b'{':
-            try:
-                meta = json.loads(data[4:4 + n])
-                names = meta.get('names')
-                if isinstance(names, dict):
-                    self.names = [names[k] for k in sorted(names, key=int)]
-                return data[4 + n:]
-            except ValueError:
-                pass
-        return data
 
     def letterbox(self, img):
         """Seitenverhaeltnis halten, mittig auf (in_h, in_w) auffuellen. Gibt Bild,
@@ -128,18 +164,9 @@ class YoloTRT:
 
     def detect(self, bgr):
         img, r, pad_x, pad_y = self.letterbox(bgr)
-        host_in, d_in = self._buffers[self._in_name]
         # BGR -> RGB, HWC -> CHW, 0..1
-        host_in[0] = (img[:, :, ::-1].transpose(2, 0, 1) / 255.0).astype(host_in.dtype)
-
-        self.cuda.make_current()
-        self.cuda.to_device(d_in, host_in)
-        if not self.context.execute_async_v3(int(self.cuda.stream)):
-            raise RuntimeError('TensorRT execute_async_v3 fehlgeschlagen')
-        host_out, d_out = self._buffers[self._out_name]
-        self.cuda.to_host(host_out, d_out)
-        self.cuda.sync()
-        return self._postprocess(host_out[0].astype(np.float32), r, pad_x, pad_y, bgr.shape)
+        out = self.infer(img[:, :, ::-1].transpose(2, 0, 1) / 255.0)
+        return self._postprocess(out[self._out_name], r, pad_x, pad_y, bgr.shape)
 
     def _postprocess(self, out, r, pad_x, pad_y, shape):
         # out: (4 + Klassen, Anker); Box = Mitte x/y, Breite, Hoehe im Letterbox-Bild,
@@ -172,8 +199,3 @@ class YoloTRT:
             c = int(cls[i])
             result.append((bx0, by0, bx1, by1, float(scores[i]), c, self.names[c]))
         return result
-
-    def close(self):
-        for _, dptr in self._buffers.values():
-            self.cuda.free(dptr)
-        self._buffers = {}

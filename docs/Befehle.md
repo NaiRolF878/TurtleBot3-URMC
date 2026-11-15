@@ -202,9 +202,12 @@ TensorRT-Engines (`.engine`) sind an GPU und TensorRT-Version gebunden: auf dem 
 auf dem sie laufen (z.B. `YOLO('best.pt').export(format='engine')`). Auf dem Pi des Bots gibt es
 kein TensorRT.
 
-### YOLO-Engine bauen (im Container, ohne torch)
+### YOLO-/RF-DETR-Engine bauen (im Container, ohne torch)
 
-Aus der ONNX-Datei mit der TensorRT-Version des Containers (~4 min, FP16):
+Aus der ONNX-Datei mit der TensorRT-Version des Containers (~1-4 min, FP16). Für die
+RF-DETR-Modelle in `rfdetr/` genauso, nur mit deren Dateinamen
+(`rfdetr-nano_500.onnx` -> `rfdetr-nano_500_trt10.15_fp16.engine`, ebenso `rfdetr-nano-704_500`).
+Der Ordner `rfdetr/` ist wie `Yolo/` nicht im Repo (zu groß) und wird separat verteilt.
 
 ```bash
 cd Yolo/yolo26s_800/weights
@@ -217,7 +220,28 @@ c = b.create_builder_config(); c.set_flag(trt.BuilderFlag.FP16)
 open('best_trt10.15_fp16.engine', 'wb').write(b.build_serialized_network(net, c))"
 ```
 
-`detect_lane_nav2` lädt `YOLO_ENGINE` (Konstante oben in der Datei, relativ zum Repo-Ordner) und
+`detect_lane_nav2` lädt das Modell aus dem Parameter `detector` (`Follow_Lane_ROI_LAB.yaml`) und
 sendet die Boxen auf `/detect/objects` (vision_msgs/Detection2DArray, Pixel im Rohbild). Die
-Rohbild-Ansicht `/lokal/debug_view_raw` zeichnet sie ein. Ohne Engine/GPU läuft der Node ohne YOLO
-(Warnung im Log).
+Rohbild-Ansicht `/lokal/debug_view_raw` zeichnet sie ein. Ohne Engine/GPU läuft der Node ohne
+Objekterkennung (Warnung im Log).
+
+### Objekterkennung umschalten und drosseln
+
+Zwei Parameter in `Follow_Lane_ROI_LAB.yaml`. Beide lassen sich auch während der Fahrt ändern, live oder in rqt:
+
+| Parameter | Werte |
+|---|---|
+| `detector` | `yolo640` (Standard), `yolo800`, `rfdetr384`, `rfdetr704`, ein Pfad zu einer `.engine` oder `aus` |
+| `detector_rate_hz` | Höchstrate der Erkennung, `0` = auf jedem Kamerabild |
+
+```bash
+ros2 param set /detect_lane detector rfdetr384     # Modell wechseln (lädt in ~1 s neu)
+ros2 param set /detect_lane detector_rate_hz 5.0   # höchstens 5x pro Sekunde
+ros2 param set /detect_lane detector aus           # ganz aus
+```
+
+Bilder zwischen zwei Läufen bekommen keine neue Nachricht. Die Empfänger merken sich die letzten
+Boxen selbst: `intersection_node` nutzt sie bis 1 s, `debug_view` zeichnet sie bis 1 s Abstand.
+Unter 1 Hz verschwinden die Boxen also zeitweise. Die Ziellinie (`switch_control`) braucht 3
+Erkennungen in Folge. Bei 5 Hz dauert das 0,6 s statt 0,2 s, und der Bot fährt dabei weiter.
+Gemessen (RTX 2080, FP16): `yolo640` ~8 ms, `rfdetr384` ~6 ms, `rfdetr704` ~16 ms pro Bild.

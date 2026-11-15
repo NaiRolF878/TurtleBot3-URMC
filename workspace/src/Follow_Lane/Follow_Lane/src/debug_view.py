@@ -78,8 +78,10 @@ MODE_COLOR = {
 
 TUNNEL_MODES = (ControlType.TunnelEntry, ControlType.Tunnel)
 
-# YOLO-Boxen nur zeichnen, wenn sie hoechstens so viel (s) vom Rohbild abweichen.
-OBJECTS_MAX_DT_S = 0.3
+# YOLO-/RF-DETR-Boxen nur zeichnen, wenn sie hoechstens so viel (s) vom Rohbild abweichen.
+# Mit detector_rate_hz (detect_lane) stammen sie bis zu 1/Rate aus einem frueheren Bild;
+# 1 s deckt Raten ab 1 Hz ab.
+OBJECTS_MAX_DT_S = 1.0
 # Farbe (BGR) je YOLO-Klasse, unbekannte grau.
 OBJECT_COLOR = {
     'tb':         (255, 80, 0),      # blau
