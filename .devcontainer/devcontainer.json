@@ -6,11 +6,9 @@
     "dockerfile": "Dockerfile",
     "options": ["--tag=turtlebot3-urmc:humble"]
   },
-  // Node.js fuer die Hooks des Claude-Code-Plugins ponytail (.claude/settings.json).
-  // Nicht per apt: Ubuntu 22.04 liefert nur Node 12.
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": { "version": "lts" }
-  },
+  // Node.js (fuer die ponytail-Hooks) kommt aus dem Dockerfile (NodeSource, Node 22).
+  // KEIN "features"-Block mit node: das Feature installiert Node ein zweites Mal per nvm
+  // und bricht seit dem User "ros" ab (corepack: EACCES auf /usr/bin/pnpm).
   "runArgs": [
     "--network=host",
     "--privileged",
