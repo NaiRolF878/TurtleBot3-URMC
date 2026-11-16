@@ -22,7 +22,7 @@
     # Rohbilds (800x600) liegt. VOR ORT EINSTELLEN: switch_control schreibt den aktuellen Wert
     # ins Log ("Ziellinie im Bild: Unterkante ... px"), Bot an die gewuenschte Haltestelle
     # stellen und den Wert hier eintragen. Groesser = Halt weiter vor der Linie.
-    finish_stop_px: 60.0
+    finish_stop_px: 100.0
     # Starten wir an der Linie? Dann zaehlt sie erst nach finish_arm_distance (m) Fahrt.
     # Standard aus: jede Linie beendet den Lauf.
     start_at_line: false
