@@ -816,11 +816,18 @@ class debug_view(Node):
         # Kreuzung: eine Zeile unter dem Storage-Button (Abstand zur Haltelinie, Phase).
         dist = self.intersection_distance()
         text = 'Kreuzung ' + ('--' if dist is None else f'{dist * 100:.0f} cm')
-        if self.intersection_state and self.intersection_state != 'Frei':
-            text += f' | {self.intersection_state}'
+        # intersection_node haengt die Richtung mit ' | ' an: eigene Zeile darunter.
+        state, _, direction = (self.intersection_state or '').partition(' | ')
+        if state and state != 'Frei':
+            text += f' | {state}'
         ink = MODE_COLOR[ControlType.Intersection] if dist is not None or \
-            (self.intersection_state and self.intersection_state != 'Frei') else (120, 120, 120)
+            (state and state != 'Frei') else (120, 120, 120)
         cv2.putText(panel, text, (8, 433), cv2.FONT_HERSHEY_SIMPLEX, 0.45, ink, 1, cv2.LINE_AA)
+        # Ueber dem Tunnel-Button ist Platz (unter der Kreuzungszeile endet das Panel):
+        # 'frei: links gerade' / 'turn: ...' bzw. 'faehrt: ...'.
+        for i, line in enumerate(direction.split(' / ')[:2] if direction else []):
+            cv2.putText(panel, line, (8, 268 + 16 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.42, ink, 1,
+                        cv2.LINE_AA)
         return panel
 
     def draw_tunnel_button(self, panel):

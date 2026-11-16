@@ -4,3 +4,11 @@ heading_kp: 2.0
 max_cross_distance: 0.9
 min_stop_time: 1.0
 stop_distance: 0.15
+# Richtung an Kreuzungen: geradeaus | links | rechts | auto. Nicht erlaubte Richtung (Linienfarben,
+# s. intersection_node.py) -> die erlaubte; auto = zufaellig unter den erlaubten. Live in rqt.
+turn: geradeaus
+# Abbiegebogen: Zuschlag (m) auf den berechneten Radius (Abstand Haltelinie + Linie + halbe Spur,
+# ~0,25-0,30 m). Negativ = engere Kurve (schneidet die innere Ecke mehr), positiv = weiter. Live in rqt.
+turn_radius_add: 0.0
+# Ab so viel Drehung (Grad) beim Abbiegen uebernimmt der PID die Spur.
+turn_done_deg: 80.0
