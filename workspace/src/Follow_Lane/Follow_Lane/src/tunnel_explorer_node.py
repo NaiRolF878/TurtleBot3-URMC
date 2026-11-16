@@ -1,6 +1,6 @@
 """Faehrt durch die Tuer in den Tunnel, sucht den Ausgang und meldet, wenn der Bot draussen ist.
 
-Ein:  /control/mode, /global_costmap/costmap, /scan_corrected, /detect/lines_lost,
+Ein:  /control/mode, /global_costmap/costmap, /scan_corrected,
       /tunnel/path_result (erreicht / kollision / abgebrochen), /control/maneuver_sequence, TF
 Aus:  /tunnel/explore_path (Path, odom), /tunnel/door (PolygonStamped, odom: Tuerkanten und
       Punkt innen), /tunnel/outside (Bool), /nav2/blocked (PointCloud2, odom: gesperrte
@@ -83,8 +83,7 @@ OPENING = 'Oeffnung'
 
 class tunnel_explorer_node(Node):
     """Einfahrt: die naechste Tuer voraus im Scan, Ziel so weit dahinter, dass der Bot drin ist.
-    Stand beim Moduswechsel gar keine Linie im Bild, ist er schon im Eingang oder im Tunnel und
-    die Einfahrt entfaellt.
+    Jede Tunnelfahrt beginnt mit der Tuersuche (der Bot steht davor).
 
     Die Wand-Huelle waechst aus den Tuerkanten (sonst den naechsten Waenden links und rechts)
     ueber alle damit verbundenen Wandzellen. Raumwaende und freistehende Hindernisse gehoeren
@@ -134,8 +133,6 @@ class tunnel_explorer_node(Node):
             OccupancyGrid, '/global_costmap/costmap', self.cb_costmap, 1)
         self.sub_scan = self.create_subscription(
             LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
-        self.sub_lines_lost = self.create_subscription(
-            Bool, '/detect/lines_lost', self.cb_lines_lost, 1)
         self.sub_path_result = self.create_subscription(
             String, '/tunnel/path_result', self.cb_path_result, 1)
         self.sub_clear_maps = self.create_subscription(
@@ -164,7 +161,6 @@ class tunnel_explorer_node(Node):
         self.control_mode = None
         self.latest_costmap = None
         self.latest_scan = None
-        self._saw_lines = False
         self._log = None
         # Werte des controller_server vor dem Tunnel; bleibt, bis das Zurueckschreiben klappt.
         self._normal_controller = None
@@ -178,13 +174,13 @@ class tunnel_explorer_node(Node):
         new_mode = control_mode_from_msg(self, msg)
         if new_mode is None or new_mode == self.control_mode:
             return
-        if new_mode == ControlType.TunnelEntry:
-            self._saw_lines = False
         if new_mode == ControlType.Tunnel:
             self._reset()
             self.latest_costmap = None
             self._tunnel_since = time.monotonic()
-            self._phase = ENTERING if self._saw_lines else EXPLORING
+            # Immer zuerst die Tuer suchen, wie nach Taste L (16.11.: frueher ohne gesehene
+            # Spurlinie "schon drin" -> Kasten um die Startpose VOR dem Tunnel, nie gefunden).
+            self._phase = ENTERING
             self._enter_tunnel_controller()
             self._open_log()
         elif self.control_mode == ControlType.Tunnel:
@@ -218,10 +214,6 @@ class tunnel_explorer_node(Node):
         self.latest_scan = scan
         if self._log is not None:
             self._log.write('scans', scan_record(scan))
-
-    def cb_lines_lost(self, msg):
-        if not msg.data:
-            self._saw_lines = True
 
     def cb_path_result(self, msg):
         if self.control_mode != ControlType.Tunnel or self._target is None \
