@@ -13,9 +13,9 @@ source "$SCRIPT_DIR/bot.conf" || exit 1
 # Kameraeinstellungen (Aufloesung, Sensormodus, Weissabgleich) stehen in camera.conf.
 source "$SCRIPT_DIR/camera.conf" || exit 1
 
-# Klang am Ende (Dienst /sound, fest in der OpenCR-Firmware -- keine eigenen Melodien):
-# 0 OFF, 1 ON, 2 LOW_BATTERY, 3 ERROR. Leer = kein Klang.
-# 4 BUTTON1 / 5 BUTTON2 werden angenommen, spielen aber nichts.
+# Klang am Ende (Dienst /sound, OpenCR-Firmware): 0 OFF, 1 ON, 2 LOW_BATTERY, 3 ERROR.
+# Leer = kein Klang. 4 BUTTON1 / 5 BUTTON2 spielen nichts. Eigene Firmware (misc/firmware):
+# 6 Diamonds (beim Einschalten), 7 DuckTales Moon (nur per victory.sh 7), 8 Sweet Victory (noch nicht drin).
 SOUND_OK=1
 SOUND_FAIL=3
 
@@ -195,9 +195,10 @@ echo "=== Gegenprobe vom Laptop ==="
 # Der Daemon cacht nach Bot-Neustart oder IP-Wechsel falsch -> hier bewusst --no-daemon.
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
 export ROS_DOMAIN_ID=$BOT_DOMAIN_ID
-# Bis zu 3 Versuche: nach dem Start tauchen nicht alle Topics sofort auf.
+# Bis zu 6 Versuche: nach dem Start tauchen nicht alle Topics sofort auf (Kamera startet zuletzt
+# und braucht einige Sekunden) -- sonst kaeme der Fehlerton, obwohl alles laeuft.
 EXPECTED="/scan /odom /battery_state /camera/image_raw/compressed"
-for attempt in 1 2 3; do
+for attempt in 1 2 3 4 5 6; do
     sleep 3
     TOPICS=$(timeout 25 ros2 topic list --no-daemon 2>/dev/null)
     MISSING=""
@@ -206,7 +207,7 @@ for attempt in 1 2 3; do
     done
     FOUND=$(( 4 - $(wc -w <<< "$MISSING") ))
     [ -z "$MISSING" ] && break
-    [ "$attempt" -lt 3 ] && echo "  Versuch $attempt: $FOUND von 4, fehlt:$MISSING -- warte kurz ..."
+    [ "$attempt" -lt 6 ] && echo "  Versuch $attempt: $FOUND von 4, fehlt:$MISSING -- warte kurz ..."
 done
 echo "  $FOUND von 4 erwarteten Topics sichtbar (scan, odom, battery_state, camera compressed)"
 if [ -n "$MISSING" ]; then
