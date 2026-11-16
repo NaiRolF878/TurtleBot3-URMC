@@ -4,9 +4,11 @@ Ein:  /detect/intersection (PolygonStamped, Kreuzungsfeld in BEV-Pixeln, Stempel
       /detect/objects (YOLO-Boxen im entzerrten Rohbild), /detect/lane_far (fernes Spurpaar),
       /detect/lane_mask (Spurlinien in der BEV: erlaubte Richtungen),
       /control/mode, TF odom -> base_footprint (odom_filter)
+Ein (Bedienung): /intersection/choice (String links|geradeaus|rechts, Button im Debugbild)
 Aus:  /intersection/active (Bool) -> switch_control schaltet Lane <-> Intersection,
       /intersection/cmd_vel (Twist) -> control_driving reicht ihn im Modus Intersection durch,
-      /intersection/state (String) fuers Debugbild
+      /intersection/state (String) fuers Debugbild,
+      /intersection/ask (String: erlaubte Richtungen mit Komma, solange gefragt wird, sonst leer)
 
 Ablauf (Phasen):
   Frei     Kreuzung von detect_lane bestaetigt, Modus Lane                -> Anfahrt
@@ -30,9 +32,11 @@ Jede Strasse ist einspurig, in Fahrtrichtung gelb links, weiss rechts. Daher:
   links erlaubt    naher Rand der Querstrasse links der Einmuendung ist gelb (sie fuehrt nach links)
   rechts erlaubt   naher Rand rechts der Einmuendung ist weiss (sie fuehrt nach rechts)
   geradeaus        vorn liegt keine Linie quer ueber der eigenen Spurbreite
-turn wird genommen, wenn erlaubt; sonst die erlaubte Richtung (mehrere: zufaellig, auto: immer
-zufaellig unter den erlaubten). Ohne frische Maske oder ohne erlaubte Richtung: geradeaus wie
-bisher. Abbiegen = Viertelkreis bis zur Mitte der Querstrasse, dann uebernimmt der PID.
+Prioritaet (turn = geradeaus | links | rechts): 1) turn, wenn erlaubt, 2) geradeaus, wenn erlaubt,
+3) die einzige erlaubte Richtung, 4) mehrdeutig (z. B. links + rechts): fragen -- debug_view zeigt
+Buttons fuer die erlaubten Richtungen (/intersection/ask, Antwort /intersection/choice), nach
+ask_timeout_s ohne Klick zufaellig. turn = auto: immer zufaellig unter den erlaubten. Ohne Messung
+oder ohne erlaubte Richtung: geradeaus wie bisher. Abbiegen = Viertelkreis bis zur Mitte der Querstrasse, dann uebernimmt der PID.
 """
 import math
 from collections import deque
@@ -111,6 +115,7 @@ SAME_LINE_M = 0.25
 
 # --- Richtung ---
 TURNS = ('geradeaus', 'links', 'rechts', 'auto')
+DIRECTIONS = ('links', 'geradeaus', 'rechts')      # Reihenfolge fuer Anzeige und Buttons
 # Spurmaske: Punkte im 2,5-mm-Raster (LANE_MASK_STRIDE 2 bei 1,25 mm/px) -> Flaeche je Punkt.
 MASK_CELL_CM2 = 0.25 ** 2
 # Bereiche (m) relativ zur Haltelinie (x_line) und den Ecken (Innenkanten gelb/weiss):
@@ -121,8 +126,9 @@ SIDE_Y_NEAR, SIDE_Y_FAR = 0.09, 0.30
 AHEAD_X = (0.10, 0.45)
 AHEAD_INSET = 0.03
 # Ab so viel Linienflaeche (cm2) zaehlt ein Bereich als markiert; die Farbe muss so oft
-# ueberwiegen. Live an der T-Kreuzung 16.11.: Rand 28-75 cm2, Querlinie vorn 51 cm2, sonst 0.
-MIN_LINE_CM2 = 10.0
+# ueberwiegen. Live 16.11.: Rand links 28-75 cm2, rechts nur 9-28 (Fischaugen-Rand, Bot steht
+# links in der Spur), Querlinie vorn 51-69 cm2, leere Bereiche 0-3.
+MIN_LINE_CM2 = 5.0
 COLOR_RATIO = 2.0
 # Messen nur, solange die Haltelinie so weit (m, ab Radachse) voraus liegt: bei 15 cm (Halt) liegen
 # die Querraender schon ausserhalb des Bilds (16.11.: 0-9 cm2 statt 28-75 bei 24 cm).
@@ -168,9 +174,11 @@ class intersection_node(Node):
         # engere Kurve; ab so viel Drehung (Grad) uebernimmt der PID.
         self.declare_parameter('turn_radius_add', Parameter.Type.DOUBLE, frange(-0.20, 0.30))
         self.declare_parameter('turn_done_deg', Parameter.Type.DOUBLE, frange(30.0, 120.0))
+        # Mehrdeutige Kreuzung: so lange (s) auf einen Klick im Debugbild warten, dann zufaellig.
+        self.declare_parameter('ask_timeout_s', Parameter.Type.DOUBLE, frange(0.0, 300.0))
         self._param_names = ['stop_distance', 'min_stop_time', 'cross_speed', 'heading_kp',
                              'far_kp', 'max_cross_distance', 'turn', 'turn_radius_add',
-                             'turn_done_deg']
+                             'turn_done_deg', 'ask_timeout_s']
         require_params(self, self._param_names)
         read_params(self, self._param_names)
 
@@ -192,11 +200,14 @@ class intersection_node(Node):
             Float64MultiArray, '/detect/lane_far', self.cb_lane_far, 1)
         self.sub_lane_mask = self.create_subscription(
             LaneMask, '/detect/lane_mask', self.cb_lane_mask, 1)
+        self.sub_choice = self.create_subscription(
+            String, '/intersection/choice', self.cb_choice, 1)
 
         # --- Publisher ---
         self.pub_active = self.create_publisher(Bool, '/intersection/active', 1)
         self.pub_cmd_vel = self.create_publisher(Twist, '/intersection/cmd_vel', 1)
         self.pub_state = self.create_publisher(String, '/intersection/state', 1)
+        self.pub_ask = self.create_publisher(String, '/intersection/ask', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(1.0 / RATE_HZ, self.cb_timer)
@@ -228,7 +239,9 @@ class intersection_node(Node):
         self._direction = 'geradeaus'
         self._arc = None
         self._votes = None          # {'links'|'rechts'|'vorn': ([gelb...], [weiss...])} je Bild (cm2)
-        self._allowed = None        # zuletzt berechnete erlaubte Richtungen (Anzeige)            # Abbiegen: (Mittelpunkt (2,), Radius, Vorzeichen +1 links)
+        self._allowed = None        # zuletzt berechnete erlaubte Richtungen (Anzeige)
+        self._ask = None            # Frage laeuft: {'options': [...], 'since': monotonic}
+        self._choice = None         # Antwort aus dem Debugbild            # Abbiegen: (Mittelpunkt (2,), Radius, Vorzeichen +1 links)
         self._stats = None          # Messung einer Querung (_start_stats), Log in _finish
         self._far_ok = deque(maxlen=FAR_CONFIRM)   # lane_error der letzten gueltigen Paare
         self._state = phase
@@ -254,6 +267,15 @@ class intersection_node(Node):
         self._far_time = time.monotonic()
         if self.phase == CROSS and self._stats is not None:
             self._count_far()
+
+    def cb_choice(self, msg):
+        if self._ask is None:
+            return
+        if msg.data in self._ask['options']:
+            self._choice = msg.data
+        else:
+            self.get_logger().warn(f'Antwort "{msg.data}" nicht erlaubt (erlaubt: '
+                                   f'{", ".join(self._ask["options"])}).')
 
     def cb_lane_mask(self, msg):
         stamp = Time.from_msg(msg.header.stamp).nanoseconds
@@ -321,6 +343,7 @@ class intersection_node(Node):
             if driven or time.monotonic() - self._cooldown_since >= COOLDOWN_MAX_S:
                 self._reset(FREE)
         self.pub_active.publish(Bool(data=self.phase in (WAIT, CROSS)))
+        self.pub_ask.publish(String(data=','.join(self._ask['options']) if self._ask else ''))
         self.pub_state.publish(String(data=self._state))
 
     # --- Phasen ---
@@ -354,11 +377,32 @@ class intersection_node(Node):
             return
         if self._last_block is not None and now - self._last_block < CLEAR_DEBOUNCE_S:
             return
+        if self._ask is None:
+            direction = self._choose_direction(pose)
+            if direction is None:
+                self._ask = {'options': [d for d in DIRECTIONS if d in self._allowed],
+                             'since': now}
+                self.get_logger().info(
+                    f'Mehrdeutig ({", ".join(self._ask["options"])}) -- frage im Debugbild, nach '
+                    f'{self.ask_timeout_s:.0f} s ohne Klick zufaellig.')
+                return
+        elif self._choice is not None:
+            direction = self._choice
+            self.get_logger().info(f'Richtung per Klick: {direction}.')
+        elif now - self._ask['since'] >= self.ask_timeout_s:
+            direction = random.choice(self._ask['options'])
+            self.get_logger().info(f'Kein Klick nach {self.ask_timeout_s:.0f} s -- zufaellig '
+                                   f'{direction}.')
+        else:
+            left = self.ask_timeout_s - (now - self._ask['since'])
+            self._state = f'{WAIT}: Frage {left:.0f} s{self._allowed_text()}'
+            return
+        self._ask = None
         self.phase = CROSS
         self._start_pose = pose
         self._yaw_ref = self._crossing_yaw(pose)
         self._start_stats(pose)
-        self._direction = self._choose_direction(pose)
+        self._direction = direction
         if self._direction == 'geradeaus':
             self._arc = None
             self.get_logger().info(
@@ -494,6 +538,15 @@ class intersection_node(Node):
             allowed['rechts'] = f'rechts weiss {right[1]:.0f} cm2'
         if sum(ahead) < MIN_LINE_CM2:
             allowed['geradeaus'] = 'vorn frei'
+        if not allowed:
+            # T-Kreuzung (vorn Querlinie) hat immer einen Ausgang: eine Seite mit eindeutig
+            # FALSCHER Farbe faellt weg, die andere bleibt (16.11.: rechts weiss nur 9 cm2).
+            left_wrong = left[1] >= MIN_LINE_CM2 and left[1] >= COLOR_RATIO * left[0]
+            right_wrong = right[0] >= MIN_LINE_CM2 and right[0] >= COLOR_RATIO * right[1]
+            if left_wrong and not right_wrong:
+                allowed['rechts'] = 'links falsche Farbe (weiss) -- Ausgang rechts'
+            elif right_wrong and not left_wrong:
+                allowed['links'] = 'rechts falsche Farbe (gelb) -- Ausgang links'
         return allowed
 
     def _allowed_directions(self, pose):
@@ -521,10 +574,16 @@ class intersection_node(Node):
             names = {'links': 'links', 'geradeaus': 'gerade', 'rechts': 'rechts'}
             free = 'frei: ' + (' '.join(names[d] for d in ('links', 'geradeaus', 'rechts')
                                         if d in self._allowed) or 'nichts')
-        second = f'faehrt: {chosen}' if chosen else f'turn: {self.turn}'
+        if chosen:
+            second = f'faehrt: {chosen}'
+        elif self._ask is not None:
+            second = 'FRAGE: Button klicken'
+        else:
+            second = f'turn: {self.turn}'
         return f' | {free} / {second}'
 
     def _choose_direction(self, pose):
+        """Richtung nach Prioritaet (Kopf der Datei); None = mehrdeutig, fragen."""
         wanted = self.turn if self.turn in TURNS else 'geradeaus'
         if wanted != self.turn:
             self.get_logger().warn(f'turn "{self.turn}" unbekannt (erlaubt: {", ".join(TURNS)}) '
@@ -537,12 +596,18 @@ class intersection_node(Node):
         if not allowed:
             self.get_logger().warn('Keine erlaubte Richtung erkannt -- geradeaus.')
             return 'geradeaus'
+        self._allowed = allowed
+        if wanted == 'auto':
+            return random.choice(sorted(allowed))
         if wanted in allowed:
             return wanted
-        choice = random.choice(sorted(allowed))
-        why = 'zufaellig' if len(allowed) > 1 else 'einzige erlaubte'
-        if wanted != 'auto':
-            self.get_logger().info(f'turn = {wanted} hier nicht erlaubt -- {choice} ({why}).')
+        if 'geradeaus' in allowed:
+            choice = 'geradeaus'
+        elif len(allowed) == 1:
+            choice = next(iter(allowed))
+        else:
+            return None
+        self.get_logger().info(f'turn = {wanted} hier nicht erlaubt -- {choice}.')
         return choice
 
     def _finish(self, pose, reason):

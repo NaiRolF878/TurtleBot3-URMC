@@ -7,7 +7,10 @@ Ein:  /detect/lane_debug, /control/mode, /control/tunnel_source, /control/cmd_ve
       /control/storage_zones (Zonenmodell, duenner Umriss), TF odom -> base_footprint,
       Klicks aus rqt_image_view
 Aus:  /lokal/debug_view (Image), /control/tunnel_request (Bool, Button),
-      /control/storage_request (Bool, Button)
+      /control/storage_request (Bool, Button), /intersection/choice (String, Richtungs-Button)
+
+Fragt intersection_node an einer mehrdeutigen Kreuzung (/intersection/ask nicht leer), ersetzen
+Buttons fuer die erlaubten Richtungen den Tunnel- und Storage-Button, bis die Frage vorbei ist.
 """
 import datetime as dt
 import json
@@ -200,6 +203,8 @@ class debug_view(Node):
         # Phase von intersection_node (Anfahrt/Halt/Queren) fuers Mode-Panel.
         self.sub_intersection_state = self.create_subscription(
             String, '/intersection/state', self.cb_intersection_state, 1)
+        self.sub_intersection_ask = self.create_subscription(
+            String, '/intersection/ask', self.cb_intersection_ask, 1)
         # Bildalter, Raten, Rechenzeiten (detect_lane) als Tabelle im Kamerabild.
         self.sub_timing = self.create_subscription(String, '/detect/timing', self.cb_timing, 1)
         # Obstacle erlaubt (Taste O / rqt) -- Schild in der Kopfzeile.
@@ -220,6 +225,7 @@ class debug_view(Node):
         self.pub_debug_raw = self.create_publisher(Image, '/lokal/debug_view_raw', 1)
         self.pub_tunnel_request = self.create_publisher(Bool, '/control/tunnel_request', 1)
         self.pub_storage_request = self.create_publisher(Bool, '/control/storage_request', 1)
+        self.pub_intersection_choice = self.create_publisher(String, '/intersection/choice', 1)
 
         # --- Timer ---
         self.timer = self.create_timer(REDRAW_PERIOD_S, self.cb_timer)
@@ -240,6 +246,7 @@ class debug_view(Node):
         self.barrier = False
         self.intersection = None          # bestaetigtes Kreuzungsfeld (N, 2) in BEV-Pixeln
         self.intersection_state = ''      # Phase von intersection_node
+        self.intersection_ask = []        # erlaubte Richtungen, solange intersection_node fragt
         self.timing = None                # letztes /detect/timing (dict)
         self.obstacle_enabled = None      # None = von switch_control noch nichts gehoert
         self._timing_time = None          # monotonic beim Empfang
@@ -319,6 +326,9 @@ class debug_view(Node):
     def cb_intersection_state(self, msg):
         self.intersection_state = msg.data
 
+    def cb_intersection_ask(self, msg):
+        self.intersection_ask = [d for d in msg.data.split(',') if d]
+
     def cb_intersection(self, msg):
         pts = [(p.x, p.y) for p in msg.polygon.points]
         self.intersection = np.array(pts, np.float64) if len(pts) >= 3 else None
@@ -377,6 +387,13 @@ class debug_view(Node):
         if self.control_mode is None:
             return
         buttons = self._buttons.get(view, {})
+        if self.intersection_ask:
+            # Frage an der Kreuzung: die Flaechen gehoeren den Richtungs-Buttons.
+            for slot, direction in zip(('tunnel', 'storage'), self.intersection_ask):
+                if self._inside(buttons.get(slot), point):
+                    self.pub_intersection_choice.publish(String(data=direction))
+                    self.get_logger().info(f'Kreuzung: Richtung {direction} gewaehlt.')
+            return
         # Ausdruecklich Start oder Abbruch, kein Umschalten: ein doppelt gezaehlter
         # Klick darf den Ablauf nicht sofort wieder beenden.
         if self._inside(buttons.get('tunnel'), point):
@@ -811,8 +828,11 @@ class debug_view(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
         self.draw_lane_obstacle_status(panel)
-        self.draw_tunnel_button(panel)
-        self.draw_storage_button(panel)
+        if self.intersection_ask:
+            self.draw_direction_buttons(panel)
+        else:
+            self.draw_tunnel_button(panel)
+            self.draw_storage_button(panel)
         # Kreuzung: eine Zeile unter dem Storage-Button (Abstand zur Haltelinie, Phase).
         dist = self.intersection_distance()
         text = 'Kreuzung ' + ('--' if dist is None else f'{dist * 100:.0f} cm')
@@ -829,6 +849,14 @@ class debug_view(Node):
             cv2.putText(panel, line, (8, 268 + 16 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.42, ink, 1,
                         cv2.LINE_AA)
         return panel
+
+    def draw_direction_buttons(self, panel):
+        """Frage an der Kreuzung: je erlaubter Richtung ein Button (hoechstens zwei, auf den
+        Plaetzen von Tunnel- und Storage-Button)."""
+        labels = {'links': '<- LINKS', 'geradeaus': '^ GERADEAUS', 'rechts': 'RECHTS ->'}
+        for rect, direction in zip((TUNNEL_BUTTON, STORAGE_BUTTON), self.intersection_ask):
+            self.draw_button(panel, rect, labels.get(direction, direction.upper()), False,
+                             MODE_COLOR[ControlType.Intersection])
 
     def draw_tunnel_button(self, panel):
         """Button zum Starten/Abbrechen des Tunnelmodus. Zeigt nur den Modus, springt

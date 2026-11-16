@@ -12,3 +12,6 @@ turn: geradeaus
 turn_radius_add: 0.0
 # Ab so viel Drehung (Grad) beim Abbiegen uebernimmt der PID die Spur.
 turn_done_deg: 80.0
+# Mehrdeutige Kreuzung (mehrere Richtungen erlaubt, geradeaus nicht): so lange (s) auf einen Klick auf
+# die Richtungs-Buttons im Debugbild warten, danach zufaellig. 0 = sofort zufaellig.
+ask_timeout_s: 20.0
