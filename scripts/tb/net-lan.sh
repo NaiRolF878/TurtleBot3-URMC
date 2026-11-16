@@ -11,6 +11,8 @@
 # Laptops oder wenn NetworkManager den Anschluss neu konfiguriert) -- dann einfach erneut "up".
 #
 # Anderes Interface erzwingen: LAN_IFACE=enx... bash net-lan.sh up
+# Container laeuft als User "ros": ip/chronyd brauchen root -> sudo (ohne Passwort im Container).
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/bot.conf" || exit 1
@@ -33,7 +35,7 @@ case "$1" in
         if has_ip; then
             echo "$LAN_IFACE hat schon $LAPTOP_LAN_IP."
         else
-            ip addr add "$LAPTOP_LAN_IP/24" dev "$LAN_IFACE" || exit 1
+            $SUDO ip addr add "$LAPTOP_LAN_IP/24" dev "$LAN_IFACE" || exit 1
             echo "$LAN_IFACE: $LAPTOP_LAN_IP/24 gesetzt."
         fi
         if [ -n "$BOT_LAN_IP" ]; then
@@ -50,12 +52,12 @@ case "$1" in
         ;;
     down)
         if [ -n "$LAN_IFACE" ] && has_ip; then
-            ip addr del "$LAPTOP_LAN_IP/24" dev "$LAN_IFACE" && echo "$LAN_IFACE: $LAPTOP_LAN_IP entfernt."
+            $SUDO ip addr del "$LAPTOP_LAN_IP/24" dev "$LAN_IFACE" && echo "$LAN_IFACE: $LAPTOP_LAN_IP entfernt."
         else
             # auch ohne Kabel aufraeumen, falls die Adresse noch irgendwo haengt
             DEV=$(ip -4 -o addr show | awk -v ip="$LAPTOP_LAN_IP/24" '$4==ip {print $2; exit}')
             if [ -n "$DEV" ]; then
-                ip addr del "$LAPTOP_LAN_IP/24" dev "$DEV" && echo "$DEV: $LAPTOP_LAN_IP entfernt."
+                $SUDO ip addr del "$LAPTOP_LAN_IP/24" dev "$DEV" && echo "$DEV: $LAPTOP_LAN_IP entfernt."
             else
                 echo "$LAPTOP_LAN_IP ist nirgends gesetzt -- nichts zu tun."
             fi
