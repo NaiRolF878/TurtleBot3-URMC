@@ -1,0 +1,23 @@
+# LAB-Farbschwellen fuer detect_lane (Weiss, Gelb, Blau): je Kanal L/A/B untere (_l) und obere (_h) Grenze.
+# Wird zusammen mit Follow_Lane_ROI_LAB.yaml in den Node detect_lane geladen (follow_lane.launch.py).
+# Anderer Farbsatz, z. B. fuer anderes Licht:  ... follow_lane.launch.py lab_params:=/pfad/Lab_Halle.yaml
+# Speichern nach Tunen in rqt:  bash scripts/tb/save-params.sh detect_lane   (teilt automatisch auf)
+#   NICHT der Speichern-Knopf in rqt -- der schreibt alle Parameter von detect_lane in EINE Datei.
+lab_a_blue_h: 200
+lab_a_blue_l: 127
+lab_a_white_h: 182
+lab_a_white_l: 92
+lab_a_yellow_h: 151
+lab_a_yellow_l: 0
+lab_b_blue_h: 110
+lab_b_blue_l: 0
+lab_b_white_h: 138
+lab_b_white_l: 79
+lab_b_yellow_h: 255
+lab_b_yellow_l: 136
+lab_l_blue_h: 255
+lab_l_blue_l: 10
+lab_l_white_h: 255
+lab_l_white_l: 201
+lab_l_yellow_h: 255
+lab_l_yellow_l: 146

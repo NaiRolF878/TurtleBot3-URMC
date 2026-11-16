@@ -7,7 +7,7 @@
 
 /storage_zone_node:
   ros__parameters:
-    # Weiss, CLAHE: von detect_lane (Follow_Lane_ROI_LAB.yaml). Boden: lernt der Node selbst.
+    # Weiss, CLAHE: von detect_lane (Lab_Farben.yaml, Follow_Lane_ROI_LAB.yaml). Boden: lernt der Node selbst.
     # Querlinien ab diesem Abstand (m) von der Bot-Mitte, rechts der gestrichelten Spurlinie.
     side_near_m: 0.14
     # Querlinie: hoechstens so viel Grad von der Querrichtung.

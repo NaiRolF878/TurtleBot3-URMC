@@ -59,7 +59,7 @@ that it computes the **bird's-eye view (BEV)** with a fixed scale in cm (`/lokal
 2. **CLAHE:** contrast equalisation on the lightness channel, so light and shadow don't shift the
    fixed colour thresholds.
 3. **Colour masks in LAB** (not HSV): yellow is recognised by a high B value, white by a high L
-   value with A and B close to 128. The thresholds are in `Follow_Lane_ROI_LAB.yaml`. An erosion
+   value with A and B close to 128. The thresholds are in `Lab_Farben.yaml`. An erosion
    then removes noise, and the bot's own magnet is masked out.
 4. **Find the line edge:** in a band around the search row (`detection_row_factor`, 85 % of the
    image height) a Sobel filter looks for the edge facing the lane. For yellow that is the right edge,
@@ -96,7 +96,7 @@ Calibration: `docs/Kalibrierung_Checkliste.md`.
 
 1. **Region in the undistorted raw image** (not in the BEV — the barrier is above the ground):
    middle third of the width, 10–40 % of the image height.
-2. **Blue mask:** CLAHE, then LAB thresholds for blue (`lab_*_blue_*` in `Follow_Lane_ROI_LAB.yaml`).
+2. **Blue mask:** CLAHE, then LAB thresholds for blue (`lab_*_blue_*` in `Lab_Farben.yaml`).
 3. **Count pixels:** from `thresh_blue_pixel` (15000) on, the barrier counts as present (`/detect/barrier`).
 4. **Debouncing in `switch_control`:** after 3 messages in a row it switches Lane → **Stop**. Once the
    barrier has been gone for 1 s, it goes back to **Lane**.

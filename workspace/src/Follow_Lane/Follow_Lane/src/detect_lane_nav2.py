@@ -136,7 +136,7 @@ class detect_lane(Node):
         super().__init__('detect_lane')
 
         # --- Parameter ---
-        # Werte nur in Follow_Lane_ROI_LAB.yaml.
+        # Werte nur in Lab_Farben.yaml (LAB) bzw. Follow_Lane_ROI_LAB.yaml (Rest).
         byte = irange(0, 255)
         # L = Helligkeit, A = gruen(<128)..rot(>128), B = blau(<128)..gelb(>128); 128 = farblos.
         # Gemessen auf BEV-Bildern nach CLAHE (docs/bev-tests/README.md):

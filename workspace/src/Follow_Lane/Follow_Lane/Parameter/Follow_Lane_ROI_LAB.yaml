@@ -1,3 +1,4 @@
+# detect_lane ohne die LAB-Farbschwellen (die stehen in Lab_Farben.yaml).
 clahe_clip_limit: 2.0
 clahe_tile_grid_size: 8
 detection_row_factor: 0.85
@@ -11,24 +12,6 @@ detection_row_factor: 0.85
 detector: rfdetr704
 # Hoechstens so oft pro Sekunde laeuft die Objekterkennung (Last sparen); 0.0 = auf jedem Kamerabild.
 detector_rate_hz: 10.0
-lab_a_blue_h: 200
-lab_a_blue_l: 127
-lab_a_white_h: 182
-lab_a_white_l: 92
-lab_a_yellow_h: 151
-lab_a_yellow_l: 0
-lab_b_blue_h: 110
-lab_b_blue_l: 0
-lab_b_white_h: 138
-lab_b_white_l: 79
-lab_b_yellow_h: 255
-lab_b_yellow_l: 136
-lab_l_blue_h: 255
-lab_l_blue_l: 10
-lab_l_white_h: 255
-lab_l_white_l: 201
-lab_l_yellow_h: 255
-lab_l_yellow_l: 146
 min_lane_width: 80
 thresh_blue_pixel: 15000
 use_sim_time: false

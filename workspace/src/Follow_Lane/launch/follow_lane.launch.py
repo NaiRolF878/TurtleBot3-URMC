@@ -42,7 +42,9 @@ def load_flat_params(path):
 
 
 def launch_setup(context, *args, **kwargs):
+    # detect_lane aus zwei Dateien: Rest (Detektor, CLAHE, ...) und LAB-Farbschwellen.
     detect_params = load_flat_params(LaunchConfiguration('detect_params').perform(context))
+    detect_params.update(load_flat_params(LaunchConfiguration('lab_params').perform(context)))
     control_params = load_flat_params(LaunchConfiguration('control_params').perform(context))
     switch_params = load_flat_params(LaunchConfiguration('switch_control_params').perform(context))
     intersection_params = load_flat_params(
@@ -95,6 +97,9 @@ def generate_launch_description():
         #   ros2 launch Follow_Lane follow_lane.launch.py detect_params:=/pfad/zur/datei.yaml
         DeclareLaunchArgument('detect_params',
             default_value=os.path.join(PARAM_DIR, 'Follow_Lane_ROI_LAB.yaml')),
+        # LAB-Farbschwellen von detect_lane; anderer Farbsatz: lab_params:=/pfad/Lab_Halle.yaml
+        DeclareLaunchArgument('lab_params',
+            default_value=os.path.join(PARAM_DIR, 'Lab_Farben.yaml')),
         DeclareLaunchArgument('control_params',
             default_value=os.path.join(PARAM_DIR, 'Control_driving_PID_Wide.yaml')),
         DeclareLaunchArgument('switch_control_params',

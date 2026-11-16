@@ -92,9 +92,19 @@ Uhrzeiten im Container und im Debug-Bild sind **UTC** (2 h hinter deutscher Somm
 Parameter dauerhaft machen bzw. laden:
 
 ```bash
-bash scripts/tb/save-params.sh detect_lane     # aktuelle Werte in die Parameterdatei schreiben
-bash scripts/tb/load-params.sh detect_lane     # Datei in den laufenden Node laden
+bash scripts/tb/save-params.sh detect_lane     # lab_* -> Lab_Farben.yaml, Rest -> Follow_Lane_ROI_LAB.yaml (Kommentare bleiben)
+bash scripts/tb/load-params.sh detect_lane     # beide Dateien in den laufenden Node laden
 ```
+
+Eigene LAB-Farbsätze (z. B. je Halle/Licht), liegen in `Parameter/`:
+
+```bash
+bash scripts/tb/save-params.sh lab Lab_Halle.yaml   # nur lab_* von detect_lane in eigene Datei
+bash scripts/tb/load-params.sh lab Lab_Halle.yaml   # Farbsatz live in detect_lane laden
+ros2 launch Follow_Lane follow_lane.launch.py lab_params:=$PWD/workspace/src/Follow_Lane/Follow_Lane/Parameter/Lab_Halle.yaml  # direkt damit starten
+```
+
+Nicht den Speichern-Knopf in rqt nehmen: der schreibt alle Parameter von detect_lane in EINE Datei.
 
 ---
 

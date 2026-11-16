@@ -129,7 +129,7 @@ def require_params(node, names):
         raise SystemExit(1)
 
 
-# Farben gibt es nur einmal: detect_lane haelt sie (Follow_Lane_ROI_LAB.yaml, rqt), andere
+# Farben gibt es nur einmal: detect_lane haelt sie (Lab_Farben.yaml, rqt), andere
 # Nodes lesen sie mit SharedParams mit.
 COLOR_SOURCE = 'detect_lane'
 WHITE_PARAMS = ['lab_l_white_l', 'lab_l_white_h', 'lab_a_white_l', 'lab_a_white_h',

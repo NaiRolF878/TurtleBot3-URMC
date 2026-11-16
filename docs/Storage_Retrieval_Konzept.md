@@ -116,7 +116,7 @@ Die Rueckmeldungen stehen im Log und im Debugbild (`/control/storage_info`).
 heller oder farbiger als der Boden und nicht weiss ist (dunkler zaehlt nicht: Schatten). Den
 Boden lernt er beim Erkunden selbst aus der Spurmitte vor dem Bot (Helligkeit und Farbe mit
 Streuung), es gibt keinen Schwellwert. Weiss und CLAHE kommen von `detect_lane`
-(`Follow_Lane_ROI_LAB.yaml`, live ueber `/parameter_events`), sie gibt es nur einmal; ebenso in
+(`Lab_Farben.yaml` bzw. `Follow_Lane_ROI_LAB.yaml`, live ueber `/parameter_events`), sie gibt es nur einmal; ebenso in
 `storage_sign_node` fuer die Ziffer. Der eigene Magnet (bis 11 cm vor der Achse, +-5 cm) zaehlt
 nie als Palette.
 

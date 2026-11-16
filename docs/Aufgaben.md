@@ -58,7 +58,7 @@ berechnet er die **Vogelperspektive (BEV)** mit festem Maßstab in cm (`/lokal/b
 2. **CLAHE:** Kontrastausgleich auf dem Helligkeitskanal, damit Licht und Schatten die festen
    Farbschwellen nicht verschieben.
 3. **Farbmasken in LAB** (nicht HSV): Gelb erkennt man am hohen B-Wert, Weiß am hohen L-Wert
-   bei A und B nahe 128. Die Schwellen stehen in `Follow_Lane_ROI_LAB.yaml`. Danach entfernt
+   bei A und B nahe 128. Die Schwellen stehen in `Lab_Farben.yaml`. Danach entfernt
    eine Erosion Rauschen, und der eigene Magnet wird ausgeblendet.
 4. **Linienkante suchen:** In einem Band um die Suchzeile (`detection_row_factor`, 85 % der
    Bildhöhe) sucht ein Sobel-Filter die zur Spur zeigende Kante. Bei Gelb ist das die rechte Kante, bei
@@ -95,7 +95,7 @@ Kalibrierung: `docs/Kalibrierung_Checkliste.md`.
 
 1. **Ausschnitt im entzerrten Rohbild** (nicht in der BEV, die Schranke steht ja in der Luft):
    mittleres Drittel der Breite, 10–40 % der Bildhöhe.
-2. **Blaumaske:** CLAHE, dann LAB-Schwellen für Blau (`lab_*_blue_*` in `Follow_Lane_ROI_LAB.yaml`).
+2. **Blaumaske:** CLAHE, dann LAB-Schwellen für Blau (`lab_*_blue_*` in `Lab_Farben.yaml`).
 3. **Pixel zählen:** ab `thresh_blue_pixel` (15000) gilt die Schranke als da (`/detect/barrier`).
 4. **Entprellen in `switch_control`:** Nach 3 Meldungen in Folge schaltet Lane → **Stop**. Ist die
    Schranke 1 s lang weg, geht es zurück zu **Lane**.
