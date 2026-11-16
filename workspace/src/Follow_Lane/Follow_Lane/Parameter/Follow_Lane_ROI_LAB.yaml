@@ -8,9 +8,9 @@ detection_row_factor: 0.85
 #   rfdetr704  RF-DETR nano 704 (Kollegen)          ~16 ms/Bild
 #   aus        keine Objekterkennung (NICHT 'off', das liest YAML als false)
 #   oder Pfad zu einer .engine relativ zum Repo-Ordner; neue Kurznamen: DETECTORS in detect_lane_nav2.py
-detector: yolo640
+detector: rfdetr704
 # Hoechstens so oft pro Sekunde laeuft die Objekterkennung (Last sparen); 0.0 = auf jedem Kamerabild.
-detector_rate_hz: 0.0
+detector_rate_hz: 10.0
 lab_a_blue_h: 200
 lab_a_blue_l: 127
 lab_a_white_h: 182
