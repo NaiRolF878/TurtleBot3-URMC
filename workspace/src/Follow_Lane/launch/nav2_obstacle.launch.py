@@ -38,7 +38,9 @@ def generate_launch_description():
         DeclareLaunchArgument('nav2_params',
             default_value=os.path.join(PARAM_DIR, 'nav2_params.yaml')),
         DeclareLaunchArgument('rviz', default_value='true'),
-        DeclareLaunchArgument('image_view', default_value='true'),
+        DeclareLaunchArgument('image_view', default_value='true'),     # Debugbild
+        DeclareLaunchArgument('params_window', default_value='true'),  # rqt_reconfigure
+        DeclareLaunchArgument('extra_views', default_value='false'),   # Nav2-Draufsicht, Rohbild
         DeclareLaunchArgument('storage', default_value='false'),
         DeclareLaunchArgument('storage_node_params',
             default_value=os.path.join(PARAM_DIR, 'Storage.yaml')),
@@ -98,7 +100,7 @@ def generate_launch_description():
         ),
 
         # Anzeige. Ohne DISPLAY scheitern beide, ohne den Rest mitzureissen --
-        # dann mit rviz:=false image_view:=false starten.
+        # dann mit rviz:=false image_view:=false params_window:=false starten.
         Node(
             package='rviz2', executable='rviz2', name='rviz2',
             arguments=['-d', RVIZ_CONFIG],
@@ -109,16 +111,21 @@ def generate_launch_description():
             arguments=['/lokal/debug_view'],
             condition=IfCondition(LaunchConfiguration('image_view')),
         ),
-        # Zweites Fenster fuer die Nav2-Draufsicht; eigener Name, sonst kollidieren die Knoten.
+        # Parameterfenster (rqt_reconfigure), wie launchers/rqt_params.sh.
+        Node(
+            package='rqt_reconfigure', executable='rqt_reconfigure', name='rqt_params',
+            condition=IfCondition(LaunchConfiguration('params_window')),
+        ),
+        # Zusatzfenster nur auf Wunsch (extra_views:=true): Nav2-Draufsicht und Rohbild mit
+        # Schranken-Maske/Kreuzung. Eigene Namen, sonst kollidieren die Knoten.
         Node(
             package='rqt_image_view', executable='rqt_image_view', name='rqt_nav2_view',
             arguments=['/nav2/view'],
-            condition=IfCondition(LaunchConfiguration('image_view')),
+            condition=IfCondition(LaunchConfiguration('extra_views')),
         ),
-        # Drittes Fenster: Rohbild mit Schranken-Maske und projizierter Kreuzungserkennung.
         Node(
             package='rqt_image_view', executable='rqt_image_view', name='rqt_debug_view_raw',
             arguments=['/lokal/debug_view_raw'],
-            condition=IfCondition(LaunchConfiguration('image_view')),
+            condition=IfCondition(LaunchConfiguration('extra_views')),
         ),
     ])
