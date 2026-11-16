@@ -111,6 +111,12 @@ CENTER_PATH_TOPIC = '/lane/center_path'
 CENTER_PATH_MAX_AGE_S = 1.0
 WATCHDOG_PERIOD_S = 0.5
 
+# Engstellen in Obstacle sperren (/nav2/blocked)? Aus seit 16.11.: die Sperren sammelten sich
+# (Luecken 0,15-0,28 m), mauerten den Bot ein und ueberlebten Taste L. Ohne Sperre faehrt er
+# "zu enge" Wege normal ab; passt es wirklich nicht, halten Regler/Waechter an (Freifahren,
+# neu planen). Der Tunnel sperrt weiter selbst (tunnel_explorer_node).
+OBSTACLE_BLOCK_GAPS = False
+
 # Modi, in denen nav2_goal_publisher selbst ein Ziel setzt und planen laesst.
 PLAN_MODES = (ControlType.Obstacle,)
 ACTIVE_MODES = PLAN_MODES + (ControlType.Tunnel,)
@@ -353,10 +359,16 @@ class nav2_goal_publisher(Node):
         if kind == ManeuverRequest.PASSAGE:
             passage, self._pending_passage = self._pending_passage, None
             if not msg.success and passage is not None:
-                self.get_logger().warn(f'Durchfahrt gescheitert ({msg.reason}) -- Engstelle '
-                                       'gesperrt.')
+                # Gemerkt wird sie immer: dort kein zweites Ausrichten (_drive: ALIGN -> BLOCK,
+                # ohne Sperre -> normal abfahren).
                 self._failed_gaps.append(passage[2])
-                self._block(passage[2], passage[3], passage[4])
+                if OBSTACLE_BLOCK_GAPS:
+                    self.get_logger().warn(f'Durchfahrt gescheitert ({msg.reason}) -- Engstelle '
+                                           'gesperrt.')
+                    self._block(passage[2], passage[3], passage[4])
+                else:
+                    self.get_logger().warn(f'Durchfahrt gescheitert ({msg.reason}) -- dort kein '
+                                           'Ausrichten mehr, keine Sperre.')
         elif kind == ManeuverRequest.UNWEDGE and not msg.success:
             # Freifahren ging nicht: beim naechsten Abbruch wieder genau abfahren versuchen,
             # sonst wechseln sich Abbruch und "kein freier Ausweg" endlos ab.
@@ -541,6 +553,13 @@ class nav2_goal_publisher(Node):
             verdict, info = pg.check_path(points, grid, res, origin, robot[:2])
         if verdict == pg.ALIGN and self._near(info[2], self._failed_gaps):
             verdict, info = pg.BLOCK, info[2:]
+        if verdict == pg.BLOCK and not OBSTACLE_BLOCK_GAPS:
+            self.get_logger().info(f'Engstelle {info[2]:.2f} m laut Pruefung zu eng -- keine Sperre '
+                                   '(OBSTACLE_BLOCK_GAPS aus), faehrt den Weg normal ab.',
+                                   throttle_duration_sec=2.0)
+            self._event('path_check', verdict='frei_statt_sperren', points=len(points),
+                        width=float(info[2]))
+            verdict, info = pg.FREE, None
         self._event('path_check', verdict=verdict, points=len(points))
         self._last_verdict = verdict
         if verdict == pg.BLOCK:
