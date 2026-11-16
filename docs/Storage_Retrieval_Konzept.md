@@ -61,8 +61,8 @@ Das Konzept kommt ohne feste Streckenwerte aus:
 - Die Zonenmitte ergibt sich aus den Zonenlinien.
 - Die Zielzone wird vor dem Start eingegeben.
 - In den YAMLs stehen nur Werte, die vor Ort eingestellt werden: Ablauf in
-  `Parameter/Switch_Control.yaml`, Detektoren in `Parameter/Storage.yaml`, Regler in
-  `Parameter/Control_driving_PID_Wide.yaml`. Alles andere sind Konstanten im Code.
+  `Parameter/follow_lane/Switch_Control.yaml`, Detektoren in `Parameter/storage/Storage.yaml`, Regler in
+  `Parameter/follow_lane/Control_driving_PID_Wide.yaml`. Alles andere sind Konstanten im Code.
 
 ## Ablauf
 
@@ -305,7 +305,7 @@ switch_control --/lokal/magnet_control--> magnet_controll (auf dem Bot, GPIO 17)
 ```
 
 **Start:** `storage.launch.py` (ueber `storage.sh`) startet `follow_lane.launch.py` (mit
-`odom_filter`, der die TF odom -> base_footprint liefert) mit `Parameter/Storage.yaml` und die vier
+`odom_filter`, der die TF odom -> base_footprint liefert) mit `Parameter/storage/Storage.yaml` und die vier
 Storage-Nodes, ohne Nav2. `Storage.yaml` setzt `initial_mode: Stop` fuer switch_control und
 ueberschreibt damit `initial_mode: Lane` aus `Switch_Control.yaml`. Kein Node hat Code-Defaults.
 Die Werte von switch_control (auch die des Storage-Ablaufs) stehen in `Switch_Control.yaml`,

@@ -42,7 +42,7 @@ stehen bei den Aufgaben unten (z. B. Hindernis-Auslöser 0,30 m).*
 
 Kamerabild: 800x600, Weitwinkel. `ingress_node_nav2` entzerrt es (`/lokal/raw_image`). Daraus
 berechnet er die **Vogelperspektive (BEV)** mit festem Maßstab in cm (`/lokal/bev`, Bereich in
-`Parameter/bev.yaml`). Dafür sind Höhe, Neigung und Lage der Kamera vermessen
+`Parameter/nicht_anfassen/bev.yaml`). Dafür sind Höhe, Neigung und Lage der Kamera vermessen
 (`docs/bev-tests/README.md`).
 
 ![Kamerabild der Strecke](aufgaben/kamera_strecke.jpg)

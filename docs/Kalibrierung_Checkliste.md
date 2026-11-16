@@ -20,7 +20,7 @@ der PID die Spur nicht hält, lässt sich Nav2 nicht sinnvoll testen.
       colcon build --symlink-install
       ```
 - [ ] **Kamera unverändert seit der Extrinsik-Messung vom 20.10.** Laut
-      `Parameter/camera_info/extrinsics_800x600.yaml`: Höhe 10,1 cm, Neigung
+      `Parameter/nicht_anfassen/camera_info/extrinsics_800x600.yaml`: Höhe 10,1 cm, Neigung
       38,0°, Roll −1,0°, Yaw 1,4°, Linse 5,79 cm vor der Radachse. Die BEV
       wird daraus gerechnet. Ist die Halterung verstellt, geht es mit Phase 1
       weiter, sonst kann Phase 1 kurz ausfallen.
@@ -46,7 +46,7 @@ der PID die Spur nicht hält, lässt sich Nav2 nicht sinnvoll testen.
       Ablauf und Messwerte: `docs/bev-tests/README.md`, Kurzform in
       `docs/Befehle.md`.
 
-`Parameter/camera_info/ground_homography_800x600.yaml` beschreibt eine
+`Parameter/nicht_anfassen/camera_info/ground_homography_800x600.yaml` beschreibt eine
 Kameramontage mit 12,3 cm Höhe, nicht die aktuelle. Die Pipeline benutzt sie nicht.
 
 ---

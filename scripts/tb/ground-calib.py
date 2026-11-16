@@ -41,7 +41,7 @@ Koordinaten: X vorwaerts ab RADACHSE, Y nach LINKS, beides in cm bei der Eingabe
 4) Ergebnis pruefen:
        python3 scripts/tb/extrinsics-view.py --ground   # Gitter aus DIESEM Fit
 
-Ergebnis: Parameter/camera_info/ground_homography_800x600.yaml
+Ergebnis: Parameter/nicht_anfassen/camera_info/ground_homography_800x600.yaml
 
 --- Wie genau ist es? ---
 Das Skript meldet pro Punkt den Restfehler in mm und zusaetzlich eine
@@ -60,7 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _camera_geometry as cg  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/camera_info')
+PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/nicht_anfassen/camera_info')
 INTRINSICS = os.path.join(PARAM_DIR, 'imx219_800x600.yaml')
 OUTFILE = os.path.join(PARAM_DIR, 'ground_homography_800x600.yaml')
 FRAME = os.path.join(REPO, 'logs', 'kalibrierung', 'ground_calib_frame.png')

@@ -43,7 +43,7 @@ the tasks below (e.g. obstacle trigger 0.30 m).*
 
 Camera image: 800x600, wide angle. `ingress_node_nav2` undistorts it (`/lokal/raw_image`). From
 that it computes the **bird's-eye view (BEV)** with a fixed scale in cm (`/lokal/bev`, area in
-`Parameter/bev.yaml`). For this, the camera's height, tilt and position were measured
+`Parameter/nicht_anfassen/bev.yaml`). For this, the camera's height, tilt and position were measured
 (`docs/bev-tests/README.md`).
 
 ![Camera image of the track](aufgaben/kamera_strecke.jpg)

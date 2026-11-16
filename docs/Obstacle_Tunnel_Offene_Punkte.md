@@ -23,7 +23,7 @@ der Bot fuhr über Linien.
 
 ### 2. Wann der Obstacle-Modus anspringt (Clearance)
 
-In `switch_control`, Werte aus `Parameter/Switch_Control.yaml` (live in rqt änderbar):
+In `switch_control`, Werte aus `Parameter/follow_lane/Switch_Control.yaml` (live in rqt änderbar):
 
 | Parameter | Wert | Bedeutung |
 |---|---|---|

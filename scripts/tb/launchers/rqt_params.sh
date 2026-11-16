@@ -9,7 +9,7 @@ echo "Aenderungen greifen sofort -- beide Nodes lesen ihre Parameter bei jedem F
 echo ""
 echo "Die Datei-Knoepfe in rqt funktionieren -- Parameterdateien liegen im flachen"
 echo "Format vor, das rqt liest und schreibt. Verzeichnis:"
-echo "  workspace/src/Follow_Lane/Follow_Lane/Parameter/"
+echo "  workspace/src/Follow_Lane/Follow_Lane/Parameter/  (follow_lane/, obstacle_tunnel/, storage/)"
 echo ""
 echo "Alternativ im Terminal, ohne Dateidialog:"
 echo "  bash scripts/tb/save-params.sh detect_lane      # sichern"

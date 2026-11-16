@@ -1,7 +1,7 @@
 # Nav2-Costmap-Werte: Herkunft und Abhängigkeiten
 
-Für alle, die einen der Werte in `Parameter/nav2_params.yaml` oder
-`Parameter/Lane_Costmap.yaml` ändern müssen. Zu jedem Wert steht hier, was er
+Für alle, die einen der Werte in `Parameter/obstacle_tunnel/nav2_params.yaml` oder
+`Parameter/obstacle_tunnel/Lane_Costmap.yaml` ändern müssen. Zu jedem Wert steht hier, was er
 bewirkt, woher er kommt und was kaputtgeht, wenn er falsch steht. Viele Werte
 hängen voneinander ab; diese Abhängigkeiten sind als nachrechenbare Regeln
 angegeben.
@@ -267,7 +267,7 @@ bleibt stehen, statt die Spur zu verlassen.
 |---|---|
 | `PIXEL_STRIDE` | 2 |
 | `ROBOT_FRAME` | `base_footprint` |
-| Umrechnung Pixel → Meter | aus `Parameter/bev.yaml` |
+| Umrechnung Pixel → Meter | aus `Parameter/nicht_anfassen/bev.yaml` |
 | `MEMORY_RESOLUTION` / `MEMORY_RADIUS` | 0.01 m / 2.0 m |
 | `line_confirm_frames` / `free_confirm_frames` | 3 / 10 |
 | `SHADOW_RADIUS` / `SHADOW_MARGIN` | 0.03 m / 0.05 m |
@@ -307,9 +307,9 @@ Raster im odom-Frame (`MEMORY_RESOLUTION`, = `resolution` der Costmaps):
 
 Der Node sendet in jedem Modus außer Tunnel. Die Linienpixel stammen aus der
 metrischen Vogelperspektive `/lokal/bev`, die `ingress_node` aus dem Rohbild
-und der vermessenen Extrinsik (`Parameter/camera_info/extrinsics_800x600.yaml`)
+und der vermessenen Extrinsik (`Parameter/nicht_anfassen/camera_info/extrinsics_800x600.yaml`)
 erzeugt. `detect_lane` erkennt die Linien direkt in diesem Bild. In der BEV ist
-die Umrechnung in Meter linear. Sie steht in `Parameter/bev.yaml`, derselben
+die Umrechnung in Meter linear. Sie steht in `Parameter/nicht_anfassen/bev.yaml`, derselben
 Datei, mit der `ingress_node` die BEV baut:
 
 ```

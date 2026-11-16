@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _camera_geometry as cg  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/camera_info')
+PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/nicht_anfassen/camera_info')
 INTRINSICS = os.path.join(PARAM_DIR, 'imx219_800x600.yaml')
 EXTRINSICS = os.path.join(PARAM_DIR, 'extrinsics_800x600.yaml')
 

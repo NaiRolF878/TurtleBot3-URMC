@@ -12,7 +12,7 @@ Gemessen wird /scan (roh, ohne scan_correct): die Strahlen +/- SECTOR_DEG um die
 eine Gerade durch die Wandpunkte. Steht die Wand im Scan schraeg, ist der LiDAR um diesen Winkel
 verdreht (Annahme: der Bot steht rechtwinklig). Der senkrechte Abstand Scanner -> Wand verglichen
 mit dem Linealwert (+ 6,9 cm Scanner -> Vorderkante, laut URDF/FOOTPRINT) ergibt den
-Entfernungsfehler. Ergebnis zum Eintragen in Follow_Lane/Parameter/Scan_Correct.yaml.
+Entfernungsfehler. Ergebnis zum Eintragen in Follow_Lane/Parameter/nicht_anfassen/Scan_Correct.yaml.
 """
 import math
 import sys

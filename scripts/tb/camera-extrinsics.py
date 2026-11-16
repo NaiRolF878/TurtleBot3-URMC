@@ -14,11 +14,11 @@ Warum optisch statt mit dem Zollstock: Der Neigungswinkel laesst sich von Hand k
 auf besser als 2-3 Grad messen, und genau der bestimmt, wohin ferne Bildzeilen auf dem
 Boden abgebildet werden. solvePnP liefert ihn aus der bekannten Brettgeometrie.
 
-Ergebnis geht nach Parameter/camera_info/extrinsics_800x600.yaml und ist die Eingangs-
+Ergebnis geht nach Parameter/nicht_anfassen/camera_info/extrinsics_800x600.yaml und ist die Eingangs-
 groesse fuer die Bodenebenen-Homographie (Schritt 2).
 
 WICHTIG: Diese Homographie ist nur so gut wie die INTRINSIK
-(Parameter/camera_info/imx219_800x600.yaml). Ein daneben liegender Hauptpunkt (cx/cy)
+(Parameter/nicht_anfassen/camera_info/imx219_800x600.yaml). Ein daneben liegender Hauptpunkt (cx/cy)
 oder grosse tangentiale Verzeichnung kippen die Vogelperspektive seitlich -- dann hilft
 keine noch so saubere Extrinsik. Das Skript prueft die Intrinsik beim Start und warnt.
 """
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _camera_geometry as cg  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/camera_info')
+PARAM_DIR = os.path.join(REPO, 'workspace/src/Follow_Lane/Follow_Lane/Parameter/nicht_anfassen/camera_info')
 INTRINSICS = os.path.join(PARAM_DIR, 'imx219_800x600.yaml')
 OUTFILE = os.path.join(PARAM_DIR, 'extrinsics_800x600.yaml')
 PREVIEW_OUT = os.path.join(REPO, 'logs', 'kalibrierung', 'vogelperspektive.png')

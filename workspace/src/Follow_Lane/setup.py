@@ -18,10 +18,13 @@ setup(
             glob(package_name + '/media/Battery/*.png')),
         (os.path.join('share', package_name, 'launch'),
             glob('launch/*.launch.py')),
+        # Im Quellbaum nach Themen sortiert (follow_lane/, obstacle_tunnel/, storage/,
+        # nicht_anfassen/), installiert aber FLACH nach share/Follow_Lane/Parameter/ -- so finden
+        # Launch-Dateien und Nodes alles unter den alten Pfaden. deprecated/ wird nicht installiert.
         (os.path.join('share', package_name, 'Parameter'),
-            glob(package_name + '/Parameter/*.yaml')),
+            [f for f in glob(package_name + '/Parameter/*/*.yaml') if '/deprecated/' not in f]),
         (os.path.join('share', package_name, 'Parameter', 'camera_info'),
-            glob(package_name + '/Parameter/camera_info/*.yaml')),
+            glob(package_name + '/Parameter/nicht_anfassen/camera_info/*.yaml')),
         (os.path.join('share', package_name, 'rviz'),
             glob('rviz/*.rviz')),
     ],
