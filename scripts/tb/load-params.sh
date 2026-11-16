@@ -3,7 +3,7 @@
 #
 # Aufruf: bash load-params.sh <node> [datei.yaml]
 #   bash load-params.sh detect_lane
-#   bash load-params.sh detect_lane Follow_Lane_ROI_PI_CAM3.yaml
+#   bash load-params.sh detect_lane Follow_Lane_ROI_LAB_Halle.yaml
 #
 # Gegenstueck zu save-params.sh. Die Dateien liegen flach vor (name: wert);
 # "ros2 param load" verlangt aber verschachtelt, deshalb wird hier temporaer umgebaut.
@@ -26,8 +26,8 @@ fi
 FILE="$2"
 if [ -z "$FILE" ]; then
     case "$NODE" in
-        detect_lane)     FILE="Follow_Lane_ROI_PI_CAM2.yaml" ;;
-        control_driving) FILE="Control_driving_PID.yaml" ;;
+        detect_lane)     FILE="Follow_Lane_ROI_LAB.yaml" ;;
+        control_driving) FILE="Control_driving_PID_Wide.yaml" ;;
         *) echo "Fuer '$NODE' ist keine Standarddatei hinterlegt, bitte als 2. Argument angeben."; exit 1 ;;
     esac
 fi

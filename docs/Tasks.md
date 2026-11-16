@@ -70,7 +70,7 @@ that it computes the **bird's-eye view (BEV)** with a fixed scale in cm (`/lokal
    column is used.
 6. **Lane error:** the midpoint between the two points is compared with the image centre.
    This gives `lane_error` (-1 … 1, > 0 = lane lies to the left).
-7. **PID** (`control_driving`, `Control_driving_PID.yaml`: kp 3.6 / ki 0.15 / kd 1.7): it sets the
+7. **PID** (`control_driving`, `Control_driving_PID_Wide.yaml`: kp 8.0 / ki 0.15 / kd 1.7): it sets the
    steering. In curves the bot slows down (`speed_curve_factor`), at most `MAX_VEL` 0.15 m/s, and the
    wheel limit is respected.
 

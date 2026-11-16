@@ -69,7 +69,7 @@ berechnet er die **Vogelperspektive (BEV)** mit festem Maßstab in cm (`/lokal/b
    danach eine Ersatzspalte.
 6. **Spurfehler:** Die Mitte zwischen beiden Punkten wird mit der Bildmitte verglichen.
    Das ergibt `lane_error` (-1 … 1, > 0 = Spur liegt links).
-7. **PID** (`control_driving`, `Control_driving_PID.yaml`: kp 3,6 / ki 0,15 / kd 1,7): Er gibt die
+7. **PID** (`control_driving`, `Control_driving_PID_Wide.yaml`: kp 8,0 / ki 0,15 / kd 1,7): Er gibt die
    Lenkung vor. In Kurven fährt der Bot langsamer (`speed_curve_factor`), höchstens `MAX_VEL` 0,15 m/s,
    und die Radgrenze wird eingehalten.
 
