@@ -83,6 +83,18 @@ MIN_CROSS_LEN_M = 0.08
 CLOSE_KERNEL = 11
 # Beide Ecken einer Kreuzung liegen etwa gleich weit voraus (m).
 MAX_CORNER_DX_M = 0.06
+# Einmuendung von der Seite (T-Kreuzung, durchgehende Strasse): nur eine Ecke, die Gegenlinie
+# laeuft mindestens so weit (m) gerade ueber die Hoehe der Ecke hinaus. In einer 90-Grad-Kurve
+# biegt die aeussere Linie erst ~Spurbreite + Linie (~25 cm) nach der inneren Ecke ab, daher
+# 30 cm; pruefbar nur, solange die Ecke hoechstens x_max - 30 cm voraus liegt (sonst warten).
+# Je Zeile Linienpixel in einem Streifen um die Innenkante auf Hoehe der Ecke (senkrecht nach vorn):
+# SIDE_T_TOL_PX (5 cm) zur Spur hin und dahinter Linie + Spiel (SIDE_T_OUT_PX) -- Versaetze an
+# Mattenkanten (1-2 cm) stoeren nicht, eine abbiegende Linie verlaesst den Streifen. In
+# mindestens SIDE_T_ROWS der Zeilen.
+SIDE_T_AHEAD_M = 0.30
+SIDE_T_TOL_PX = 40
+SIDE_T_OUT_PX = 80
+SIDE_T_ROWS = 0.8
 # So viele der letzten Bilder muessen die Kreuzung zeigen, bevor sie als erkannt gilt.
 INTERSECTION_CONFIRM = (3, 5)
 # Bestaetigte Kreuzung so lange (s) halten, wenn sie in einzelnen Bildern fehlt; in der Zeit
@@ -638,7 +650,9 @@ class detect_lane(Node):
         es zaehlen nur die geraden Kanten davor und danach.
 
         Ecke links und rechts etwa gleich weit voraus = Kreuzung, die Verbindung beider
-        Ecken ist die Haltelinie. Nur eine Seite = Abzweig auf dieser Seite. Gemeldet
+        Ecken ist die Haltelinie. Nur eine Ecke und die Gegenlinie laeuft gerade weiter =
+        Einmuendung von der Seite (T-Kreuzung, _straight_past): Haltelinie von der Ecke quer bis
+        zur Gegenlinie. Biegt die Gegenlinie mit ab, ist es eine Kurve. Gemeldet
         wird erst nach INTERSECTION_CONFIRM Bildern; fehlt sie danach in einzelnen Bildern,
         gilt bis INTERSECTION_HOLD_S die letzte, per Odometrie mitgeschobene Lage.
         """
@@ -663,6 +677,18 @@ class detect_lane(Node):
             dx = abs(corners['links'][1] - corners['rechts'][1]) * self._res()
             if dx <= MAX_CORNER_DX_M:
                 stop_line = (corners['links'], corners['rechts'])
+        elif len(corners) == 1:
+            # Einmuendung: Haltelinie von der Ecke quer bis zur Innenkante der Gegenlinie,
+            # sofern diese gerade weiterlaeuft (sonst Kurve).
+            side, corner = next(iter(corners.items()))
+            if side == 'links':
+                other_x = self._straight_past(polies, white_point, img_white, corner[1], +1)
+                if other_x is not None:
+                    stop_line = (corner, np.array([other_x, corner[1]]))
+            else:
+                other_x = self._straight_past(polies, yellow_point, img_yellow, corner[1], -1)
+                if other_x is not None:
+                    stop_line = (np.array([other_x, corner[1]]), corner)
         self._report_intersection(stop_line, corners)
 
         # Debug: Haltelinie, Kreuzungsflaechen und kleine Rauten an den Ecken als
@@ -751,6 +777,41 @@ class detect_lane(Node):
                     return None
             idx = (idx + step) % n
         return None
+
+    def _straight_past(self, polies, point, mask, corner_y, outward):
+        """x der Innenkante der Gegenlinie auf Hoehe corner_y, wenn sie dort gerade verlaeuft
+        und mindestens SIDE_T_AHEAD_M darueber hinaus (nach vorn) weitergeht; sonst None.
+        outward: +1 rechte (weisse) Linie, Pixel rechts der Kante; -1 linke (gelbe)."""
+        px, py = float(point[0]), float(point[1])
+        best = None
+        for poly in polies:
+            pts = poly.reshape(-1, 2).astype(float)
+            for i in range(len(pts)):
+                p1, p2 = pts[i], pts[(i + 1) % len(pts)]
+                if np.linalg.norm(p2 - p1) < MIN_EDGE_LEN \
+                        or self.angle_diff(self.line_dir(p1, p2), 90.0) > LONG_TOL_DEG:
+                    continue
+                if not min(p1[1], p2[1]) - 5 <= py <= max(p1[1], p2[1]) + 5:
+                    continue
+                dist = abs(self._x_at(p1, p2, py) - px)
+                if best is None or dist < best[0]:
+                    best = (dist, p1, p2)
+        ahead = int(round(SIDE_T_AHEAD_M / self._res()))
+        y0, y1 = int(corner_y) - ahead, int(corner_y)
+        if y0 < 0:
+            return None                     # zu weit voraus, um es zu pruefen
+        # Innenkante bis auf Hoehe der Ecke verlaengern; ohne passende Kante (Versatz an einer
+        # Mattenkante genau in der Suchzeile) senkrecht ueber dem verfolgten Punkt.
+        x = self._x_at(best[1], best[2], corner_y) if best is not None and best[0] <= 15 else px
+        lo, hi = (x - SIDE_T_TOL_PX, x + SIDE_T_OUT_PX) if outward > 0 \
+            else (x - SIDE_T_OUT_PX, x + SIDE_T_TOL_PX)
+        lo, hi = max(0, int(lo)), min(mask.shape[1], int(hi) + 1)
+        if hi <= lo:
+            return None
+        hits = int(np.count_nonzero(np.any(mask[y0:y1 + 1, lo:hi] > 0, axis=1)))
+        if hits < SIDE_T_ROWS * (y1 + 1 - y0):
+            return None
+        return float(x)
 
     @staticmethod
     def _x_at(p1, p2, y):
@@ -870,7 +931,9 @@ class detect_lane(Node):
             self._held = None
         elif len(corners) == 1 and stop_line is None:
             side = next(iter(corners))
-            self.get_logger().info(f'Abzweig nur {side} gesehen.', throttle_duration_sec=2.0)
+            self.get_logger().info(f'Ecke nur {side}, Gegenlinie nicht 30 cm gerade weiter '
+                                   '(Kurve oder noch zu weit) -- keine Kreuzung.',
+                                   throttle_duration_sec=2.0)
 
     def self_mask(self, mask):
         """Eigenen Bot (Magnet) in der Maske schwarz setzen, in place: Zeilen mit
