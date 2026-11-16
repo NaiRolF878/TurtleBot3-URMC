@@ -7,6 +7,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/tb-env.sh"
 [ $? -ne 0 ] && exit 1
 
+# Dateien im Repo (inkl. .git, build, install), die einem anderen User gehoeren (z. B. root aus
+# altem Container oder nach "sudo colcon build"), fuehren zu "Permission denied" beim Bauen,
+# Speichern in VS Code oder git. Vorher zurueckgeben (offline, sudo ohne Passwort, ~10 ms).
+if [ -n "$(find "$REPO_ROOT" ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
+    echo "Korrigiere Dateibesitzer im Repo (root -> $(id -un)) ..."
+    sudo -n chown -R "$(id -u):$(id -g)" "$REPO_ROOT" || echo "WARNUNG: chown von $REPO_ROOT fehlgeschlagen"
+fi
+
 # Bei jedem Start bauen (~2-3 s ohne Aenderungen): nach git pull oder Branch-Wechsel fehlen
 # sonst neue Programme oder Nachrichten. --symlink-install: Python und YAML wirken sofort.
 echo "Baue Workspace (colcon build --symlink-install) ..."
