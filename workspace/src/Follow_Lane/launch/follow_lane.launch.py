@@ -62,6 +62,7 @@ def launch_setup(context, *args, **kwargs):
     extra_params = LaunchConfiguration('extra_params').perform(context)
     extra_all = [extra_params] if extra_params else []
     intersections = LaunchConfiguration('intersections').perform(context).lower() == 'true'
+    separate_detector = LaunchConfiguration('detector_node').perform(context).lower() == 'true'
 
     # Die *_nav2-Nodes pausieren im Tunnel. Sie laufen als ingress_node/detect_lane,
     # damit rqt, save-params.sh und ros2 param gleich funktionieren.
@@ -95,7 +96,18 @@ def launch_setup(context, *args, **kwargs):
             package='Follow_Lane', executable='intersection_node', name='intersection_node',
             parameters=[intersection_params],
         ),
-    ] if intersections else [])
+    ] if intersections else []) + ([
+        # Objekterkennung im eigenen Prozess (rennen.sh): bremst die Spurerkennung nicht. Werte
+        # (detector, Schilder) aus dem Block /detector_node in extra_params; detect_lane dann
+        # mit detector: aus.
+        Node(
+            package='Follow_Lane', executable='detector_node', name='detector_node',
+            parameters=[{k: detect_params[k] for k in ('detector', 'sign_min_conf',
+                                                         'sign_min_height_px',
+                                                         'tunnel_min_height_px')
+                         if k in detect_params}] + extra_all,
+        ),
+    ] if separate_detector else [])
 
 
 def generate_launch_description():
@@ -120,6 +132,8 @@ def generate_launch_description():
         # Rennen (launchers/rennen.sh): ohne Kreuzungs-Node, Werte aus Rennen.yaml.
         DeclareLaunchArgument('intersections', default_value='true'),
         DeclareLaunchArgument('extra_params', default_value=''),
+        # Objekterkennung als eigener Node detector_node (Rennen), statt in detect_lane.
+        DeclareLaunchArgument('detector_node', default_value='false'),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
     ])

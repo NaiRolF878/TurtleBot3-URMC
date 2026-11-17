@@ -44,6 +44,7 @@ setup(
             'control_driving      = Follow_Lane.src.control_driving:main',
             'debug_view           = Follow_Lane.src.debug_view:main',
             'detect_lane_nav2     = Follow_Lane.src.detect_lane_nav2:main',
+            'detector_node        = Follow_Lane.src.detector_node:main',
             'ingress_node         = Follow_Lane.src.ingress_node:main',
             'image_recorder       = Follow_Lane.src.image_recorder:main',
             'ingress_node_nav2    = Follow_Lane.src.ingress_node_nav2:main',

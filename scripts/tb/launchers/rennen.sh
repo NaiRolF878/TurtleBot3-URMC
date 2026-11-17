@@ -9,6 +9,6 @@
 # Er steht, bis die Schranke aufgeht. q oder Strg+C = Stopp und Ende.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHARE="$(ros2 pkg prefix Follow_Lane 2>/dev/null)/share/Follow_Lane"
-export FOLLOW_LANE_ARGS="intersections:=false extra_params:=$SHARE/Parameter/Rennen.yaml"
+export FOLLOW_LANE_ARGS="intersections:=false detector_node:=true extra_params:=$SHARE/Parameter/Rennen.yaml"
 export FOLLOW_LANE_LOG=rennen
 exec bash "$SCRIPT_DIR/follow_lane.sh"

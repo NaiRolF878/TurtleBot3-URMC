@@ -71,7 +71,7 @@ FINISH_PASSED_M = 0.15
 FINISH_MEMORY_S = 15.0
 # Rohbild (entzerrt), in dessen Pixeln /detect/start_line misst.
 RAW_W, RAW_H = 800, 600
-BARRIER_CLEAR_DEBOUNCE_S = 1.0
+BARRIER_CLEAR_DEBOUNCE_S = 0.0
 # Stoppschild (rote Pixel im Bereich oben rechts, detect_lane): so viele Meldungen in Folge.
 STOP_SIGN_CONFIRM = 3
 # Tunnelschild (/detect/sign/tunnel): so viele Meldungen in Folge -> TunnelEntry.

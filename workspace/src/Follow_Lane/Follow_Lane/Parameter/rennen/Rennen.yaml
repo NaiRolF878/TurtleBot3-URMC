@@ -3,8 +3,13 @@
 # Kreuzungs-Node und Nav2 laufen im Rennen gar nicht.
 /detect_lane:
   ros__parameters:
-    # Objekterkennung AN: nur fuer die Ziellinie (Stoppschild/Tunnel sind unten aus, Kreuzungs-Node
-    # laeuft nicht). Schranke = blaue Pixel. Ohne Objekterkennung: detector: aus (dann kein Halt an der Ziellinie).
+    # Objekterkennung hier AUS: sie laeuft im eigenen Node detector_node (unten), sonst bremst sie
+    # die Spurerkennung (30 -> 18 Hz). Schranke = blaue Pixel, laeuft weiter hier.
+    detector: aus
+/detector_node:
+  ros__parameters:
+    # Objekterkennung fuer die Ziellinie, eigener Prozess, jedes Kamerabild (volle Frequenz).
+    # aus = keine Ziellinie (kein Halt am Ziel).
     detector: rfdetr704
 /control_driving:
   ros__parameters:
@@ -17,7 +22,7 @@
     initial_mode: Stop
     # Nach der Ziellinie anhalten: Radachse finish_after_m (m) hinter der Linie -> Stop, Lauf beendet.
     finish_enabled: true
-    finish_after_m: 0.3
+    finish_after_m: 0.15
     # Start an/hinter der Linie: sie zaehlt erst nach finish_arm_distance (m) Fahrt. Steht die Ziellinie
     # weiter als das vom Start weg, passt es; sonst Wert anpassen.
     start_at_line: true

@@ -62,6 +62,11 @@ EXPLORE_MIN_LINE_M = 0.10
 # Palette: in diesen Zustaenden werden Zone und Palette vermessen.
 PALLET_STATES = (StorageState.SCHILD_LESEN, StorageState.POSITIONIERT, StorageState.ANDOCKEN,
                  StorageState.GREIFEN)
+# Beim Aufnehmen zaehlt die Palette selbst, nicht die Zone: die Vorderkante wird in diesen Zustaenden
+# NICHT an den Zonengrenzen abgeschnitten, sondern +-pallet_search_half_m um die Bot-Mitte gesucht
+# (17.11.: die ergaenzte Grenze schnitt die Palette ab, der Bot zielte auf die Zonenmitte). Weisse
+# Linien zaehlen dort ohnehin nie als Palette. SCHILD_LESEN (Fuellung) bleibt an der Zone.
+PALLET_CENTER_STATES = (StorageState.POSITIONIERT, StorageState.ANDOCKEN, StorageState.GREIFEN)
 # Weisse Linien und ihr Rand (px) zaehlen nie als Palette.
 WHITE_DILATE_PX = 5
 # Zonenmasse (zone_depth, line_width) stehen nur bei switch_control.
@@ -128,7 +133,9 @@ class storage_zone_node(Node):
         # --- Parameter ---
         self.declare_parameter('side_near_m', Parameter.Type.DOUBLE, frange(0.0, 0.4))
         self.declare_parameter('max_angle_deg', Parameter.Type.DOUBLE, frange(1.0, 89.0))
-        self._param_names = ['side_near_m', 'max_angle_deg']
+        # Aufnehmen: Palettenkante so weit (m) links und rechts der Bot-Mitte suchen.
+        self.declare_parameter('pallet_search_half_m', Parameter.Type.DOUBLE, frange(0.05, 0.4))
+        self._param_names = ['side_near_m', 'max_angle_deg', 'pallet_search_half_m']
         require_params(self, self._param_names)
         read_params(self, self._param_names)
         self.colors = SharedParams(self, COLOR_SOURCE, WHITE_PARAMS + CLAHE_PARAMS)
@@ -279,6 +286,14 @@ class storage_zone_node(Node):
         left, right = self.zone_bounds(x_row, pose)
         inside = (y_col[None, :] <= (left - ZONE_MARGIN_M)[:, None]) & \
                  (y_col[None, :] >= (right + ZONE_MARGIN_M)[:, None])
+        if self.state in PALLET_CENTER_STATES:
+            # Aufnehmen: an der Palette ausrichten, die Zonengrenzen schneiden nichts ab.
+            left = np.full_like(x_row, self.pallet_search_half_m)
+            right = np.full_like(x_row, -self.pallet_search_half_m)
+            search_inside = np.broadcast_to(
+                (np.abs(y_col) <= self.pallet_search_half_m)[None, :], inside.shape)
+        else:
+            search_inside = inside
 
         front, back = ZONE_FRONT_M, self.bev['x_max']
         near = sorted(x for x in cross_x if x < ZONE_FRONT_M + ZONE_MIN_DEPTH_M)
@@ -296,7 +311,7 @@ class storage_zone_node(Node):
             n = int(np.count_nonzero(region))
             fill = float(np.count_nonzero(obj & region)) / n if n else -1.0
 
-        search = obj & inside & (x_row < back - ZONE_MARGIN_M)[:, None]
+        search = obj & search_inside & (x_row < back - ZONE_MARGIN_M)[:, None]
         kernel = np.ones(FRONT_RUN_PX)
         points = []
         for u in range(0, w, FRONT_COL_STEP):
@@ -371,7 +386,9 @@ class storage_zone_node(Node):
         if np.count_nonzero(keep) < 3 or np.ptp(ys[keep]) < FRONT_MIN_SPAN_M:
             return None
         b, a = np.polyfit(ys[keep], xs[keep], 1)
-        lateral = float(np.mean(ys[keep]))
+        # Mitte der Kante = Mitte zwischen ihren Enden (nicht Mittel der Punkte: Luecken in der
+        # Front, z.B. zwischen den Latten, verschoeben das Mittel).
+        lateral = float((ys[keep].min() + ys[keep].max()) / 2.0)
         return float(a + b * lateral), lateral, float(-math.atan(b))
 
     def zone_bounds(self, x_row, pose):

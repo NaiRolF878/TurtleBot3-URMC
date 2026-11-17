@@ -26,7 +26,7 @@
     # Starten wir an der Linie? Dann zaehlt sie erst nach finish_arm_distance (m) Fahrt.
     # Standard aus: jede Linie beendet den Lauf.
     start_at_line: false
-    finish_arm_distance: 1.0
+    finish_arm_distance: 0.10
     # > 0: erst halten, wenn die Radachse so weit (m) HINTER der Ziellinie ist (Rennen.yaml);
     # gehalten wird ueber die gemerkte Linie (Odometrie). 0 = vor der Linie (finish_stop_px).
     finish_after_m: 0.0
@@ -50,9 +50,9 @@
     # Ziffern der Zonen in Fahrtrichtung; leer = Schilder entscheiden.
     zone_order: '1,2,3'
     # Zone innen (m, zwischen den Linien) und Breite der Linien; vor Ort messen.
-    zone_width: 0.235
-    zone_depth: 0.17
-    line_width: 0.05
+    zone_width: 0.20
+    zone_depth: 0.21
+    line_width: 0.015
     # Ohne Zonenmodell: so weit (m) hinter der letzten Querlinie zur Seite drehen; 0 = aus.
     fallback_step: 0.35
     # Nach so viel Strecke (m) endet die Erkundung.
