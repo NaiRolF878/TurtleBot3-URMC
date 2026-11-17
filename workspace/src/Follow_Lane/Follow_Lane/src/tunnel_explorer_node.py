@@ -57,6 +57,9 @@ EXIT_CONFIRM_S = 1.0
 ENTRANCE_EXCLUDE_M = 0.35
 # Um diesen Radius (m) gilt eine Stelle als dieselbe: xy_goal_tolerance des Reglers.
 SAME_TARGET_M = 0.15
+# Suchziele (nicht die Oeffnung) hoechstens so weit (m) ausserhalb des Kastens (Rechteck, sonst
+# Huelle): weiter draussen liegt nur Rauschen aus der Halle (17.11.: Ziele 3 m neben dem Kasten).
+TARGET_MAX_OUTSIDE_M = 0.40
 # Besuchte und gescheiterte Ziele werden so lange (s) gemieden, nicht fuer immer (wie HKA).
 AVOID_S = 15.0
 # So oft je Ziel wird nach Kollisionsgefahr freigefahren, danach gilt das Ziel als gescheitert.
@@ -462,9 +465,11 @@ class tunnel_explorer_node(Node):
         return angles, np.where(ranges > scan.range_min, ranges, np.nan)
 
     def _frontier_target(self, grid, free, res, origin, pose, hull):
+        area = self._box_area(grid.shape, res, origin, hull)
         targets = geo.frontier_targets(geo.frontier_mask(free, grid), res, origin)
         targets = [t for t in targets if not self._is_done(t)
-                   and math.hypot(t[0] - pose[0], t[1] - pose[1]) > SAME_TARGET_M]
+                   and math.hypot(t[0] - pose[0], t[1] - pose[1]) > SAME_TARGET_M
+                   and (area is None or self._cell_in(area, res, origin, t))]
         robot = np.array(pose[:2])
 
         if hull is not None:
@@ -491,6 +496,8 @@ class tunnel_explorer_node(Node):
         xs = origin[0] + (cols + 0.5) * res
         ys = origin[1] + (rows + 0.5) * res
         keep = ((np.column_stack([xs, ys]) - entrance) @ inward) > 0.0
+        if area is not None:
+            keep &= area[rows, cols]
         if not keep.any():
             return None, None
         xs, ys = xs[keep], ys[keep]
@@ -499,6 +506,22 @@ class tunnel_explorer_node(Node):
         if math.hypot(far[0] - pose[0], far[1] - pose[1]) <= SAME_TARGET_M or self._is_done(far):
             return None, None
         return far, 'weitester Punkt'
+
+    def _box_area(self, shape, res, origin, hull):
+        """Rastermaske: Kasten (Rechteck, sonst Huelle) plus TARGET_MAX_OUTSIDE_M; None ohne beides."""
+        ref = self._box if self._box is not None else hull
+        if ref is None:
+            return None
+        mask = np.zeros(shape, np.uint8)
+        cells = np.round((ref.reshape(-1, 2) - origin) / res - 0.5).astype(np.int32)
+        cv2.fillPoly(mask, [cells], 1)
+        r = int(math.ceil(TARGET_MAX_OUTSIDE_M / res))
+        return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))) > 0
+
+    @staticmethod
+    def _cell_in(mask, res, origin, point):
+        c = np.floor((np.asarray(point, dtype=np.float64) - origin) / res).astype(np.int64)
+        return 0 <= c[1] < mask.shape[0] and 0 <= c[0] < mask.shape[1] and bool(mask[c[1], c[0]])
 
     def _entrance(self, pose):
         """Eingangslinie als (Punkt, Normale nach innen)."""

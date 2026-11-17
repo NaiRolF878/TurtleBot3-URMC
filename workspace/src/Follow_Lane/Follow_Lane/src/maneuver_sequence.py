@@ -110,8 +110,11 @@ class ManeuverSequence:
             length = math.dist(start, end)
             ahead = (start[0] - pose[0]) * math.cos(pose[2]) \
                 + (start[1] - pose[1]) * math.sin(pose[2])
-            self._queue = [self._path_to(start, reverse=ahead < 0.0), self._rotate(yaw),
-                           self._straight(length, PASSAGE_VEL)]
+            through = self._straight(length, PASSAGE_VEL)
+            # Tunnel: die Pfadpruefung hat den Durchgang schon nachgerechnet; der Waechter
+            # (local_costmap weicht ab) hielt sonst im Ausgang an und der Ausgang wurde gesperrt.
+            through.unguarded = self.node.control_mode == ControlType.Tunnel
+            self._queue = [self._path_to(start, reverse=ahead < 0.0), self._rotate(yaw), through]
             log.info(f'Engstelle: {"zurueck" if ahead < 0.0 else "vor"} zum Start '
                      f'x={start[0]:.2f} y={start[1]:.2f}, drehen auf {math.degrees(yaw):.0f} Grad, '
                      f'{length:.2f} m geradeaus.')

@@ -20,3 +20,6 @@ bool reverse
 
 # Hoechstgeschwindigkeit (m/s) fuer diese Bewegung; 0 = Parameter von control_driving.
 float32 max_vel
+
+# Ohne Waechter fahren (nur im Tunnel beachtet): gerade Durchfahrt einer Engstelle.
+bool unguarded

@@ -468,6 +468,11 @@ class control_driving(Node):
             self.get_logger().info(f'Grundbewegung {m.id} fertig.')
             self._finish_maneuver(m, True, '')
             return
+        if m.unguarded and self._mode_is(ControlType.Tunnel):
+            self._set_guard(False)
+            self.pub_cmd_vel.publish(self._limit_wheels(twist))
+            self._last_sent = True
+            return
         self._last_sent = self._publish_guarded(self._limit_wheels(twist))
         if not self._last_sent and time.monotonic() - self._guard_since >= GUARD_MANEUVER_FAIL_S:
             self.get_logger().warn(f'Grundbewegung {m.id} abgebrochen: Waechter haelt an.')
