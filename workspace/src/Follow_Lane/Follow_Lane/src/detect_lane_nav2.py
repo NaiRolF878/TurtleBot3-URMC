@@ -113,15 +113,29 @@ FAR_BAND_PX = 16
 FAR_ROW_STEP_PX = 16
 FAR_MIN_ROWS = 8
 FAR_MAX_LANE_WIDTH_M = 0.30
-# auto_swap_colors: auf welcher Seite liegt Gelb, auf welcher Weiss? Gezaehlt im unteren Teil des
-# BEV (Anteil der Hoehe ab unten), nur +-AUTO_HALF_M um die Bot-Mitte (die Gegenspur bleibt draussen).
-# Median-Spalte Weiss minus Gelb > AUTO_SEP_M -> normal (Gelb links), < -AUTO_SEP_M -> getauscht.
-# Umgeschaltet erst nach AUTO_CONFIRM Bildern in Folge mit dem anderen Ergebnis.
-AUTO_BAND = 0.5
+# color_side = auto: am Anfang EINMAL bestimmen, auf welcher Seite Gelb und Weiss liegen, dann fest
+# (kein laufendes Umschalten: das tauschte falsch, wenn der Bot quer stand oder hochgehoben wurde).
+# Ausgewertet im unteren Teil der BEV (Anteil AUTO_BAND der Hoehe), nur +-AUTO_HALF_M um die
+# Bot-Mitte (Gegenspur bleibt draussen), Zeile fuer Zeile: Weiss rechts von Gelb (> AUTO_SEP_M)
+# = normal, links davon = getauscht. Ein Bild zaehlt, wenn mind. AUTO_MIN_ROWS Zeilen beide Farben
+# haben und AUTO_ROW_SHARE davon einig sind. Entschieden nach AUTO_VOTES Bildern, wenn
+# AUTO_VOTE_SHARE davon einig sind; bis dahin normal.
+AUTO_BAND = 0.35
 AUTO_HALF_M = 0.25
+# Zeilen, in denen eine Farbe breiter als das (m) liegt, sind Querlinien (Haltelinie) -> nicht zaehlen.
+# Solange detect_lane eine Kreuzung vor sich sieht, wird nicht abgestimmt (dort liegt vorn oft die
+# Gegenrichtung mit vertauschten Farben, Aufnahme 17.11.).
+AUTO_MAX_SPREAD_M = 0.06
 AUTO_SEP_M = 0.06
-AUTO_MIN_PX = 300
-AUTO_CONFIRM = 8
+AUTO_ROW_STEP = 2
+AUTO_MIN_ROWS = 12
+AUTO_ROW_SHARE = 0.8
+AUTO_VOTES = 15
+AUTO_VOTE_SHARE = 0.8
+COLOR_SIDES = ('auto', 'normal', 'getauscht')
+# color_side_recheck: nach diesen Modi (Linien waren weg) bei der Rueckkehr nach Lane neu suchen.
+RECHECK_AFTER_MODES = (ControlType.Tunnel, ControlType.TunnelEntry, ControlType.Intersection,
+                       ControlType.Obstacle)
 # Nach der Kreuzung hoechstens so lange (s) auf das ferne Paar regeln, bis die Suchzeile
 # wieder beide Linien hat.
 EXIT_FAR_S = 5.0
@@ -210,11 +224,13 @@ class detect_lane(Node):
         # Sieht die Objekterkennung 'no_entry' mit mindestens dieser Konfidenz, ist das Rot das
         # Einfahrt-verboten-Schild -> kein Stoppschild.
         self.declare_parameter('no_entry_min_conf', Parameter.Type.DOUBLE, frange(0.0, 1.0))
-        # true = Gelb- und Weiss-Maske tauschen (Strecke mit Weiss links, Gelb rechts). Live in rqt.
-        self.declare_parameter('swap_colors', Parameter.Type.BOOL)
-        # true = Seite der Farben selbst erkennen und Masken passend tauschen (swap_colors nur
-        # Startwert). Live in rqt.
-        self.declare_parameter('auto_swap_colors', Parameter.Type.BOOL)
+        # Seite der Spurfarben: normal (Gelb links, Weiss rechts), getauscht (Weiss links, Gelb
+        # rechts) oder auto (am Anfang selbst bestimmen, dann fest; neu suchen: in rqt kurz auf
+        # normal und wieder auf auto). Live in rqt.
+        self.declare_parameter('color_side', Parameter.Type.STRING)
+        # Nur mit color_side auto: nach Tunnel, Kreuzung oder Ausweichen (zurueck in Lane) die
+        # Farbseite neu bestimmen; bis dahin gilt die alte. Live in rqt.
+        self.declare_parameter('color_side_recheck', Parameter.Type.BOOL)
         # Schilder (/detect/sign/<name>): Mindest-Konfidenz und Mindesthoehe der Box (px im
         # Rohbild 800x600); tunnel_min_height_px nur fuer das Tunnelschild. Live in rqt.
         self.declare_parameter('sign_min_conf', Parameter.Type.DOUBLE, frange(0.0, 1.0))
@@ -232,8 +248,8 @@ class detect_lane(Node):
                               'clahe_clip_limit', 'clahe_tile_grid_size',
                               'thresh_blue_pixel', 'detector', 'detector_rate_hz',
                               'thresh_red_pixel', 'stop_roi_x0', 'stop_roi_x1', 'stop_roi_y0',
-                              'stop_roi_y1', 'no_entry_min_conf', 'swap_colors',
-                              'auto_swap_colors', 'sign_min_conf', 'sign_min_height_px',
+                              'stop_roi_y1', 'no_entry_min_conf', 'color_side', 'color_side_recheck',
+                              'sign_min_conf', 'sign_min_height_px',
                               'tunnel_min_height_px']
         require_params(self, self._param_names)
         read_params(self, ['detector', 'detector_rate_hz'])
@@ -299,8 +315,10 @@ class detect_lane(Node):
         # Je Linie (Spalte, Zeitpunkt der letzten Detektion) oder None; eigener Logger
         # je Linie, damit die gedrosselten Meldungen sich nicht gegenseitig verschlucken.
         self._anchor = {'Gelb': None, 'Weiss': None}
-        self._colors_swapped = None     # auto_swap_colors: aktuell getauscht?
-        self._swap_votes = 0            # Bilder in Folge, die fuer den Wechsel sprechen
+        self._side_mode = None          # color_side beim letzten Bild (Wechsel -> neu suchen)
+        self._side_auto = None          # auto: entschieden getauscht? None = noch am Suchen
+        self._side_votes = []           # auto: je Bild True (getauscht) / False (normal)
+        self._side_prev = None          # recheck: alte Entscheidung, gilt bis zur neuen
         self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
         self._intersection_hits = deque(maxlen=INTERSECTION_CONFIRM[1])
         self._intersection_seen = False
@@ -396,6 +414,8 @@ class detect_lane(Node):
             # Ohne Anker nimmt get_x_for_driving die aeusserste Kante zur Spur hin.
             self._anchor = {name: None for name in self._anchor}
             self.get_logger().info('Spurfolge (wieder) aktiv -- Linien neu gesucht.')
+        if new_mode == ControlType.Lane and self.control_mode in RECHECK_AFTER_MODES:
+            self._recheck_color_side(self.control_mode)
         if self.control_mode == ControlType.Intersection and new_mode == ControlType.Lane:
             self._exit_far_until = time.monotonic() + EXIT_FAR_S
             self.get_logger().info('Nach Kreuzung: PID auf fernes Paar, bis die Suchzeile Linien hat.')
@@ -1108,47 +1128,97 @@ class detect_lane(Node):
         mask_white = cv2.inRange(lab,
             (self.lab_l_white_l, self.lab_a_white_l, self.lab_b_white_l),
             (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
-        if self.auto_swap_colors:
-            swap = self._update_color_side(mask_yellow, mask_white)
+        mode = str(self.color_side).strip().lower()
+        if mode != self._side_mode:
+            if mode not in COLOR_SIDES:
+                self.get_logger().error(f'color_side "{self.color_side}" unbekannt '
+                                        f'({", ".join(COLOR_SIDES)}) -- nehme normal.')
+            elif mode == 'auto':
+                self.get_logger().info('color_side auto: suche, auf welcher Seite Gelb und '
+                                       'Weiss liegen ...')
+            self._side_mode, self._side_auto, self._side_votes = mode, None, []
+            self._side_prev = None
+        if mode == 'getauscht':
+            swap = True
+        elif mode == 'auto':
+            swap = self._auto_color_side(mask_yellow, mask_white)
         else:
-            swap = self.swap_colors
-            self._colors_swapped = None
+            swap = False
         if swap:
             return mask_white, mask_yellow
         return mask_yellow, mask_white
 
-    def _update_color_side(self, mask_yellow, mask_white):
-        """auto_swap_colors: Gelb links/Weiss rechts (False) oder umgekehrt (True), mit Entprellung."""
-        if self._colors_swapped is None:
-            self._colors_swapped = bool(self.swap_colors)
-            self._swap_votes = 0
+    def _color_side_vote(self, mask_yellow, mask_white):
+        """Ein Bild: True = Weiss links von Gelb (getauscht), False = normal, None = unklar."""
         h, w = mask_yellow.shape[:2]
         res = self._res()
         half = int(AUTO_HALF_M / res)
         c0, c1 = max(0, w // 2 - half), min(w, w // 2 + half)
-        r0 = int(h * (1.0 - AUTO_BAND))
-        cols_y = np.nonzero(mask_yellow[r0:, c0:c1])[1]
-        cols_w = np.nonzero(mask_white[r0:, c0:c1])[1]
-        vote = None
-        if cols_y.size >= AUTO_MIN_PX and cols_w.size >= AUTO_MIN_PX:
-            diff = (float(np.median(cols_w)) - float(np.median(cols_y))) * res
-            if diff > AUTO_SEP_M:
-                vote = False
-            elif diff < -AUTO_SEP_M:
-                vote = True
-        if vote is None or vote == self._colors_swapped:
-            self._swap_votes = 0
-        else:
-            self._swap_votes += 1
-            if self._swap_votes >= AUTO_CONFIRM:
-                self._colors_swapped = vote
-                self._swap_votes = 0
-                # Linien neu suchen: die alten Anker liegen auf der anderen Seite.
-                self._anchor = {name: None for name in self._anchor}
-                self.get_logger().warn(
-                    'Farbseiten gewechselt: ' + ('Weiss LINKS, Gelb RECHTS -- Masken getauscht.'
-                                                 if vote else 'Gelb LINKS, Weiss RECHTS -- normal.'))
-        return self._colors_swapped
+        sep = AUTO_SEP_M / res
+        spread = AUTO_MAX_SPREAD_M / res
+        normal = swapped = 0
+        for r in range(int(h * (1.0 - AUTO_BAND)), h, AUTO_ROW_STEP):
+            ys = np.flatnonzero(mask_yellow[r, c0:c1])
+            ws = np.flatnonzero(mask_white[r, c0:c1])
+            if ys.size == 0 or ws.size == 0 or np.ptp(ys) > spread or np.ptp(ws) > spread:
+                continue
+            d = float(np.median(ws)) - float(np.median(ys))
+            if d > sep:
+                normal += 1
+            elif d < -sep:
+                swapped += 1
+        rows = normal + swapped
+        if rows < AUTO_MIN_ROWS:
+            return None
+        if normal >= AUTO_ROW_SHARE * rows:
+            return False
+        if swapped >= AUTO_ROW_SHARE * rows:
+            return True
+        return None
+
+    def _recheck_color_side(self, old_mode):
+        """color_side_recheck: nach old_mode (Tunnel, Kreuzung, ...) neu suchen, alte Seite gilt weiter."""
+        if not self.color_side_recheck or self._side_mode != 'auto' or self._side_auto is None:
+            return
+        self._side_prev, self._side_auto, self._side_votes = self._side_auto, None, []
+        self.get_logger().info(f'color_side: nach {old_mode.name} neu suchen (bis dahin '
+                               + ('getauscht' if self._side_prev else 'normal') + ').')
+
+    def _auto_color_side(self, mask_yellow, mask_white):
+        """color_side auto: bis zur Entscheidung Stimmen sammeln (solange normal), dann fest."""
+        if self._side_auto is not None:
+            return self._side_auto
+        vote = None if self._intersection_seen else self._color_side_vote(mask_yellow, mask_white)
+        if vote is not None:
+            self._side_votes.append(vote)
+        fallback = bool(self._side_prev)    # bis zur Entscheidung: alte Seite bzw. normal
+        if len(self._side_votes) < AUTO_VOTES:
+            self.get_logger().info(
+                f'color_side auto: noch {AUTO_VOTES - len(self._side_votes)} klare Bilder noetig '
+                '(beide Spurlinien vor dem Bot ins Bild).', throttle_duration_sec=2.0)
+            return fallback
+        swapped = sum(self._side_votes) / len(self._side_votes)
+        if swapped >= AUTO_VOTE_SHARE or 1.0 - swapped >= AUTO_VOTE_SHARE:
+            self._side_auto = swapped >= AUTO_VOTE_SHARE
+            rechecked = self._side_prev is not None
+            if self._side_prev is not None and self._side_auto == self._side_prev:
+                self.get_logger().info('color_side auto: Seite bestaetigt ('
+                                       + ('getauscht' if self._side_auto else 'normal') + ').')
+                self._side_prev = None
+                return self._side_auto
+            self._side_prev = None
+            self._anchor = {name: None for name in self._anchor}
+            self.get_logger().warn(
+                'color_side auto: ' + ('Weiss LINKS, Gelb RECHTS -- Masken getauscht'
+                                       if self._side_auto else 'Gelb LINKS, Weiss RECHTS -- normal')
+                + f' ({len(self._side_votes)} Bilder, {max(swapped, 1 - swapped) * 100:.0f} % einig).'
+                + (' Seite GEWECHSELT nach Tunnel/Kreuzung/Ausweichen.' if rechecked
+                   else ' Neu gesucht nach Tunnel/Kreuzung/Ausweichen.' if self.color_side_recheck
+                   else ' Bleibt so bis zum Neustart.'))
+            return self._side_auto
+        # Uneinig: die aeltesten Stimmen verwerfen, weiter sammeln.
+        self._side_votes = self._side_votes[-AUTO_VOTES // 2:]
+        return fallback
 
     def detectBarrier(self):
         if self.raw_image is None or self.control_mode in (None, ControlType.Tunnel):

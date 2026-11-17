@@ -26,11 +26,13 @@ thresh_red_pixel: 4000
 # Konfidenz, wird das Rot NICHT als Stoppschild gemeldet. Live 17.11.: Schild median 0,85.
 no_entry_min_conf: 0.8
 use_sim_time: false
-# true = Gelb- und Weiss-Maske tauschen (Weiss links, Gelb rechts). Live in rqt.
-swap_colors: false
-# true = Seite der Farben selbst erkennen (Gelb links/Weiss rechts oder umgekehrt) und Masken passend
-# tauschen, auch nach Kreuzungen; swap_colors ist dann nur der Startwert. Live in rqt.
-auto_swap_colors: false
+# Seite der Spurfarben: auto = am Anfang selbst bestimmen (beide Linien vor dem Bot ins Bild, ~15 klare
+# Bilder), dann fest bis zum Neustart; normal = Gelb links / Weiss rechts; getauscht = Weiss links / Gelb
+# rechts (entgegen der Fahrtrichtung). Neu suchen lassen: in rqt kurz auf normal, dann wieder auf auto.
+color_side: auto
+# Nur mit auto: nach Tunnel, Kreuzung oder Ausweichen (Spurlinien waren weg) die Farbseite neu suchen;
+# bis zur neuen Entscheidung gilt die alte. false = einmal am Anfang, dann fest. Live in rqt.
+color_side_recheck: true
 # Schilder der Objekterkennung -> je ein Topic /detect/sign/<name> (park, tunnel, stop, left, right, work,
 # no_entry). Gemeldet nur ab dieser Konfidenz und ab dieser Boxhoehe (px im Rohbild 800x600; 0 = jede
 # Groesse). Tunnelschild eigene Hoehe: groesser = er meldet es erst naeher. Die aktuelle Hoehe steht im Log
