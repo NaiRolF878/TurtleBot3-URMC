@@ -184,9 +184,12 @@ class StorageSequence:
         p('zone_width', Parameter.Type.DOUBLE, frange(0.10, 1.0))
         p('zone_depth', Parameter.Type.DOUBLE, frange(0.05, 1.0))
         p('line_width', Parameter.Type.DOUBLE, frange(0.0, 0.10))
+        # Jeder weitere Andock-Versuch faehrt so viel (m) weiter in die Zone (Palette tiefer/
+        # weiter hinten als gemessen, z.B. von der Erhoehung gerutscht).
+        p('dock_retry_extra_m', Parameter.Type.DOUBLE, frange(0.0, 0.10))
         self._param_names = [
             'target_zone', 'zone_order', 'fallback_step', 'explore_max_distance',
-            'carry_max_vel', 'zone_width', 'zone_depth', 'line_width',
+            'carry_max_vel', 'zone_width', 'zone_depth', 'line_width', 'dock_retry_extra_m',
         ]
         require_params(node, self._param_names)
         self._read_params()
@@ -442,7 +445,11 @@ class StorageSequence:
             # erkannt). Haelt er die Palette nicht (Griffpruefung), schaltet NEU_ANSETZEN ihn aus.
             self._set_magnet(True)
             fast = self._approach - PREDOCK_M
-            slow = min(self._approach, PREDOCK_M) + DOCK_OVERSHOOT_M
+            extra = self._attempts * self.dock_retry_extra_m
+            slow = min(self._approach, PREDOCK_M) + DOCK_OVERSHOOT_M + extra
+            if extra > 0.0:
+                self.node.get_logger().info(
+                    f'Andock-Versuch {self._attempts + 1}: {extra * 100:.0f} cm weiter in die Zone.')
             self._queue = ([self._straight(fast)] if fast > 0.01 else []) + \
                 [self._straight(slow, max_vel=DOCK_VEL)]
         elif state == S.GREIFEN:

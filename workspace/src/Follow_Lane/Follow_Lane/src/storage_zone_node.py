@@ -62,11 +62,12 @@ EXPLORE_MIN_LINE_M = 0.10
 # Palette: in diesen Zustaenden werden Zone und Palette vermessen.
 PALLET_STATES = (StorageState.SCHILD_LESEN, StorageState.POSITIONIERT, StorageState.ANDOCKEN,
                  StorageState.GREIFEN)
-# Beim Aufnehmen zaehlt die Palette selbst, nicht die Zone: die Vorderkante wird in diesen Zustaenden
-# NICHT an den Zonengrenzen abgeschnitten, sondern +-pallet_search_half_m um die Bot-Mitte gesucht
-# (17.11.: die ergaenzte Grenze schnitt die Palette ab, der Bot zielte auf die Zonenmitte). Weisse
-# Linien zaehlen dort ohnehin nie als Palette. SCHILD_LESEN (Fuellung) bleibt an der Zone.
-PALLET_CENTER_STATES = (StorageState.POSITIONIERT, StorageState.ANDOCKEN, StorageState.GREIFEN)
+# Palette = nur der groesste zusammenhaengende Fleck im Suchbereich (zwischen den Zonengrenzen), dazu
+# Flecke mit mindestens PALLET_BLOB_MIN_FRACTION seiner Flaeche (Teile der Palette). Saeume der
+# Zonenlinien, Kratzer und Puzzlefugen sind schmale, getrennte Stuecke und fallen weg (17.11.: sie
+# verschoben die Palettenmitte um 3-4 cm). Vorher Luecken bis PALLET_CLOSE_PX schliessen.
+PALLET_BLOB_MIN_FRACTION = 0.3
+PALLET_CLOSE_PX = 5
 # Weisse Linien und ihr Rand (px) zaehlen nie als Palette.
 WHITE_DILATE_PX = 5
 # Zonenmasse (zone_depth, line_width) stehen nur bei switch_control.
@@ -134,8 +135,7 @@ class storage_zone_node(Node):
         self.declare_parameter('side_near_m', Parameter.Type.DOUBLE, frange(0.0, 0.4))
         self.declare_parameter('max_angle_deg', Parameter.Type.DOUBLE, frange(1.0, 89.0))
         # Aufnehmen: Palettenkante so weit (m) links und rechts der Bot-Mitte suchen.
-        self.declare_parameter('pallet_search_half_m', Parameter.Type.DOUBLE, frange(0.05, 0.4))
-        self._param_names = ['side_near_m', 'max_angle_deg', 'pallet_search_half_m']
+        self._param_names = ['side_near_m', 'max_angle_deg']
         require_params(self, self._param_names)
         read_params(self, self._param_names)
         self.colors = SharedParams(self, COLOR_SOURCE, WHITE_PARAMS + CLAHE_PARAMS)
@@ -286,14 +286,6 @@ class storage_zone_node(Node):
         left, right = self.zone_bounds(x_row, pose)
         inside = (y_col[None, :] <= (left - ZONE_MARGIN_M)[:, None]) & \
                  (y_col[None, :] >= (right + ZONE_MARGIN_M)[:, None])
-        if self.state in PALLET_CENTER_STATES:
-            # Aufnehmen: an der Palette ausrichten, die Zonengrenzen schneiden nichts ab.
-            left = np.full_like(x_row, self.pallet_search_half_m)
-            right = np.full_like(x_row, -self.pallet_search_half_m)
-            search_inside = np.broadcast_to(
-                (np.abs(y_col) <= self.pallet_search_half_m)[None, :], inside.shape)
-        else:
-            search_inside = inside
 
         front, back = ZONE_FRONT_M, self.bev['x_max']
         near = sorted(x for x in cross_x if x < ZONE_FRONT_M + ZONE_MIN_DEPTH_M)
@@ -311,7 +303,7 @@ class storage_zone_node(Node):
             n = int(np.count_nonzero(region))
             fill = float(np.count_nonzero(obj & region)) / n if n else -1.0
 
-        search = obj & search_inside & (x_row < back - ZONE_MARGIN_M)[:, None]
+        search = self.pallet_blob(obj & inside & (x_row < back - ZONE_MARGIN_M)[:, None])
         kernel = np.ones(FRONT_RUN_PX)
         points = []
         for u in range(0, w, FRONT_COL_STEP):
@@ -323,6 +315,23 @@ class storage_zone_node(Node):
                 points.append((float(x_row[h - 1 - hit[0]]), float(y_col[u])))
         return {'fill': fill, 'front': self.fit_front(points), 'points': points,
                 'left': left, 'right': right, 'rows': (front, back), 'obj': obj, 'floor': floor}
+
+    @staticmethod
+    def pallet_blob(search):
+        """Nur die Palette aus der Kandidatenmaske: groesster zusammenhaengender Fleck (nach
+        Schliessen kleiner Luecken) und Flecke mit mindestens PALLET_BLOB_MIN_FRACTION seiner
+        Flaeche; Linien-Saeume, Kratzer und Fugen fallen weg."""
+        mask = search.astype(np.uint8)
+        if not mask.any():
+            return search
+        k = np.ones((PALLET_CLOSE_PX, PALLET_CLOSE_PX), np.uint8)
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+        if n <= 2:
+            return search
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        keep = np.flatnonzero(areas >= PALLET_BLOB_MIN_FRACTION * areas.max()) + 1
+        return search & np.isin(labels, keep)
 
     def floor_patch(self, shape):
         """Pixel-Ausschnitt (v0, v1, u0, u1) des Bodenflecks in der Spurmitte vor dem Bot."""

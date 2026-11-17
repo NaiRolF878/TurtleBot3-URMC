@@ -12,9 +12,6 @@
     side_near_m: 0.14
     # Querlinie: hoechstens so viel Grad von der Querrichtung.
     max_angle_deg: 15.0
-    # Aufnehmen (POSITIONIERT/ANDOCKEN/GREIFEN): Mitte = Mitte der Palette selbst, Kante so weit (m)
-    # links/rechts der Bot-Mitte gesucht, NICHT an den Zonengrenzen abgeschnitten. Ablegen: Zonen.
-    pallet_search_half_m: 0.18
 
 /storage_sign_node:
   ros__parameters:

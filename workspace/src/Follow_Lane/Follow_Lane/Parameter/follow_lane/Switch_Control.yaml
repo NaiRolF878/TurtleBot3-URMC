@@ -58,3 +58,6 @@
     # Nach so viel Strecke (m) endet die Erkundung.
     explore_max_distance: 2.5
     carry_max_vel: 0.05
+    # Andocken: jeder weitere Versuch faehrt so viel (m) tiefer in die Zone als der vorige (2. Versuch
+    # +1x, 3. Versuch +2x). Fuer Paletten, die tiefer/weiter hinten stehen als gemessen. 0 = immer gleich.
+    dock_retry_extra_m: 0.01
