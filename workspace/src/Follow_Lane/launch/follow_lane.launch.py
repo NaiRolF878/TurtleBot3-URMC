@@ -57,6 +57,11 @@ def launch_setup(context, *args, **kwargs):
     # die Werte davor, weil sie spaeter in der Liste steht.
     storage_params = LaunchConfiguration('storage_params').perform(context)
     extra = [storage_params] if storage_params else []
+    # Weitere Datei mit Node-Bloecken (rennen.sh: Rennen.yaml), auch fuer detect_lane; ueberschreibt
+    # alles davor. Bloecke anderer Nodes in der Datei werden ignoriert.
+    extra_params = LaunchConfiguration('extra_params').perform(context)
+    extra_all = [extra_params] if extra_params else []
+    intersections = LaunchConfiguration('intersections').perform(context).lower() == 'true'
 
     # Die *_nav2-Nodes pausieren im Tunnel. Sie laufen als ingress_node/detect_lane,
     # damit rqt, save-params.sh und ros2 param gleich funktionieren.
@@ -72,23 +77,25 @@ def launch_setup(context, *args, **kwargs):
         Node(package='Follow_Lane', executable='ingress_node_nav2', name='ingress_node'),
         Node(
             package='Follow_Lane', executable='detect_lane_nav2', name='detect_lane',
-            parameters=[detect_params],
+            parameters=[detect_params] + extra_all,
         ),
         Node(
             package='Follow_Lane', executable='control_driving', name='control_driving',
-            parameters=[control_params] + extra,
+            parameters=[control_params] + extra + extra_all,
         ),
         Node(
             package='Follow_Lane', executable='switch_control', name='switch_control',
-            parameters=[switch_params] + extra,
+            parameters=[switch_params] + extra + extra_all,
         ),
-        # Kreuzung: an der Haltelinie halten, Vorfahrt (YOLO) pruefen, geradeaus queren.
+        Node(package='Follow_Lane', executable='debug_view', name='debug_view'),
+    ] + ([
+        # Kreuzung: an der Haltelinie halten, Vorfahrt (YOLO) pruefen, queren/abbiegen.
+        # Nicht im Rennen (intersections:=false).
         Node(
             package='Follow_Lane', executable='intersection_node', name='intersection_node',
             parameters=[intersection_params],
         ),
-        Node(package='Follow_Lane', executable='debug_view', name='debug_view'),
-    ]
+    ] if intersections else [])
 
 
 def generate_launch_description():
@@ -110,6 +117,9 @@ def generate_launch_description():
             default_value=os.path.join(PARAM_DIR, 'Scan_Correct.yaml')),
         DeclareLaunchArgument('obstacle', default_value='false'),
         DeclareLaunchArgument('storage_params', default_value=''),
+        # Rennen (launchers/rennen.sh): ohne Kreuzungs-Node, Werte aus Rennen.yaml.
+        DeclareLaunchArgument('intersections', default_value='true'),
+        DeclareLaunchArgument('extra_params', default_value=''),
         # OpaqueFunction, damit die Pfade aufgeloest sind, bevor die Dateien gelesen werden.
         OpaqueFunction(function=launch_setup),
     ])

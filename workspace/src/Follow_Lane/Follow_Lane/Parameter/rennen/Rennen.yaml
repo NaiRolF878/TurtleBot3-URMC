@@ -1,0 +1,26 @@
+# Rennen (scripts/tb/launchers/rennen.sh): nur Spurfolge, an der Schranke starten, so schnell wie moeglich.
+# Ueberschreibt NUR diese Werte; alles andere (Farben, PID-Verstaerkung, Schranke) aus den normalen YAMLs.
+# Kreuzungs-Node und Nav2 laufen im Rennen gar nicht.
+/detect_lane:
+  ros__parameters:
+    # Objekterkennung AN: nur fuer die Ziellinie (Stoppschild/Tunnel sind unten aus, Kreuzungs-Node
+    # laeuft nicht). Schranke = blaue Pixel. Ohne Objekterkennung: detector: aus (dann kein Halt an der Ziellinie).
+    detector: rfdetr704
+/control_driving:
+  ros__parameters:
+    # Hoechstgeschwindigkeit (m/s); der Burger schafft 0.22. In Kurven bremst der PID weiter
+    # ueber speed_curve_factor / min_speed_factor (Control_driving_PID_Wide.yaml).
+    MAX_VEL: 0.22
+/switch_control:
+  ros__parameters:
+    # Start im Stand an der Schranke; sobald sie 1 s weg ist ("Schranke offen") -> Lane.
+    initial_mode: Stop
+    # Nach der Ziellinie anhalten: Radachse finish_after_m (m) hinter der Linie -> Stop, Lauf beendet.
+    finish_enabled: true
+    finish_after_m: 0.3
+    # Start an/hinter der Linie: sie zaehlt erst nach finish_arm_distance (m) Fahrt. Steht die Ziellinie
+    # weiter als das vom Start weg, passt es; sonst Wert anpassen.
+    start_at_line: true
+    finish_arm_distance: 1.0
+    stop_sign_enabled: false
+    tunnel_sign_enabled: false

@@ -22,14 +22,27 @@
     # Rohbilds (800x600) liegt. VOR ORT EINSTELLEN: switch_control schreibt den aktuellen Wert
     # ins Log ("Ziellinie im Bild: Unterkante ... px"), Bot an die gewuenschte Haltestelle
     # stellen und den Wert hier eintragen. Groesser = Halt weiter vor der Linie.
-    finish_stop_px: 100.0
+    finish_stop_px: 150.0
     # Starten wir an der Linie? Dann zaehlt sie erst nach finish_arm_distance (m) Fahrt.
     # Standard aus: jede Linie beendet den Lauf.
     start_at_line: false
     finish_arm_distance: 1.0
+    # > 0: erst halten, wenn die Radachse so weit (m) HINTER der Ziellinie ist (Rennen.yaml);
+    # gehalten wird ueber die gemerkte Linie (Odometrie). 0 = vor der Linie (finish_stop_px).
+    finish_after_m: 0.0
     # Nur Boxen zaehlen, die die Bildmitte ueberdecken (Linie quer ueber die eigene Spur);
     # ein Schachbrett neben der Fahrbahn zaehlt dann nicht.
     finish_need_center: true
+
+    # --- Stoppschild (rote Pixel oben rechts, detect_lane: stop_roi_*, thresh_red_pixel) ---
+    # Nur im Modus Lane: halten, dann weiter; danach zaehlt Rot so lange (s) nicht, weil das
+    # Schild beim Wegfahren noch im Bild ist.
+    stop_sign_enabled: true
+    stop_sign_hold_s: 3.0
+    stop_sign_cooldown_s: 5.0
+    # Tunnelschild (/detect/sign/tunnel, Mindestgroesse in Follow_Lane_ROI_LAB.yaml: tunnel_min_height_px)
+    # startet den Tunnelmodus wie der Button im Debugbild. Live in rqt.
+    tunnel_sign_enabled: true
 
     # --- Storage (storage_sequence.py) ---
     # Zielzone sagt die Jury an.

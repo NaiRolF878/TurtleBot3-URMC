@@ -2,6 +2,7 @@
 
 Ein:  /scan_corrected, /detect/lane_obstacles (Spurgedaechtnis), /detect/sign,
       /control/tunnel_request, /detect/lines_lost, /tunnel/outside, /detect/barrier,
+      /detect/stop_sign,
       /intersection/active, dazu die Eingaenge der Storage-Aufgabe (storage_sequence.py)
 Aus:  /control/mode (UInt8, ControlType), /control/tunnel_source (String),
       /control/obstacle_enabled (Bool, fuers Debugbild), /control/align_yaw (Float64, Align),
@@ -11,9 +12,11 @@ Grundbewegungen in Obstacle und Tunnel (Engstelle, Freifahren, Weg genau abfahre
 ManeuverSequence (maneuver_sequence.py), die der Storage-Aufgabe StorageSequence.
 """
 import math
+import os
 import time
 
 import numpy as np
+from ament_index_python.packages import get_package_share_directory
 
 import rclpy
 from rclpy.node import Node
@@ -25,8 +28,10 @@ from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
 from Follow_Lane.src.common import (
-    ControlType, SignType, cloud_xy, frange, pose2d_from_transform, read_params, require_params,
-    run_node, scan_points, transform_points)
+    ControlType, SignType, bev_pixels_to_ground, cloud_xy, frange, pose2d_from_transform,
+    read_params, require_params, run_node, scan_points, transform_points)
+from Follow_Lane.src import bev_geometry
+from Follow_Lane.src.ingress_node_nav2 import CALIBRATION, EXTRINSICS, FISHEYE_BALANCE
 from Follow_Lane.src.maneuver_sequence import SEQUENCE_MODES, ManeuverSequence
 from Follow_Lane.src.storage_sequence import StorageSequence
 
@@ -57,7 +62,20 @@ BARRIER_CONFIRM = 3
 FINISH_CONFIRM = 3
 # Solange die Linie zu sehen ist, ihren Abstand hoechstens so oft (s) ins Log (zum Einstellen).
 FINISH_LOG_PERIOD_S = 1.0
+# Ziellinie per Odometrie weiterverfolgen (17.11.: beim Naeherkommen verlor die Erkennung die Linie
+# ab ~33-60 cm -- der Halt bei finish_stop_px kam nie). Gemerkt wird sie nach FINISH_CONFIRM
+# Erkennungen in Folge, die hoechstens FINISH_TRACK_MAX_M voraus liegen; vergessen, wenn sie
+# FINISH_PASSED_M hinter der Radachse liegt oder FINISH_MEMORY_S lang keine Erkennung kam.
+FINISH_TRACK_MAX_M = 0.80
+FINISH_PASSED_M = 0.15
+FINISH_MEMORY_S = 15.0
+# Rohbild (entzerrt), in dessen Pixeln /detect/start_line misst.
+RAW_W, RAW_H = 800, 600
 BARRIER_CLEAR_DEBOUNCE_S = 1.0
+# Stoppschild (rote Pixel im Bereich oben rechts, detect_lane): so viele Meldungen in Folge.
+STOP_SIGN_CONFIRM = 3
+# Tunnelschild (/detect/sign/tunnel): so viele Meldungen in Folge -> TunnelEntry.
+TUNNEL_SIGN_CONFIRM = 2
 
 # Ausrichten nach Obstacle (Modus Align): Spurrichtung = Hauptachse der gemerkten Linienpunkte
 # bis ALIGN_RADIUS_M um den Bot, nur bei eindeutig laenglicher Wolke (Eigenwert-Verhaeltnis).
@@ -114,6 +132,10 @@ class switch_control(Node):
     (/detect/barrier); Stop -> Lane, wenn sie BARRIER_CLEAR_DEBOUNCE_S lang weg ist
     (Schranke offen). In Stop sendet control_driving Null.
 
+    Lane -> Stop, wenn detect_lane STOP_SIGN_CONFIRM Mal in Folge ein Stoppschild meldet
+    (/detect/stop_sign, rote Pixel); nach stop_sign_hold_s zurueck zu Lane, danach zaehlt Rot
+    stop_sign_cooldown_s lang nicht (das Schild ist beim Wegfahren noch im Bild).
+
     Lane -> Intersection, solange intersection_node /intersection/active True meldet
     (Haltelinie erreicht: halten, Vorfahrt pruefen, queren); False -> zurueck zu Lane.
     """
@@ -138,13 +160,24 @@ class switch_control(Node):
         self.declare_parameter('finish_stop_px', Parameter.Type.DOUBLE, frange(0.0, 1000.0))
         self.declare_parameter('start_at_line', Parameter.Type.BOOL)
         self.declare_parameter('finish_arm_distance', Parameter.Type.DOUBLE, frange(0.0, 20.0))
+        # > 0: erst halten, wenn die Radachse so weit (m) HINTER der Ziellinie ist (Rennen); die
+        # Linie ist dann aus dem Bild, gehalten wird ueber die gemerkte Linie (Odometrie).
+        # 0 = vor der Linie halten (finish_stop_px).
+        self.declare_parameter('finish_after_m', Parameter.Type.DOUBLE, frange(0.0, 2.0))
         # Nur Boxen, die die Bildmitte (senkrecht) ueberdecken: eine Linie quer ueber die eigene
         # Spur tut das, ein Schachbrett neben der Fahrbahn nicht.
         self.declare_parameter('finish_need_center', Parameter.Type.BOOL)
+        # Stoppschild: an/aus, so lange (s) stehen, danach so lange (s) kein neues Stoppschild.
+        self.declare_parameter('stop_sign_enabled', Parameter.Type.BOOL)
+        self.declare_parameter('stop_sign_hold_s', Parameter.Type.DOUBLE, frange(0.0, 30.0))
+        self.declare_parameter('stop_sign_cooldown_s', Parameter.Type.DOUBLE, frange(0.0, 60.0))
+        # Tunnelschild startet den Tunnelmodus (wie der Button im Debugbild).
+        self.declare_parameter('tunnel_sign_enabled', Parameter.Type.BOOL)
         self._param_names = ['obstacle_check_angle_deg', 'obstacle_trigger_distance',
                              'obstacle_clear_distance', 'obstacle_enabled', 'finish_enabled',
-                             'finish_stop_px', 'start_at_line', 'finish_arm_distance',
-                             'finish_need_center']
+                             'finish_stop_px', 'start_at_line', 'finish_arm_distance', 'finish_after_m',
+                             'finish_need_center', 'stop_sign_enabled', 'stop_sign_hold_s',
+                             'stop_sign_cooldown_s', 'tunnel_sign_enabled']
         # Modus beim Start und nach einem Storage-Abbruch: Lane oder Stop.
         self.declare_parameter('initial_mode', Parameter.Type.STRING)
         require_params(self, self._param_names + ['initial_mode'])
@@ -157,6 +190,9 @@ class switch_control(Node):
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         # Noch ohne Publisher: der Schild-Detektor ist nicht gebaut.
         self.sub_sign = self.create_subscription(UInt8, '/detect/sign', self.cb_sign, 1)
+        self.sub_tunnel_sign = self.create_subscription(
+            Bool, '/detect/sign/tunnel', self.cb_tunnel_sign, 1)
+        self._tunnel_sign_hits = 0
         self.sub_tunnel_request = self.create_subscription(
             Bool, '/control/tunnel_request', self.cb_tunnel_request, 1)
         self.sub_lines_lost = self.create_subscription(
@@ -165,6 +201,8 @@ class switch_control(Node):
             Bool, '/tunnel/outside', self.cb_tunnel_outside, 1)
         self.sub_barrier = self.create_subscription(
             Bool, '/detect/barrier', self.cb_barrier, 1)
+        self.sub_stop_sign = self.create_subscription(
+            Bool, '/detect/stop_sign', self.cb_stop_sign, 1)
         self.sub_intersection_active = self.create_subscription(
             Bool, '/intersection/active', self.cb_intersection_active, 1)
         self.sub_start_line = self.create_subscription(
@@ -200,7 +238,17 @@ class switch_control(Node):
         self.maneuvers = ManeuverSequence(self)
         self._barrier_hits = 0            # Schranken-Meldungen in Folge
         self._barrier_clear_since = None  # seit wann keine Schranke mehr (Stop)
+        self._stop_sign_hits = 0          # Stoppschild-Meldungen in Folge
+        self._stop_sign_until = None      # Halt am Stoppschild bis (monotonic)
+        self._stop_sign_ignore_until = 0.0  # danach kein neues Stoppschild bis (monotonic)
         self._finish_hits = 0             # Ziellinie nah genug, Bilder in Folge
+        self._finish_track_hits = 0       # Ziellinie in Reichweite (FINISH_TRACK_MAX_M), in Folge
+        self._finish_line = None          # gemerkte Ziellinie: (x, y odom, monotonic)
+        # Rohbild-Pixel -> BEV -> Boden (wie intersection_node), fuer die Lage der Ziellinie.
+        pdir = os.path.join(get_package_share_directory('Follow_Lane'), 'Parameter')
+        bev_to_img, self._bev = bev_geometry.load_bev_to_image(
+            pdir, CALIBRATION, EXTRINSICS, FISHEYE_BALANCE)
+        self._img_to_bev = np.linalg.inv(bev_to_img)
         self._finished = False            # an der Ziellinie gehalten: Stop bleibt
         self._finish_log = 0.0            # letzte Abstandsmeldung (monotonic)
         self._travelled = 0.0             # gefahrene Strecke (m, odom) fuer start_at_line
@@ -213,6 +261,8 @@ class switch_control(Node):
     def cb_timer(self):
         self._update_tunnel_entry()
         self._update_travelled()
+        self._update_stop_sign()
+        self._update_finish_memory()
         if self._finished and not self.finish_enabled:
             self._finished = False
             self._set_mode(ControlType.Lane, 'Ziellinie-Halt aufgehoben (finish_enabled aus)')
@@ -238,9 +288,14 @@ class switch_control(Node):
                     f'Bildbreite, ueberdeckt die Mitte nicht) -- zaehlt nicht.')
         if self._finished or not self.finish_enabled or self.storage.active:
             self._finish_hits = 0
+            self._finish_track_hits = 0
+            self._finish_line = None
             return
+        self._remember_finish(on_lane, now)
         close = 0.0 <= gap <= self.finish_stop_px
         self._finish_hits = self._finish_hits + 1 if close else 0
+        if self.finish_after_m > 0.0:
+            return                          # Halt hinter der Linie: nur _update_finish_memory
         if self.control_mode != ControlType.Lane or self._finish_hits < FINISH_CONFIRM:
             return
         if self.start_at_line and self._travelled < self.finish_arm_distance:
@@ -250,6 +305,70 @@ class switch_control(Node):
             return
         self._finished = True
         self._set_mode(ControlType.Stop, f'Ziellinie erreicht ({gap:.0f} px) -- Lauf beendet')
+
+    def _gap_to_ground(self, gap_px, x_frac):
+        """Punkt im Rohbild (Unterkante gap_px ueber dem Rand, Spalte x_frac) -> Boden (x vor der
+        Radachse, y links) in m; None ueber dem Horizont."""
+        p = self._img_to_bev @ np.array([x_frac * RAW_W, RAW_H - gap_px, 1.0])
+        if p[2] <= 1e-9:
+            return None
+        X, Y = bev_pixels_to_ground(self._bev, p[0] / p[2], p[1] / p[2])
+        return float(X), float(Y)
+
+    def _remember_finish(self, on_lane, now):
+        """Naechste Ziellinien-Box (Mitte der Unterkante) in odom merken, sobald sie
+        FINISH_CONFIRM Mal in Folge hoechstens FINISH_TRACK_MAX_M voraus lag."""
+        if not on_lane:
+            return                          # Linie (gerade) nicht gesehen: Erinnerung bleibt
+        b = min(on_lane, key=lambda b: b[0])
+        ground = self._gap_to_ground(b[0], (b[1] + b[2]) / 2.0)
+        if ground is None or not 0.0 < ground[0] <= FINISH_TRACK_MAX_M:
+            self._finish_track_hits = 0
+            return
+        self._finish_track_hits += 1
+        pose = self._robot_pose()
+        if pose is None or self._finish_track_hits < FINISH_CONFIRM:
+            return
+        x, y, yaw = pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        first = self._finish_line is None
+        self._finish_line = (x + c * ground[0] - s * ground[1], y + s * ground[0] + c * ground[1], now)
+        if first:
+            self.get_logger().info(f'Ziellinie gemerkt: {ground[0] * 100:.0f} cm voraus -- Halt auch, '
+                                   'wenn die Erkennung sie verliert (Odometrie).')
+
+    def _update_finish_memory(self):
+        """Gemerkte Ziellinie: Halt, sobald sie so nah ist wie finish_stop_px am Boden."""
+        if self._finish_line is None or self._finished:
+            return
+        lx, ly, seen = self._finish_line
+        pose = self._robot_pose()
+        if pose is None:
+            return
+        x, y, yaw = pose
+        ahead = math.cos(yaw) * (lx - x) + math.sin(yaw) * (ly - y)
+        if ahead < -(FINISH_PASSED_M + self.finish_after_m) \
+                or time.monotonic() - seen > FINISH_MEMORY_S:
+            self._finish_line = None
+            self._finish_track_hits = 0
+            return
+        if self.finish_after_m > 0.0:
+            stop_x = -self.finish_after_m   # Radachse finish_after_m hinter der Linie
+        else:
+            stop = self._gap_to_ground(self.finish_stop_px, 0.5)
+            stop_x = stop[0] if stop is not None else 0.0
+        if self.control_mode != ControlType.Lane or ahead > stop_x:
+            return
+        if self.start_at_line and self._travelled < self.finish_arm_distance:
+            self.get_logger().info(
+                f'Startlinie (erst {self._travelled:.2f} von {self.finish_arm_distance:.2f} m '
+                'gefahren) -- kein Halt.', throttle_duration_sec=5.0)
+            self._finish_line = None
+            return
+        self._finished = True
+        self._finish_line = None
+        where = f'{-ahead * 100:.0f} cm dahinter' if ahead < 0.0 else f'{ahead * 100:.0f} cm voraus'
+        self._set_mode(ControlType.Stop, f'Ziellinie (Odometrie, {where}) -- Lauf beendet')
 
     def _update_travelled(self):
         pose = self._robot_pose()
@@ -279,6 +398,17 @@ class switch_control(Node):
         if sign == SignType.Tunnel:
             self._enter_tunnel('auto')
 
+    def cb_tunnel_sign(self, msg):
+        """Tunnelschild (gross genug, siehe detect_lane): TUNNEL_SIGN_CONFIRM Meldungen in Folge
+        im Modus Lane -> TunnelEntry (Quelle "Schild")."""
+        self._tunnel_sign_hits = self._tunnel_sign_hits + 1 if msg.data else 0
+        if not self.tunnel_sign_enabled or self.control_mode not in (ControlType.Lane,
+                                                                     ControlType.Align):
+            return
+        if self._tunnel_sign_hits >= TUNNEL_SIGN_CONFIRM:
+            self._tunnel_sign_hits = 0
+            self._enter_tunnel('Schild')
+
     def cb_tunnel_request(self, msg):
         if msg.data:
             self._enter_tunnel('manuell')
@@ -298,12 +428,36 @@ class switch_control(Node):
             self.get_logger().info('Bot ist aus dem Tunnelkasten hinausgefahren.')
             self._leave_tunnel(ControlType.Lane)
 
+    def cb_stop_sign(self, msg):
+        """Stoppschild: STOP_SIGN_CONFIRM Meldungen in Folge im Modus Lane -> Stop fuer
+        stop_sign_hold_s (Weiterfahrt in _update_stop_sign)."""
+        now = time.monotonic()
+        if not self.stop_sign_enabled or self.storage.active or self._finished \
+                or self._stop_sign_until is not None or now < self._stop_sign_ignore_until:
+            self._stop_sign_hits = 0
+            return
+        self._stop_sign_hits = self._stop_sign_hits + 1 if msg.data else 0
+        if self.control_mode == ControlType.Lane and self._stop_sign_hits >= STOP_SIGN_CONFIRM:
+            self._stop_sign_hits = 0
+            self._stop_sign_until = now + self.stop_sign_hold_s
+            self._set_mode(ControlType.Stop, f'Stoppschild -- {self.stop_sign_hold_s:.0f} s halten')
+
+    def _update_stop_sign(self):
+        if self._stop_sign_until is None or time.monotonic() < self._stop_sign_until:
+            return
+        self._stop_sign_until = None
+        self._stop_sign_ignore_until = time.monotonic() + self.stop_sign_cooldown_s
+        # Nur weiterfahren, wenn inzwischen niemand anders den Modus gewechselt hat.
+        if self.control_mode == ControlType.Stop:
+            self._set_mode(ControlType.Lane, 'Stoppschild: Halt vorbei, weiter')
+
     def cb_barrier(self, msg):
         # Storage steuert die Modi selbst (auch Stop beim Lesen/Greifen/Ablegen, Lane beim
         # Erkunden); die Schilder sind blau wie die Schranke. "Schranke offen" wuerde sonst
         # mitten in Storage auf Lane schalten.
-        if self.storage.active or self._finished:
+        if self.storage.active or self._finished or self._stop_sign_until is not None:
             # An der Ziellinie gehalten: "Schranke offen" darf den Lauf nicht wieder starten.
+            # Am Stoppschild ebenso: "keine Schranke" wuerde den Halt nach 1 s beenden.
             self._barrier_hits = 0
             self._barrier_clear_since = None
             return

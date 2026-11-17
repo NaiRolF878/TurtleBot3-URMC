@@ -28,8 +28,12 @@ PASSAGE_ANGLE_DEG = 30
 PASSAGE_SHIFT_M = 0.03
 PASSAGE_SHIFT_STEP_M = 0.005
 PASSAGE_SWEEP_M = 0.12
-# Drehen auf der Stelle: Umkreis des Footprints 0,105 m plus 5 mm bis zur Wandzelle.
-ROTATE_CLEAR_M = 0.11
+# Drehen auf der Stelle: Umkreis des Footprints 0,105 m plus Reserve bis zur Wandzelle. Mit nur 5 mm
+# (0.11) hielt der Waechter beim Drehen vor dem Tunnelausgang an (17.11.): seine local_costmap weicht
+# von der Karte hier um mehr ab.
+ROTATE_CLEAR_M = 0.13
+# Zweiter Versuch nach Waechter-Abbruch an derselben Engstelle: so viel (m) mehr Platz zum Drehen.
+RETRY_EXTRA_CLEAR_M = 0.03
 # Engstelle entlang der Geraden: wo auf beiden Seiten Wandzellen bis so weit (m) neben dem Bot
 # liegen, gesucht bis PASSAGE_REACH_M vor und hinter der Mitte.
 FLANK_M = 0.04
@@ -99,7 +103,7 @@ def gap_edges(cells, info_res, point, direction):
     return (left + right) / 2.0, axis, length
 
 
-def passage_line(grid, info_res, origin_xy, center, axis):
+def passage_line(grid, info_res, origin_xy, center, axis, rotate_clear=ROTATE_CLEAR_M):
     """Gerade fuer die Durchfahrt einer Engstelle: (Start, Ende, Luft in m) oder None.
 
     Richtung und Lage: den Footprint +-PASSAGE_SWEEP_M um center entlang schieben, um axis und
@@ -161,7 +165,7 @@ def passage_line(grid, info_res, origin_xy, center, axis):
         first -= 1
     while last < s.size - 1 and flanked[last + 1]:
         last += 1
-    roomy = lookup(point + s[:, None] * d) >= ROTATE_CLEAR_M
+    roomy = lookup(point + s[:, None] * d) >= rotate_clear
     before = np.flatnonzero(roomy[:first + 1])
     if before.size == 0:
         return None
@@ -190,7 +194,7 @@ def first_contact(path_xy, grid, res, origin, robot_xy):
     return next(contacts(path_xy, grid, res, origin, robot_xy), None)
 
 
-def check_path(path_xy, grid, res, origin, robot_xy):
+def check_path(path_xy, grid, res, origin, robot_xy, rotate_clear=ROTATE_CLEAR_M):
     """Passt der Bot auf dem Pfad (N, 2) bis CHECK_AHEAD_M voraus?
 
     (FREE, None): der Umriss stoesst in Pfadrichtung nirgends an, nur einseitig (z.B. an eine
@@ -212,7 +216,7 @@ def check_path(path_xy, grid, res, origin, robot_xy):
             # die Engstelle liegen, an der der Bot nicht vorbeikommt.
             continue
         center, axis, width = gap
-        line = passage_line(grid, res, origin, center, axis)
+        line = passage_line(grid, res, origin, center, axis, rotate_clear)
         if line is None:
             return FREE, None
         if line[2] <= 0.0:

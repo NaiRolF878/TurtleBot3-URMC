@@ -21,3 +21,9 @@ lab_l_white_h: 255
 lab_l_white_l: 201
 lab_l_yellow_h: 255
 lab_l_yellow_l: 146
+lab_a_red_h: 255
+lab_a_red_l: 100
+lab_b_red_h: 255
+lab_b_red_l: 140
+lab_l_red_h: 230
+lab_l_red_l: 40

@@ -6,6 +6,7 @@ Aus:  /detect/lane (Float64), /detect/lane_debug, /detect/mask_debug/compressed,
       /detect/lane_mask (LaneMask fuer lane_costmap_node),
       /detect/lines_lost (Bool, nur TunnelEntry),
       /detect/barrier, /detect/barrier_pixels, /detect/barrier_debug/compressed,
+      /detect/stop_sign (Bool), /detect/stop_sign_pixels (Int32),
       /detect/objects (vision_msgs/Detection2DArray, Pixel im Rohbild),
       /detect/intersection (PolygonStamped, Kreuzungsfeld in BEV-Pixeln),
       /detect/lane_far (Float64MultiArray, nur im Modus Intersection),
@@ -65,6 +66,10 @@ ERODE_KERNEL = 5
 # gehalten wird.
 WHITE_ALTERNATIVE = 0.65
 YELLOW_ALTERNATIVE = 0.35
+# Ecke mit Luecke (17.11., Strecke im Wettbewerb): die eigene Linie endet, die Querlinie beginnt
+# erst daneben (teils andere Farbe). Querkante zaehlt, wenn ihr naechster Punkt hoechstens so weit
+# (m) vom Ende der eigenen Linie liegt und sie nach aussen weggeht.
+CORNER_GAP_M = 0.08
 # Kreuzungserkennung: Mindestlaenge einer Kante (px, 1,25 mm/px), Konturen kleiner als
 # MIN_CONTOUR_AREA (px^2) sind Rauschen, POLY_EPSILON (px) = Toleranz der Polygone.
 MIN_EDGE_LEN = 30
@@ -108,11 +113,28 @@ FAR_BAND_PX = 16
 FAR_ROW_STEP_PX = 16
 FAR_MIN_ROWS = 8
 FAR_MAX_LANE_WIDTH_M = 0.30
+# auto_swap_colors: auf welcher Seite liegt Gelb, auf welcher Weiss? Gezaehlt im unteren Teil des
+# BEV (Anteil der Hoehe ab unten), nur +-AUTO_HALF_M um die Bot-Mitte (die Gegenspur bleibt draussen).
+# Median-Spalte Weiss minus Gelb > AUTO_SEP_M -> normal (Gelb links), < -AUTO_SEP_M -> getauscht.
+# Umgeschaltet erst nach AUTO_CONFIRM Bildern in Folge mit dem anderen Ergebnis.
+AUTO_BAND = 0.5
+AUTO_HALF_M = 0.25
+AUTO_SEP_M = 0.06
+AUTO_MIN_PX = 300
+AUTO_CONFIRM = 8
 # Nach der Kreuzung hoechstens so lange (s) auf das ferne Paar regeln, bis die Suchzeile
 # wieder beide Linien hat.
 EXIT_FAR_S = 5.0
 # Schranken-Debugbild (Rohbild) hoechstens so oft (s).
 BARRIER_DEBUG_PERIOD_S = 0.1
+# Rotes Einfahrt-verboten-Schild ist kein Stoppschild: hat die Objekterkennung 'no_entry' (mind.
+# no_entry_min_conf) innerhalb so vieler Sekunden gesehen, wird Rot nicht gemeldet. Die
+# Erkennung laeuft nur mit detector_rate_hz (~10/s), die Rotpruefung auf jedem Rohbild.
+NO_ENTRY_HOLD_S = 0.5
+# Schilder der Objekterkennung: jedes bekommt ein eigenes Topic /detect/sign/<name> (Bool), True =
+# in diesem Bild gesehen (Konfidenz >= sign_min_conf, Box mindestens <name>_min_height_px bzw.
+# sign_min_height_px hoch, Pixel im Rohbild). Gesendet bei jedem Lauf der Objekterkennung.
+SIGN_CLASSES = ('park', 'tunnel', 'stop', 'left', 'right', 'work', 'no_entry')
 # Objekterkennung (Schilder, andere Bots, Startlinie) auf dem Rohbild: YOLO oder RF-DETR als
 # TensorRT-Engine, relativ zum Repo-Ordner (muss mit der TensorRT-Version im Container gebaut
 # sein, siehe yolo_trt.py). Parameter 'detector' (YAML oder live per ros2 param set) waehlt
@@ -163,6 +185,10 @@ class detect_lane(Node):
             # Blau fuer die Schranke (aus detect_lane.py, Kalibrierung-Tests 188048a)
             'lab_l_blue_l', 'lab_l_blue_h', 'lab_a_blue_l', 'lab_a_blue_h',
             'lab_b_blue_l', 'lab_b_blue_h',
+            # Rot fuer das Stoppschild. Gemessen 17.11. (CLAHE): Schild A 154-165 B 155-173,
+            # lila Pullover A 128-144 B 108-145 -> A und B je >= ~148 trennt beide.
+            'lab_l_red_l', 'lab_l_red_h', 'lab_a_red_l', 'lab_a_red_h',
+            'lab_b_red_l', 'lab_b_red_h',
         ]
         for name in self._param_names:
             self.declare_parameter(name, Parameter.Type.INTEGER, byte)
@@ -177,6 +203,25 @@ class detect_lane(Node):
         # Schranke: ab so vielen blauen Pixeln im Suchbereich des Rohbilds gilt sie als da.
         # Die aktuelle Zahl steht im Debugbild, danach einstellen.
         self.declare_parameter('thresh_blue_pixel', Parameter.Type.INTEGER, irange(0, 500000))
+        # Stoppschild: rote Pixel (lab_*_red_*) im Bereich stop_roi_* (Anteile der Bildbreite
+        # bzw. -hoehe des Rohbilds, oben rechts); ab thresh_red_pixel gilt es als gesehen. Die
+        # aktuelle Zahl steht im Schranken-Debugbild ("Rot: n / Schwelle"), danach einstellen.
+        self.declare_parameter('thresh_red_pixel', Parameter.Type.INTEGER, irange(0, 500000))
+        # Sieht die Objekterkennung 'no_entry' mit mindestens dieser Konfidenz, ist das Rot das
+        # Einfahrt-verboten-Schild -> kein Stoppschild.
+        self.declare_parameter('no_entry_min_conf', Parameter.Type.DOUBLE, frange(0.0, 1.0))
+        # true = Gelb- und Weiss-Maske tauschen (Strecke mit Weiss links, Gelb rechts). Live in rqt.
+        self.declare_parameter('swap_colors', Parameter.Type.BOOL)
+        # true = Seite der Farben selbst erkennen und Masken passend tauschen (swap_colors nur
+        # Startwert). Live in rqt.
+        self.declare_parameter('auto_swap_colors', Parameter.Type.BOOL)
+        # Schilder (/detect/sign/<name>): Mindest-Konfidenz und Mindesthoehe der Box (px im
+        # Rohbild 800x600); tunnel_min_height_px nur fuer das Tunnelschild. Live in rqt.
+        self.declare_parameter('sign_min_conf', Parameter.Type.DOUBLE, frange(0.0, 1.0))
+        self.declare_parameter('sign_min_height_px', Parameter.Type.INTEGER, irange(0, 600))
+        self.declare_parameter('tunnel_min_height_px', Parameter.Type.INTEGER, irange(0, 600))
+        for name in ('stop_roi_x0', 'stop_roi_x1', 'stop_roi_y0', 'stop_roi_y1'):
+            self.declare_parameter(name, Parameter.Type.DOUBLE, frange(0.0, 1.0))
         # Objekterkennung: Kurzname aus DETECTORS, Pfad zu einer .engine oder 'aus'. Live
         # umschaltbar (ros2 param set /detect_lane detector rfdetr384), laedt dann neu (~1 s).
         self.declare_parameter('detector', Parameter.Type.STRING)
@@ -185,7 +230,11 @@ class detect_lane(Node):
         self.declare_parameter('detector_rate_hz', Parameter.Type.DOUBLE, frange(0.0, 60.0))
         self._param_names += ['detection_row_factor', 'min_lane_width',
                               'clahe_clip_limit', 'clahe_tile_grid_size',
-                              'thresh_blue_pixel', 'detector', 'detector_rate_hz']
+                              'thresh_blue_pixel', 'detector', 'detector_rate_hz',
+                              'thresh_red_pixel', 'stop_roi_x0', 'stop_roi_x1', 'stop_roi_y0',
+                              'stop_roi_y1', 'no_entry_min_conf', 'swap_colors',
+                              'auto_swap_colors', 'sign_min_conf', 'sign_min_height_px',
+                              'tunnel_min_height_px']
         require_params(self, self._param_names)
         read_params(self, ['detector', 'detector_rate_hz'])
         try:
@@ -218,12 +267,16 @@ class detect_lane(Node):
         # blauen Pixel fuers Debugbild, Rohbild mit blauer Maske zum Einstellen.
         self.pub_barrier = self.create_publisher(Bool, '/detect/barrier', 1)
         self.pub_barrier_pixels = self.create_publisher(Int32, '/detect/barrier_pixels', 1)
+        self.pub_stop_sign = self.create_publisher(Bool, '/detect/stop_sign', 1)
+        self.pub_stop_sign_pixels = self.create_publisher(Int32, '/detect/stop_sign_pixels', 1)
         self.pub_barrier_debug = self.create_publisher(
             CompressedImage, '/detect/barrier_debug/compressed', 1)
         # Kreuzungsfeld (Mitte zwischen den Ecken, BEV-Pixel), sobald bestaetigt; sonst leer.
         self.pub_intersection = self.create_publisher(PolygonStamped, '/detect/intersection', 1)
         # YOLO-Boxen im Rohbild (Pixel), Header = der des Rohbilds.
         self.pub_objects = self.create_publisher(Detection2DArray, '/detect/objects', 1)
+        self.pub_signs = {name: self.create_publisher(Bool, f'/detect/sign/{name}', 1)
+                          for name in SIGN_CLASSES}
         # Start-/Ziellinie (YOLO 'start_line'): je Box [Abstand Unterkante -> unterer Bildrand
         # (px im Rohbild), linker Rand, rechter Rand (Anteil der Bildbreite 0..1)], leer = keine.
         # switch_control entscheidet daraus, ob gehalten wird (Lauf beendet).
@@ -246,6 +299,8 @@ class detect_lane(Node):
         # Je Linie (Spalte, Zeitpunkt der letzten Detektion) oder None; eigener Logger
         # je Linie, damit die gedrosselten Meldungen sich nicht gegenseitig verschlucken.
         self._anchor = {'Gelb': None, 'Weiss': None}
+        self._colors_swapped = None     # auto_swap_colors: aktuell getauscht?
+        self._swap_votes = 0            # Bilder in Folge, die fuer den Wechsel sprechen
         self._line_log = {name: self.get_logger().get_child(name.lower()) for name in self._anchor}
         self._intersection_hits = deque(maxlen=INTERSECTION_CONFIRM[1])
         self._intersection_seen = False
@@ -259,6 +314,8 @@ class detect_lane(Node):
         self.yolo = self.load_detector(self.detector)
         self._yolo_times = []    # Dauer je Bild (ms) fuers gedrosselte Log
         self._detect_last = None   # monotonic des letzten Laufs (detector_rate_hz)
+        self._no_entry_time = None  # monotonic der letzten 'no_entry'-Box (Stoppschild-Sperre)
+        self._no_entry_score = 0.0
         self._timing = defaultdict(list)   # Messreihe -> Werte seit dem letzten publish_timing
         self._last_arrival = {}            # 'raw'/'bev'/'pid' -> monotonic der letzten Ankunft
         self._timing_count = 0
@@ -649,6 +706,9 @@ class detect_lane(Node):
         abgerundet ist, aendert den Schnittpunkt nicht: Boegen werden uebersprungen,
         es zaehlen nur die geraden Kanten davor und danach.
 
+        Endet die eigene Linie ohne Knick, zaehlt auch eine Querlinie, die bis CORNER_GAP_M
+        neben ihrem Ende beginnt und nach aussen weggeht (_gap_corner, Ecken mit Luecke).
+
         Ecke links und rechts etwa gleich weit voraus = Kreuzung, die Verbindung beider
         Ecken ist die Haltelinie. Nur eine Ecke und die Gegenlinie laeuft gerade weiter =
         Einmuendung von der Seite (T-Kreuzung, _straight_past): Haltelinie von der Ecke quer bis
@@ -665,6 +725,8 @@ class detect_lane(Node):
         horizontal, vertical, corners = [], [], {}
         for side, point, outward in (('links', yellow_point, -1), ('rechts', white_point, 1)):
             found = self._corner_of_line(polies, point, outward)
+            if found is None:
+                found = self._gap_corner(polies, point, outward)
             if found is None:
                 continue
             corner, long_end, cross_end = found
@@ -777,6 +839,64 @@ class detect_lane(Node):
                     return None
             idx = (idx + step) % n
         return None
+
+    def _gap_corner(self, polies, point, outward):
+        """Ecke ohne durchgehende Linie: die eigene Linie endet vorn, eine Querkante beginnt bis
+        CORNER_GAP_M daneben und geht nach aussen (outward) weg. Ecke = Schnittpunkt der
+        verlaengerten Innenkante mit der Querkante. Gleiches Ergebnis wie _corner_of_line oder
+        None."""
+        px, py = float(point[0]), float(point[1])
+        best = None
+        for k, poly in enumerate(polies):
+            pts = poly.reshape(-1, 2).astype(float)
+            for i in range(len(pts)):
+                p1, p2 = pts[i], pts[(i + 1) % len(pts)]
+                if np.linalg.norm(p2 - p1) < MIN_EDGE_LEN \
+                        or self.angle_diff(self.line_dir(p1, p2), 90.0) > LONG_TOL_DEG:
+                    continue
+                if not min(p1[1], p2[1]) - 5 <= py <= max(p1[1], p2[1]) + 5:
+                    continue
+                dist = abs(self._x_at(p1, p2, py) - px)
+                if best is None or dist < best[0]:
+                    best = (dist, k, pts, p1, p2)
+        if best is None or best[0] > 15:
+            return None
+        _, own_k, own, a, b = best
+        long_start, long_end = (a, b) if b[1] < a[1] else (b, a)      # vorn = kleineres y
+        # Vorderes Ende der eigenen Linie: weitester Punkt ihres Polygons in Laengsrichtung.
+        fwd = (long_end - long_start) / max(np.linalg.norm(long_end - long_start), 1e-6)
+        tip_y = float(own[np.argmax((own - long_start) @ fwd)][1])
+        tip = np.array([self._x_at(long_start, long_end, tip_y), tip_y])
+        long_dir = self.line_dir(long_start, long_end)
+        gap_px = CORNER_GAP_M / self._res()
+        own_contour = own.astype(np.float32).reshape(-1, 1, 2)
+        found = None
+        for k, poly in enumerate(polies):
+            if k == own_k:
+                continue
+            pts = poly.reshape(-1, 2).astype(float)
+            for i in range(len(pts)):
+                q1, q2 = pts[i], pts[(i + 1) % len(pts)]
+                if np.linalg.norm(q2 - q1) * self._res() < MIN_CROSS_LEN_M \
+                        or abs(self.angle_diff(self.line_dir(q1, q2), long_dir) - 90.0) > CROSS_TOL_DEG:
+                    continue
+                near, far = (q1, q2) if np.linalg.norm(q1 - tip) <= np.linalg.norm(q2 - tip) else (q2, q1)
+                if np.sign(far[0] - near[0]) != outward:
+                    continue                    # geht nach innen (ueber die eigene Spur)
+                # Luecke = Abstand zum Umriss der eigenen Linie (nicht zur Innenkante: sonst zaehlte
+                # die Linienbreite mit).
+                dist = max(0.0, -cv2.pointPolygonTest(own_contour, (float(near[0]), float(near[1])), True))
+                if dist > gap_px or (near[0] - tip[0]) * outward < -gap_px / 2:
+                    continue
+                if found is None or dist < found[0]:
+                    found = (dist, near, far)
+        if found is None:
+            return None
+        _, near, far = found
+        corner = self._intersect(long_start, long_end, near, far)
+        if corner is None or corner[1] > long_start[1] or np.linalg.norm(corner - tip) > 2 * gap_px:
+            return None
+        return corner, long_start, far
 
     def _straight_past(self, polies, point, mask, corner_y, outward):
         """x der Innenkante der Gegenlinie auf Hoehe corner_y, wenn sie dort gerade verlaeuft
@@ -988,7 +1108,47 @@ class detect_lane(Node):
         mask_white = cv2.inRange(lab,
             (self.lab_l_white_l, self.lab_a_white_l, self.lab_b_white_l),
             (self.lab_l_white_h, self.lab_a_white_h, self.lab_b_white_h))
+        if self.auto_swap_colors:
+            swap = self._update_color_side(mask_yellow, mask_white)
+        else:
+            swap = self.swap_colors
+            self._colors_swapped = None
+        if swap:
+            return mask_white, mask_yellow
         return mask_yellow, mask_white
+
+    def _update_color_side(self, mask_yellow, mask_white):
+        """auto_swap_colors: Gelb links/Weiss rechts (False) oder umgekehrt (True), mit Entprellung."""
+        if self._colors_swapped is None:
+            self._colors_swapped = bool(self.swap_colors)
+            self._swap_votes = 0
+        h, w = mask_yellow.shape[:2]
+        res = self._res()
+        half = int(AUTO_HALF_M / res)
+        c0, c1 = max(0, w // 2 - half), min(w, w // 2 + half)
+        r0 = int(h * (1.0 - AUTO_BAND))
+        cols_y = np.nonzero(mask_yellow[r0:, c0:c1])[1]
+        cols_w = np.nonzero(mask_white[r0:, c0:c1])[1]
+        vote = None
+        if cols_y.size >= AUTO_MIN_PX and cols_w.size >= AUTO_MIN_PX:
+            diff = (float(np.median(cols_w)) - float(np.median(cols_y))) * res
+            if diff > AUTO_SEP_M:
+                vote = False
+            elif diff < -AUTO_SEP_M:
+                vote = True
+        if vote is None or vote == self._colors_swapped:
+            self._swap_votes = 0
+        else:
+            self._swap_votes += 1
+            if self._swap_votes >= AUTO_CONFIRM:
+                self._colors_swapped = vote
+                self._swap_votes = 0
+                # Linien neu suchen: die alten Anker liegen auf der anderen Seite.
+                self._anchor = {name: None for name in self._anchor}
+                self.get_logger().warn(
+                    'Farbseiten gewechselt: ' + ('Weiss LINKS, Gelb RECHTS -- Masken getauscht.'
+                                                 if vote else 'Gelb LINKS, Weiss RECHTS -- normal.'))
+        return self._colors_swapped
 
     def detectBarrier(self):
         if self.raw_image is None or self.control_mode in (None, ControlType.Tunnel):
@@ -1004,21 +1164,36 @@ class detect_lane(Node):
             roi = cv_image[y0:y1, x0:x1]
             mask_blue = self.blue_mask(roi)
             num_blue_pixel = cv2.countNonZero(mask_blue)
+            # Stoppschild: rote Pixel im eigenen Bereich (oben rechts).
+            red_roi = (int(img_width * self.stop_roi_x0), int(img_height * self.stop_roi_y0),
+                       int(img_width * self.stop_roi_x1), int(img_height * self.stop_roi_y1))
+            rx0, ry0, rx1, ry1 = red_roi
+            mask_red = self.red_mask(cv_image[ry0:ry1, rx0:rx1]) \
+                if rx1 > rx0 and ry1 > ry0 else np.zeros((0, 0), np.uint8)
+            num_red_pixel = cv2.countNonZero(mask_red) if mask_red.size else 0
         except Exception as e:  # noqa: BLE001 -- ein kaputtes Bild darf den Node nicht stoppen
-            self.get_logger().error(f'Schrankenerkennung fehlgeschlagen: {e}',
+            self.get_logger().error(f'Schranken-/Stoppschilderkennung fehlgeschlagen: {e}',
                                     throttle_duration_sec=5.0)
             return None
 
         barrier = num_blue_pixel >= self.thresh_blue_pixel
         self.pub_barrier.publish(Bool(data=barrier))
         self.pub_barrier_pixels.publish(Int32(data=num_blue_pixel))
+        no_entry = self._no_entry_time is not None \
+            and time.monotonic() - self._no_entry_time <= NO_ENTRY_HOLD_S
+        stop_sign = num_red_pixel >= self.thresh_red_pixel and not no_entry
+        self.pub_stop_sign.publish(Bool(data=stop_sign))
+        self.pub_stop_sign_pixels.publish(Int32(data=num_red_pixel))
         self.publish_barrier_debug(cv_image, mask_blue, (x0, y0, x1, y1), num_blue_pixel,
-                                   barrier)
+                                   barrier, mask_red, red_roi, num_red_pixel, stop_sign,
+                                   self._no_entry_score if no_entry else None)
         return barrier
 
-    def publish_barrier_debug(self, img, mask_blue, roi, num_blue_pixel, barrier):
-        """Rohbild mit blauer Maske im Suchbereich, Rahmen und Pixelzahl. Nur wenn es
-        jemand anschaut."""
+    def publish_barrier_debug(self, img, mask_blue, roi, num_blue_pixel, barrier,
+                              mask_red=None, red_roi=None, num_red_pixel=0, stop_sign=False,
+                              no_entry_score=None):
+        """Rohbild mit blauer Maske im Suchbereich (Schranke) und roter im Stoppschild-Bereich,
+        Rahmen und Pixelzahlen. Nur wenn es jemand anschaut."""
         if self.pub_barrier_debug.get_subscription_count() == 0:
             return
         # Hoechstens BARRIER_DEBUG_PERIOD_S: das Rohbild kommt 30x/s, JPEG kostet Zeit.
@@ -1038,6 +1213,20 @@ class detect_lane(Node):
         if barrier:
             text += '  SCHRANKE'
         cv2.putText(view, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+        if red_roi is not None and mask_red is not None and mask_red.size:
+            rx0, ry0, rx1, ry1 = red_roi
+            area = view[ry0:ry1, rx0:rx1]
+            hit = mask_red > 0
+            area[hit] = (0.4 * area[hit] + 0.6 * np.array([0, 0, 255])).astype(np.uint8)
+            cv2.rectangle(view, (rx0, ry0), (rx1 - 1, ry1 - 1), (0, 0, 255), 2)
+            color = (0, 0, 255) if stop_sign else (0, 255, 0)
+            text = f'Rot: {num_red_pixel} / {self.thresh_red_pixel}'
+            if stop_sign:
+                text += '  STOPPSCHILD'
+            elif no_entry_score is not None:
+                text += f'  no_entry {no_entry_score:.2f}: kein Halt'
+            cv2.putText(view, text, (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2,
+                        cv2.LINE_AA)
 
         success, encoded = cv2.imencode('.jpg', view)
         if not success:
@@ -1054,6 +1243,13 @@ class detect_lane(Node):
         return cv2.inRange(lab,
             (self.lab_l_blue_l, self.lab_a_blue_l, self.lab_b_blue_l),
             (self.lab_l_blue_h, self.lab_a_blue_h, self.lab_b_blue_h))
+
+    def red_mask(self, img):
+        """Rot-Maske aus dem BGR-Bild (Stoppschild): CLAHE auf L, dann Schwellen in LAB."""
+        lab = self.apply_clahe(img)
+        return cv2.inRange(lab,
+            (self.lab_l_red_l, self.lab_a_red_l, self.lab_b_red_l),
+            (self.lab_l_red_h, self.lab_a_red_h, self.lab_b_red_h))
 
     def apply_clahe(self, img):
         """BGR -> LAB mit CLAHE auf dem L-Kanal."""
@@ -1101,8 +1297,27 @@ class detect_lane(Node):
                 f'max {np.max(self._yolo_times):.1f} ms')
             self._yolo_times = []
         self.publish_detections(detections)
+        self.publish_signs(detections)
+        no_entry = [score for _, _, _, _, score, _, name in detections if name == 'no_entry']
+        if no_entry and max(no_entry) >= self.no_entry_min_conf:
+            self._no_entry_time = time.monotonic()
+            self._no_entry_score = float(max(no_entry))
         self._timing['yolo_age_ms'].append(self.age_ms(self.raw_image.header.stamp))
         return detections
+
+    def publish_signs(self, detections):
+        """Je Schild /detect/sign/<name>: True, wenn eine Box mit genug Konfidenz und Hoehe da ist."""
+        for name, pub in self.pub_signs.items():
+            min_h = self.tunnel_min_height_px if name == 'tunnel' else self.sign_min_height_px
+            boxes = [(y1 - y0, score) for x0, y0, x1, y1, score, _, n in detections
+                     if n == name and score >= self.sign_min_conf]
+            seen = any(h >= min_h for h, _ in boxes)
+            if boxes and name == 'tunnel':
+                h, score = max(boxes)
+                self.get_logger().info(
+                    f'Tunnelschild: Box {h:.0f} px hoch (Schwelle {min_h}), Konfidenz {score:.2f}'
+                    + (' -- GEMELDET' if seen else ' -- noch zu klein'), throttle_duration_sec=1.0)
+            pub.publish(Bool(data=bool(seen)))
 
     def publish_detections(self, detections):
         """Boxen auf /detect/objects und die Start-/Ziellinie auf /detect/start_line,

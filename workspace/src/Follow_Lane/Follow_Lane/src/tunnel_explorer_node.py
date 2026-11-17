@@ -247,6 +247,15 @@ class tunnel_explorer_node(Node):
             passage, self._pending_passage = self._pending_passage, None
             if msg.success:
                 self.get_logger().info(f'Engstelle durchfahren -- plane neu zu {self._kind}.')
+            elif passage is not None and 'Waechter' in msg.reason \
+                    and not self._near(passage[2], self._retry_gaps):
+                # Waechter hat beim Ausrichten angehalten (zu knapp an der Wand): nicht gleich
+                # sperren, einmal mit Start weiter vor der Engstelle neu versuchen.
+                self._retry_gaps.append(passage[2])
+                self.get_logger().warn(
+                    f'Engstelle bei x={passage[2][0]:.2f} y={passage[2][1]:.2f}: Waechter hat '
+                    f'angehalten ({msg.reason}) -- 2. Versuch mit '
+                    f'{(pg.ROTATE_CLEAR_M + pg.RETRY_EXTRA_CLEAR_M) * 100:.0f} cm Drehplatz.')
             elif passage is not None:
                 self._failed_gaps.append(passage[2])
                 self._block(passage[2], passage[3], passage[4],
@@ -635,6 +644,13 @@ class tunnel_explorer_node(Node):
         steht."""
         grid, res, origin = self._grid()
         verdict, info = pg.check_path(points, grid, res, origin, pose[:2])
+        if verdict == pg.ALIGN and self._near(info[2], self._retry_gaps) \
+                and not self._near(info[2], self._failed_gaps):
+            # 2. Versuch: Start mit mehr Drehplatz; gibt es den nicht, der erste Start.
+            retry = pg.check_path(points, grid, res, origin, pose[:2],
+                                  pg.ROTATE_CLEAR_M + pg.RETRY_EXTRA_CLEAR_M)
+            if retry[0] == pg.ALIGN:
+                verdict, info = retry
         if verdict == pg.ALIGN and self._near(info[2], self._failed_gaps):
             verdict, info = pg.BLOCK, info[2:]
         self._event('path', verdict=verdict, points=len(points))
@@ -822,6 +838,7 @@ class tunnel_explorer_node(Node):
         self._blocked = []              # Sperrlinien (N, 2) in odom
         self._publish_blocked()
         self._failed_gaps = []          # Mitten gescheiterter Durchfahrten (odom)
+        self._retry_gaps = []           # nach Waechter-Abbruch schon einmal neu versucht (odom)
         self._pending_passage = None    # Engstelle, zu deren Start RPP gerade faehrt
         self._waiting_for = None        # laufende Grundbewegungen (ManeuverRequest-Typ)
         self._planning_since = None

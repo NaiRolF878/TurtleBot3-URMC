@@ -9,9 +9,10 @@
 # q oder Strg+C beendet den Not-Aus (sendet Stopp) und danach die ganze Pipeline.
 #
 # FOLLOW_LANE_LAUNCH=<datei.launch.py> startet eine andere Launch-Datei mit demselben Ablauf
-# (genutzt von follow_lane_record.sh).
+# (genutzt von follow_lane_record.sh). FOLLOW_LANE_ARGS: zusaetzliche Launch-Argumente,
+# FOLLOW_LANE_LOG: Name der Logdatei (beide genutzt von rennen.sh).
 LAUNCH_FILE="${FOLLOW_LANE_LAUNCH:-follow_lane.launch.py}"
-LOG_NAME="${LAUNCH_FILE%.launch.py}"
+LOG_NAME="${FOLLOW_LANE_LOG:-${LAUNCH_FILE%.launch.py}}"
 
 # Laeuft schon eine Pipeline? Zwei senden auf dieselben Topics, ein zweiter Not-Aus im STOPP
 # schickt dauernd Null an den Bot.
@@ -50,7 +51,7 @@ ln -sfn "$(basename "$NODE_LOG")" "$REPO_ROOT/logs/pipeline/$LOG_NAME-latest.log
 # set -m: eigene Prozessgruppe, sonst ignoriert der Hintergrundjob SIGINT (Bash-Regel fuer '&'
 # ohne Job-Control). Strg+C trifft so nur den Not-Aus, cleanup() beendet danach die Pipeline.
 set -m
-ros2 launch Follow_Lane "$LAUNCH_FILE" > "$NODE_LOG" 2>&1 &
+ros2 launch Follow_Lane "$LAUNCH_FILE" $FOLLOW_LANE_ARGS > "$NODE_LOG" 2>&1 &
 LAUNCH_PID=$!
 set +m
 cleanup() {

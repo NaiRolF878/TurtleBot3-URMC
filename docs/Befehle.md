@@ -4,7 +4,7 @@ Alle Befehle laufen **im Devcontainer** vom Repo-Ordner aus (`/workspaces/Turtle
 Die Kurzbefehle (`botup`, `lanup` …) stehen in der `~/.bashrc`. Fehlen sie nach einem
 Container-Rebuild, geht immer die lange Form `bash scripts/tb/<skript>.sh`.
 
-Vor ROS-Befehlen in einem neuen Terminal: `source scripts/tb/tb-env.sh` (setzt u. a. `ROS_DOMAIN_ID=33`).
+Vor ROS-Befehlen in einem neuen Terminal: `source scripts/tb/tb-env.sh` (setzt u. a. `ROS_DOMAIN_ID=87`).
 
 `tb` baut beim Start automatisch (`colcon build --symlink-install`, ~2 s) – nach `git pull` oder
 Branch-Wechsel ist also nichts extra nötig. Wer ohne `tb` startet: vorher selbst bauen.
@@ -182,7 +182,7 @@ bash scripts/tb/launchers/extrinsik_view.sh           # live prüfen
 | `/scan` da, aber `/odom` und `/cmd_vel` fehlen | Bringup halb oben, meist **Akku** leer → Akku prüfen, `botup` |
 | Bot reagiert nicht auf Fahrbefehle | Motoren aus (`torque: false` in `/sensor_state`) → `ros2 service call /motor_power std_srvs/srv/SetBool "{data: true}"` |
 | `botup` bricht mit „Host key verification failed“ ab | neue Adresse unbekannt → `ssh-keyscan -H 192.168.77.2 >> ~/.ssh/known_hosts` |
-| `ros2 topic list` fast leer | `--no-daemon` anhängen; Domain prüfen (`echo $ROS_DOMAIN_ID` muss 33 sein) |
+| `ros2 topic list` fast leer | `--no-daemon` anhängen; Domain prüfen (`echo $ROS_DOMAIN_ID` muss 87 sein) |
 | OpenCR nicht gefunden (`ttyACM0`) | nach Reset liegt er auf `ttyACM1` |
 | rviz zeigt keine LIDAR-Punkte | Bot-Uhr falsch → `sync-time.sh`, danach Bringup neu starten |
 

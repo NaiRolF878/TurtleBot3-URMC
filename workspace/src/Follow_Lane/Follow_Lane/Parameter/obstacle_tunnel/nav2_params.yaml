@@ -143,6 +143,10 @@ global_costmap:
           data_type: "LaserScan"
           clearing: true
           marking: true
+          # Speicherzeit (s): Hindernisse aus den Scans der letzten so vielen Sekunden werden jedes
+          # Mal neu eingetragen, auch wenn ein neuerer Strahl die Stelle frei geraeumt hat (17.11.:
+          # Tunnelwaende verschwanden, er plante wieder hindurch). 0.0 = nur der neueste Scan (alt).
+          observation_persistence: 2.0
           # Pflicht: mit dem Humble-Default 0.0 fallen alle Scanpunkte weg (LiDAR auf 0,182 m).
           max_obstacle_height: 2.0
           obstacle_max_range: 3.0
@@ -252,6 +256,10 @@ local_costmap:
           data_type: "LaserScan"
           clearing: true
           marking: true
+          # Speicherzeit (s): Hindernisse aus den Scans der letzten so vielen Sekunden werden jedes
+          # Mal neu eingetragen, auch wenn ein neuerer Strahl die Stelle frei geraeumt hat (17.11.:
+          # Tunnelwaende verschwanden, er plante wieder hindurch). 0.0 = nur der neueste Scan (alt).
+          observation_persistence: 2.0
           # Pflicht: mit dem Humble-Default 0.0 fallen alle Scanpunkte weg (LiDAR auf 0,182 m).
           max_obstacle_height: 2.0
           obstacle_max_range: 3.0

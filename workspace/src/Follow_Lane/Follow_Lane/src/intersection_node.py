@@ -51,7 +51,9 @@ from geometry_msgs.msg import PolygonStamped, Twist
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.time import Time
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Bool, Float64MultiArray, String, UInt8
+from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 from vision_msgs.msg import Detection2DArray
@@ -114,7 +116,7 @@ COOLDOWN_TURN_M = 0.20
 SAME_LINE_M = 0.25
 
 # --- Richtung ---
-TURNS = ('geradeaus', 'links', 'rechts', 'auto')
+TURNS = ('geradeaus', 'links', 'rechts', 'auto', 'immer_geradeaus')
 DIRECTIONS = ('links', 'geradeaus', 'rechts')      # Reihenfolge fuer Anzeige und Buttons
 # Spurmaske: Punkte im 2,5-mm-Raster (LANE_MASK_STRIDE 2 bei 1,25 mm/px) -> Flaeche je Punkt.
 MASK_CELL_CM2 = 0.25 ** 2
@@ -142,7 +144,20 @@ STAMP_BUFFER = 15
 # Bahnfehler -> Lenkung (heading_kp). Kleinster Radius (m):
 MIN_TURN_RADIUS_M = 0.10
 
+# Ende-Fahrt (end_lane_steer): Spurmitte OHNE Farben = Mitte zwischen der naechsten Linie links und
+# rechts. Ausgewertet in Scheiben (m) dieses Bereichs voraus; Scheiben mit Linienpunkten nahe der
+# Mitte (Querlinie) zaehlen nicht; Abstand der beiden Linien muss plausibel sein (Spur ~20 cm).
+CORRIDOR_X_M = (0.12, 0.40)
+CORRIDOR_SLICE_M = 0.025
+CORRIDOR_CENTER_FREE_M = 0.04
+CORRIDOR_MAX_SIDE_M = 0.30
+CORRIDOR_WIDTH_M = (0.12, 0.34)
+CORRIDOR_MIN_POINTS = 3
+CORRIDOR_MIN_SLICES = 2
+CORRIDOR_MAX_AGE_S = 0.3
 FREE, APPROACH, WAIT, CROSS, COOLDOWN = 'Frei', 'Anfahrt', 'Halt', 'Queren', 'Nachlauf'
+# Endgueltig: nach dem Geradeausqueren (end_distance > 0) stehen bleiben, nie wieder Lane.
+END = 'Ende'
 
 
 def wrap(angle):
@@ -167,6 +182,17 @@ class intersection_node(Node):
         self.declare_parameter('far_kp', Parameter.Type.DOUBLE, frange(0.0, 10.0))
         # Spaetestens nach so viel Weg (m) ab Halt zurueck zu Lane.
         self.declare_parameter('max_cross_distance', Parameter.Type.DOUBLE, frange(0.1, 3.0))
+        # Beim Geradeausqueren mindestens so weit (m) stur auf Kurs (Linien egal), erst danach
+        # darf das Spurpaar dahinter uebernehmen (17.11.: Uebergabe schon nach 0-7 cm, die
+        # Spurfolge zog in der Kreuzung zur Seite).
+        self.declare_parameter('cross_min_distance', Parameter.Type.DOUBLE, frange(0.0, 1.5))
+        # > 0: nach dem Geradeausqueren KEIN PID mehr -- stur auf Kurs bis so viel Weg (m) ab
+        # Halt, dann anhalten und stehen bleiben (bis Neustart). 0 = Spurfolge dahinter.
+        self.declare_parameter('end_distance', Parameter.Type.DOUBLE, frange(0.0, 3.0))
+        # Bis zum Ende nach cross_min_distance mit dem fernen Spurpaar (gelb links, weiss rechts)
+        # nachlenken -- nur vorwaerts, hoechstens end_max_dev_deg vom Kreuzungskurs weg.
+        self.declare_parameter('end_lane_steer', Parameter.Type.BOOL)
+        self.declare_parameter('end_max_dev_deg', Parameter.Type.DOUBLE, frange(0.0, 60.0))
         # Richtung an der Kreuzung (geradeaus | links | rechts | auto), live in rqt. Nicht
         # erlaubte Richtung -> die erlaubte (siehe Kopf).
         self.declare_parameter('turn', Parameter.Type.STRING)
@@ -178,7 +204,8 @@ class intersection_node(Node):
         self.declare_parameter('ask_timeout_s', Parameter.Type.DOUBLE, frange(0.0, 300.0))
         self._param_names = ['stop_distance', 'min_stop_time', 'cross_speed', 'heading_kp',
                              'far_kp', 'max_cross_distance', 'turn', 'turn_radius_add',
-                             'turn_done_deg', 'ask_timeout_s']
+                             'turn_done_deg', 'ask_timeout_s', 'cross_min_distance',
+                             'end_distance', 'end_lane_steer', 'end_max_dev_deg']
         require_params(self, self._param_names)
         read_params(self, self._param_names)
 
@@ -208,6 +235,13 @@ class intersection_node(Node):
         self.pub_cmd_vel = self.create_publisher(Twist, '/intersection/cmd_vel', 1)
         self.pub_state = self.create_publisher(String, '/intersection/state', 1)
         self.pub_ask = self.create_publisher(String, '/intersection/ask', 1)
+        # Ende-Fahrt: wie die Leertaste im notaus-Terminal auf STOPP schalten; wird wieder
+        # freigegeben (Leertaste -> FAHREN), geht es normal weiter (Phase Frei).
+        self.cli_notaus = self.create_client(SetBool, '/notaus/set')
+        self._notaus_drive = None
+        self.sub_notaus = self.create_subscription(
+            Bool, '/notaus/drive', self.cb_notaus_drive,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # --- Timer ---
         self.timer = self.create_timer(1.0 / RATE_HZ, self.cb_timer)
@@ -222,6 +256,7 @@ class intersection_node(Node):
         self._far_time = None
         self._last_line = None                      # Haltelinie der zuletzt gequerten Kreuzung (odom)
         self._masks = deque(maxlen=STAMP_BUFFER)    # (Stempel ns, LaneMask)
+        self._mask_time = 0.0
         self._fields = deque(maxlen=STAMP_BUFFER)   # (Stempel ns, Haltelinie (2, 2) base_footprint)
         self._reset(FREE)
 
@@ -236,6 +271,7 @@ class intersection_node(Node):
         self._last_block = None
         self._start_pose = None     # Pose beim Losfahren (Queren) bzw. Ende (Nachlauf)
         self._yaw_ref = None
+        self._end_yaw0 = None      # Kreuzungskurs fuer die Ende-Fahrt (Grenze)
         self._direction = 'geradeaus'
         self._arc = None
         self._votes = None          # {'links'|'rechts'|'vorn': ([gelb...], [weiss...])} je Bild (cm2)
@@ -257,6 +293,20 @@ class intersection_node(Node):
                 and self.phase in (APPROACH, WAIT, CROSS):
             self.get_logger().info(f'Modus {mode.name} -- Kreuzung abgebrochen.')
             self._reset(FREE)
+
+    def cb_notaus_drive(self, msg):
+        released = msg.data and self._notaus_drive is False
+        self._notaus_drive = msg.data
+        if released and self.phase == END:
+            self.get_logger().info('Not-Aus wieder FAHREN -- Ende aufgehoben, weiter wie normal.')
+            self._reset(FREE)
+
+    def _notaus_stop(self):
+        """/notaus/set false = Leertaste auf STOPP."""
+        if not self.cli_notaus.service_is_ready():
+            self.get_logger().warn('Service /notaus/set nicht da -- Bot steht nur per cmd_vel 0.')
+            return
+        self.cli_notaus.call_async(SetBool.Request(data=False))
 
     def cb_objects(self, msg):
         self.objects = msg
@@ -280,6 +330,7 @@ class intersection_node(Node):
     def cb_lane_mask(self, msg):
         stamp = Time.from_msg(msg.header.stamp).nanoseconds
         self._masks.append((stamp, msg))
+        self._mask_time = time.monotonic()
         field = next((f for t, f in self._fields if t == stamp), None)
         if field is not None:
             self._vote(msg, field)
@@ -336,13 +387,16 @@ class intersection_node(Node):
             self._wait(pose)
         elif self.phase == CROSS:
             self._cross(pose)
+        elif self.phase == END:
+            self._state = f'{END}: angehalten nach der Kreuzung (Leertaste = weiter)'
+            self.pub_cmd_vel.publish(Twist())
         elif self.phase == COOLDOWN:
             self._state = COOLDOWN
             driven = pose is not None and math.hypot(
                 pose[0] - self._start_pose[0], pose[1] - self._start_pose[1]) >= self._cooldown_m
             if driven or time.monotonic() - self._cooldown_since >= COOLDOWN_MAX_S:
                 self._reset(FREE)
-        self.pub_active.publish(Bool(data=self.phase in (WAIT, CROSS)))
+        self.pub_active.publish(Bool(data=self.phase in (WAIT, CROSS, END)))
         self.pub_ask.publish(String(data=','.join(self._ask['options']) if self._ask else ''))
         self.pub_state.publish(String(data=self._state))
 
@@ -422,9 +476,32 @@ class intersection_node(Node):
             self._turn(pose)
             return
         travelled = math.hypot(pose[0] - self._start_pose[0], pose[1] - self._start_pose[1])
-        far = self._fresh_far(pose)
         twist = Twist()
         twist.linear.x = float(self.cross_speed)
+        if self.end_distance > 0.0:
+            # Kein Lane-Modus mehr: ueber die Kreuzung stur, danach am Spurpaar entlang
+            # (_end_steer), bei end_distance endgueltig stehen.
+            if travelled >= self.end_distance:
+                self.get_logger().info(
+                    f'Kreuzung gequert, {travelled * 100:.0f} cm geradeaus -- ENDE, Bot steht '
+                    '(Not-Aus STOPP, Leertaste = weiter).')
+                self._log_stats(pose)
+                self.pub_cmd_vel.publish(Twist())
+                self._reset(END)
+                self._notaus_stop()
+                return
+            twist.angular.z = float(self._end_steer(pose, travelled))
+            self.pub_cmd_vel.publish(twist)
+            return
+        if travelled < self.cross_min_distance:
+            # Stur geradeaus auf dem Kurs vom Halt (senkrecht zur Haltelinie), Linien egal.
+            self._state = f'{CROSS} geradeaus stur {travelled * 100:.0f}/' \
+                          f'{self.cross_min_distance * 100:.0f} cm'
+            angular = self.heading_kp * wrap(self._yaw_ref - pose[2])
+            twist.angular.z = float(max(-MAX_ANGULAR_VEL, min(MAX_ANGULAR_VEL, angular)))
+            self.pub_cmd_vel.publish(twist)
+            return
+        far = self._fresh_far(pose)
         if far is not None and len(self._far_ok) >= FAR_CONFIRM \
                 and max(self._far_ok) - min(self._far_ok) <= FAR_MAX_SPREAD:
             # Paar hinter der Kreuzung sicher: der normale PID uebernimmt (detect_lane regelt
@@ -450,6 +527,65 @@ class intersection_node(Node):
             return
         twist.angular.z = float(max(-MAX_ANGULAR_VEL, min(MAX_ANGULAR_VEL, angular)))
         self.pub_cmd_vel.publish(twist)
+
+    def _end_steer(self, pose, travelled):
+        """Lenkung bis zum Ende (end_distance): erst stur auf Kurs ueber die Kreuzung, danach
+        mit dem fernen Spurpaar, aber nie mehr als end_max_dev_deg vom Kreuzungskurs weg (kein
+        Umdrehen). Ohne gueltiges Paar den Kurs von zuletzt halten."""
+        if self._end_yaw0 is None:
+            self._end_yaw0 = self._yaw_ref
+        stur = travelled < self.cross_min_distance or not self.end_lane_steer
+        center = None if stur else self._corridor_center()
+        if center is not None:
+            # Seitenversatz (m, + = Spurmitte links) -> Winkel zum Zielpunkt voraus.
+            angular = self.heading_kp * math.atan2(center[0], center[1])
+            self._yaw_ref = pose[2]
+            how = f'Spurmitte {center[0] * 100:+.1f} cm'
+        else:
+            angular = self.heading_kp * wrap(self._yaw_ref - pose[2])
+            how = 'stur' if stur else 'Kurs (kein Paar)'
+        # Begrenzung um den Kreuzungskurs: darueber hinaus zurueck lenken.
+        limit = math.radians(self.end_max_dev_deg)
+        dev = wrap(pose[2] - self._end_yaw0)
+        if abs(dev) > limit and angular * dev > 0.0:
+            angular = self.heading_kp * (math.copysign(limit, dev) - dev)
+            self._yaw_ref = self._end_yaw0 + math.copysign(limit, dev)
+            how += ' (Grenze)'
+        self._state = f'{CROSS} bis Ende {travelled * 100:.0f}/' \
+                      f'{self.end_distance * 100:.0f} cm, {how}'
+        return max(-MAX_ANGULAR_VEL, min(MAX_ANGULAR_VEL, angular))
+
+    def _corridor_center(self):
+        """(Seitenversatz der Spurmitte (m, + = links), Abstand voraus (m)) aus der neuesten
+        Spurmaske, Farben egal: je Scheibe die naechste Linie links und rechts der Bot-Mitte.
+        None, wenn alt oder zu wenige plausible Scheiben."""
+        if not self._masks or time.monotonic() - self._mask_time > CORRIDOR_MAX_AGE_S:
+            return None
+        mask = self._masks[-1][1]
+        xs = np.concatenate([np.asarray(mask.yellow_x), np.asarray(mask.white_x)])
+        ys = np.concatenate([np.asarray(mask.yellow_y), np.asarray(mask.white_y)])
+        if xs.size == 0:
+            return None
+        X, Y = bev_pixels_to_ground(self._bev, xs, ys)
+        centers, dists = [], []
+        x0 = CORRIDOR_X_M[0]
+        while x0 < CORRIDOR_X_M[1]:
+            sel = (X >= x0) & (X < x0 + CORRIDOR_SLICE_M) & (np.abs(Y) <= CORRIDOR_MAX_SIDE_M)
+            x0 += CORRIDOR_SLICE_M
+            y = Y[sel]
+            if np.any(np.abs(y) < CORRIDOR_CENTER_FREE_M):
+                continue    # Querlinie / Linie unter der Bot-Mitte
+            left, right = y[y > 0], y[y < 0]
+            if left.size < CORRIDOR_MIN_POINTS or right.size < CORRIDOR_MIN_POINTS:
+                continue
+            yl, yr = float(left.min()), float(right.max())
+            if not CORRIDOR_WIDTH_M[0] <= yl - yr <= CORRIDOR_WIDTH_M[1]:
+                continue
+            centers.append((yl + yr) / 2.0)
+            dists.append(x0 - CORRIDOR_SLICE_M / 2.0)
+        if len(centers) < CORRIDOR_MIN_SLICES:
+            return None
+        return float(np.median(centers)), float(np.median(dists))
 
     def _turn(self, pose):
         """Viertelkreis um self._arc; Abstand zum Mittelpunkt != Radius -> nachlenken."""
@@ -583,7 +719,11 @@ class intersection_node(Node):
         return f' | {free} / {second}'
 
     def _choose_direction(self, pose):
-        """Richtung nach Prioritaet (Kopf der Datei); None = mehrdeutig, fragen."""
+        """Richtung nach Prioritaet (Kopf der Datei); None = mehrdeutig, fragen.
+        turn = immer_geradeaus: immer geradeaus, ohne Pruefung, ohne Frage."""
+        if self.turn == 'immer_geradeaus':
+            self.get_logger().info('turn = immer_geradeaus -- quere geradeaus (ohne Richtungspruefung).')
+            return 'geradeaus'
         wanted = self.turn if self.turn in TURNS else 'geradeaus'
         if wanted != self.turn:
             self.get_logger().warn(f'turn "{self.turn}" unbekannt (erlaubt: {", ".join(TURNS)}) '

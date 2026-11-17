@@ -3,10 +3,11 @@ far_kp: 2.0
 heading_kp: 2.0
 max_cross_distance: 0.9
 min_stop_time: 1.0
-stop_distance: 0.15
-# Richtung an Kreuzungen: geradeaus | links | rechts | auto. Nicht erlaubte Richtung (Linienfarben,
-# s. intersection_node.py) -> die erlaubte; auto = zufaellig unter den erlaubten. Live in rqt.
-turn: geradeaus
+stop_distance: 0.1
+# Richtung an Kreuzungen: geradeaus | links | rechts | auto | immer_geradeaus. Nicht erlaubte Richtung
+# (Linienfarben, s. intersection_node.py) -> die erlaubte; auto = zufaellig unter den erlaubten;
+# immer_geradeaus = IMMER geradeaus, ohne Pruefung und ohne Frage (17.11., Wettbewerb). Live in rqt.
+turn: immer_geradeaus
 # Abbiegebogen: Zuschlag (m) auf den berechneten Radius (Abstand Haltelinie + Linie + halbe Spur,
 # ~0,25-0,30 m). Negativ = engere Kurve (schneidet die innere Ecke mehr), positiv = weiter. Live in rqt.
 turn_radius_add: 0.0
@@ -15,3 +16,14 @@ turn_done_deg: 80.0
 # Mehrdeutige Kreuzung (mehrere Richtungen erlaubt, geradeaus nicht): so lange (s) auf einen Klick auf
 # die Richtungs-Buttons im Debugbild warten, danach zufaellig. 0 = sofort zufaellig.
 ask_timeout_s: 20.0
+# Geradeaus queren: so weit (m) nach dem Losfahren stur auf Kurs, Spurlinien egal; erst danach
+# uebernimmt die Spurfolge (Haltelinie ~10 cm + Querstrasse ~25 cm).
+cross_min_distance: 0.35
+# > 0: nach dem Geradeausqueren KEIN Follow Lane mehr -- stur auf Kurs bis so viel Weg (m) ab der
+# Haltelinie, dann anhalten und stehen bleiben (bis Neustart). 0 = Spurfolge hinter der Kreuzung.
+end_distance: 1.0
+# Bis zum Ende: nach cross_min_distance mittig zwischen der naechsten Linie links und rechts halten,
+# FARBEN EGAL (true), oder stur auf Kurs (false). Nur vorwaerts, nie mehr als end_max_dev_deg (Grad) vom
+# Kreuzungskurs weg -- so kann er nicht umdrehen.
+end_lane_steer: true
+end_max_dev_deg: 20.0

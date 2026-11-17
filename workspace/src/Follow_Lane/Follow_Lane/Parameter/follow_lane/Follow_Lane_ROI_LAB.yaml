@@ -1,7 +1,7 @@
 # detect_lane ohne die LAB-Farbschwellen (die stehen in Lab_Farben.yaml).
 clahe_clip_limit: 2.0
 clahe_tile_grid_size: 8
-detection_row_factor: 0.85
+detection_row_factor: 0.92
 # Objekterkennung (Schilder, Bots, Startlinie). Live: ros2 param set /detect_lane detector rfdetr384
 #   yolo640    YOLO, Datensatz 13.11. (Standard)   ~8 ms/Bild
 #   yolo800    YOLO, aelterer Datensatz 02.11.      ~12 ms/Bild
@@ -13,5 +13,28 @@ detector: rfdetr704
 # Hoechstens so oft pro Sekunde laeuft die Objekterkennung (Last sparen); 0.0 = auf jedem Kamerabild.
 detector_rate_hz: 10.0
 min_lane_width: 80
-thresh_blue_pixel: 15000
+thresh_blue_pixel: 28000
+# Stoppschild: rote Pixel (lab_*_red_* in Lab_Farben.yaml) im Bereich oben rechts des Rohbilds
+# (Anteile von Breite/Hoehe, Rahmen im Schranken-Debugbild). Ab thresh_red_pixel gilt es als
+# gesehen -- aktuelle Zahl "Rot: n / Schwelle" im Debugbild ablesen und hier einstellen.
+stop_roi_x0: 0.75
+stop_roi_x1: 1.0
+stop_roi_y0: 0.1
+stop_roi_y1: 0.25
+thresh_red_pixel: 4000
+# Erkennt die Objekterkennung 'no_entry' (Einfahrt verboten, ebenfalls rot) mit mindestens dieser
+# Konfidenz, wird das Rot NICHT als Stoppschild gemeldet. Live 17.11.: Schild median 0,85.
+no_entry_min_conf: 0.8
 use_sim_time: false
+# true = Gelb- und Weiss-Maske tauschen (Weiss links, Gelb rechts). Live in rqt.
+swap_colors: false
+# true = Seite der Farben selbst erkennen (Gelb links/Weiss rechts oder umgekehrt) und Masken passend
+# tauschen, auch nach Kreuzungen; swap_colors ist dann nur der Startwert. Live in rqt.
+auto_swap_colors: false
+# Schilder der Objekterkennung -> je ein Topic /detect/sign/<name> (park, tunnel, stop, left, right, work,
+# no_entry). Gemeldet nur ab dieser Konfidenz und ab dieser Boxhoehe (px im Rohbild 800x600; 0 = jede
+# Groesse). Tunnelschild eigene Hoehe: groesser = er meldet es erst naeher. Die aktuelle Hoehe steht im Log
+# ("Tunnelschild: Box ... px hoch"). Live in rqt.
+sign_min_conf: 0.5
+sign_min_height_px: 0
+tunnel_min_height_px: 80
