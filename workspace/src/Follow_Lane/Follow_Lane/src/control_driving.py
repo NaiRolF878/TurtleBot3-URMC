@@ -276,6 +276,9 @@ class control_driving(Node):
         # einen Lenkschlag.
         if not self._fresh(self._lane_time, now, LANE_CMD_TIMEOUT):
             self._reset_pid()
+            # Erstes Bild nach der Luecke (z.B. Stop -> Lane an der Schranke): D-Anteil 0 statt
+            # 17x Fehler -- sonst voller Lenkschlag, ein Rad lief rueckwaerts (Rennen 17.11.).
+            self.last_error = msg.data
         self._lane_time = now
         self.pub_cmd_vel.publish(self._pid(msg.data))
 
