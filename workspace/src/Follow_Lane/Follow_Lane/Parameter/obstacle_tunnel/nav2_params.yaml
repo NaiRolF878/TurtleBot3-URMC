@@ -3,7 +3,7 @@
 # - Obstacle: nav2_goal_publisher setzt ein Ziel ~1 m voraus auf der Spurmitte, die
 #   Spurlinien kommen als Waende aus lane_costmap_node (lane_layer).
 # - Tunnel: tunnel_explorer_node waehlt die Ziele. Beim Eintritt werden beide Costmaps
-#   geleert, danach sehen sie nur LiDAR und Eingangssperre.
+#   geleert, danach sehen sie nur LiDAR und die Sperren (Eingang, Engstellen) auf /nav2/blocked.
 # controller_server sendet auf /nav2/cmd_vel, control_driving reicht das nur in Obstacle
 # und Tunnel weiter (mit Waechter). Beide Costmaps lesen /scan_corrected (scan_correct).
 
@@ -77,7 +77,9 @@ tunnel_explorer_node:
         movement_time_allowance: 6.0
       # Langsamer zwischen den engen Waenden.
       FollowPath:
-        desired_linear_vel: 0.10
+        desired_linear_vel: 0.15
+    # Keine Tuer im Scan: nach 2 s so weit (m) geradeaus, dann erneut suchen.
+    door_search_step_m: 0.05
 
 planner_server:
   ros__parameters:
@@ -175,7 +177,7 @@ global_costmap:
           raytrace_max_range: 2.0
           raytrace_min_range: 0.0
 
-      # Eingangssperre wie in local_costmap.
+      # Sperren wie in local_costmap.
       entrance_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -192,7 +194,7 @@ global_costmap:
           obstacle_min_range: 0.0
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
-        # Gesperrte Engstellen (tunnel_explorer_node bzw. nav2_goal_publisher), wie die Eingangssperre.
+        # Tunnel-Eingang und gesperrte Engstellen (tunnel_explorer_node bzw. nav2_goal_publisher).
         blocked_cloud:
           topic: /nav2/blocked
           sensor_frame: ""
@@ -290,8 +292,9 @@ local_costmap:
           raytrace_max_range: 2.0
           raytrace_min_range: 0.0
 
-      # Eingangssperre von keepout_zone_node, Punkte im odom-Frame: Reichweite ab dem
-      # odom-Nullpunkt, daher praktisch unbegrenzt. clearing aus: kein echter Sensorursprung.
+      # Startsperre (Obstacle) von keepout_zone_node, Eingang und Engstellen (/nav2/blocked), Punkte
+      # im odom-Frame: Reichweite ab dem odom-Nullpunkt, daher praktisch unbegrenzt. clearing aus:
+      # kein echter Sensorursprung.
       entrance_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -308,7 +311,7 @@ local_costmap:
           obstacle_min_range: 0.0
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
-        # Gesperrte Engstellen (tunnel_explorer_node bzw. nav2_goal_publisher), wie die Eingangssperre.
+        # Tunnel-Eingang und gesperrte Engstellen (tunnel_explorer_node bzw. nav2_goal_publisher).
         blocked_cloud:
           topic: /nav2/blocked
           sensor_frame: ""

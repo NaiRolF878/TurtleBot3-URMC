@@ -3,8 +3,9 @@
 Ein:  /control/mode, /global_costmap/costmap, /scan_corrected,
       /tunnel/path_result (erreicht / kollision / abgebrochen), /control/maneuver_sequence, TF
 Aus:  /tunnel/explore_path (Path, odom), /tunnel/door (PolygonStamped, odom: Tuerkanten und
-      Punkt innen), /tunnel/outside (Bool), /nav2/blocked (PointCloud2, odom: gesperrte
-      Engstellen), /control/maneuver_request (Engstelle, Freifahren); Pfade rechnet
+      Punkt innen), /tunnel/outside (Bool), /nav2/blocked (PointCloud2, odom: Eingang und
+      gesperrte Engstellen), /control/maneuver_request (Engstelle, Freifahren, Tuersuche
+      geradeaus); Leeren beider Costmaps nach abgelaufener Sperre; Pfade rechnet
       planner_server (ComputePathToPose). Fahrtprotokoll in $TUNNEL_LOG_DIR/<Zeit>/.
 """
 import math
@@ -17,6 +18,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
 from nav2_msgs.action import ComputePathToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid, Path
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters, SetParameters
@@ -61,7 +63,23 @@ SAME_TARGET_M = 0.15
 # Huelle): weiter draussen liegt nur Rauschen aus der Halle (17.11.: Ziele 3 m neben dem Kasten).
 TARGET_MAX_OUTSIDE_M = 0.40
 # Besuchte und gescheiterte Ziele werden so lange (s) gemieden, nicht fuer immer (wie HKA).
+# Ebenso lange gilt eine Sperre am bestaetigten Ausgang: es gibt nur einen, er wird danach neu
+# geprueft. Am Ausgang heisst: Mitte der Sperre naeher als halbe Ausgangsbreite + EXIT_BLOCK_NEAR_M.
 AVOID_S = 15.0
+EXIT_BLOCK_NEAR_M = 0.10
+# Scheitert das Ziel hinter dem Ausgang so oft, gilt der Ausgang als falsch erkannt: Rechteck und
+# Ausgang werden verworfen und neu erkannt.
+EXIT_MAX_FAILS = 2
+# Abgelaufene Sperre: erst die Wolke ohne sie senden, nach so vielen s beide Costmaps leeren
+# (entrance_layer raeumt nicht selbst, clearing: false); danach MAP_SETTLE_S keine Karte lesen.
+COSTMAP_CLEAR_DELAY_S = 0.3
+# Keine Tuer im Scan: nach so vielen s door_search_step_m (YAML) geradeaus, dann erneut suchen.
+DOOR_WAIT_S = 2.0
+# Tuersperre (Eingang): die Tuerlinie a-b, je Seite so viel (m) verlaengert, aktiv sobald die
+# Radachse so weit (m) hinter der Tuerlinie steht -- Heck 0.101 + Reserve, sonst stuende der Bot
+# in der Sperre und Regler und Waechter saehen jede Bewegung als Kollision.
+DOOR_BLOCK_EXTRA_M = 0.05
+DOOR_BLOCK_DELAY_M = 0.16
 # So oft je Ziel wird nach Kollisionsgefahr freigefahren, danach gilt das Ziel als gescheitert.
 UNWEDGE_MAX = 2
 # Tunnel-Uhr: Reglement 60 s fuer die Ausfahrt. Ab TUNNEL_HURRY_S zaehlt bei der Zielwahl nur
@@ -86,7 +104,10 @@ OPENING = 'Oeffnung'
 
 class tunnel_explorer_node(Node):
     """Einfahrt: die naechste Tuer voraus im Scan, Ziel so weit dahinter, dass der Bot drin ist.
-    Jede Tunnelfahrt beginnt mit der Tuersuche (der Bot steht davor).
+    Jede Tunnelfahrt beginnt mit der Tuersuche (der Bot steht davor). Ohne Tuer im Scan nach
+    DOOR_WAIT_S door_search_step_m (YAML) geradeaus, dann erneut suchen. Steht der Bot drin
+    (DOOR_BLOCK_DELAY_M hinter der Tuerlinie), wird die Tuerlinie dauerhaft gesperrt
+    (/nav2/blocked): er faehrt nicht wieder hinaus.
 
     Die Wand-Huelle waechst aus den Tuerkanten (sonst den naechsten Waenden links und rechts)
     ueber alle damit verbundenen Wandzellen. Raumwaende und freistehende Hindernisse gehoeren
@@ -111,7 +132,9 @@ class tunnel_explorer_node(Node):
     Bot an einer Engstelle nur ausgerichtet, faehrt RPP bis zum Start der Geraden, dann
     Grundbewegungen (switch_control) hindurch, danach wird zum selben Ziel neu geplant. Passt er
     gar nicht oder ist die Durchfahrt dort gescheitert, wird die Engstelle gesperrt
-    (/nav2/blocked, entrance_layer beider Karten) bis zum Ende der Tunnelfahrt oder Taste L.
+    (/nav2/blocked, entrance_layer beider Karten) bis zum Ende der Tunnelfahrt oder Taste L --
+    am bestaetigten Ausgang nur AVOID_S lang, es gibt nur einen. Scheitert das Ziel hinter dem
+    Ausgang EXIT_MAX_FAILS mal, werden Ausgang und Rechteck verworfen und neu erkannt.
 
     Abbruch des Reglers: bei Kollisionsgefahr freifahren, zuerst zur Wegrichtung (hoechstens
     UNWEDGE_MAX je Ziel), sonst
@@ -127,7 +150,9 @@ class tunnel_explorer_node(Node):
         self._tunnel_names = [TUNNEL_PREFIX + name for name in CONTROLLER_PARAMS]
         for name in self._tunnel_names:
             self.declare_parameter(name, Parameter.Type.DOUBLE)
-        require_params(self, self._tunnel_names)
+        # Keine Tuer im Scan: so weit (m) geradeaus, dann erneut suchen. Live in rqt.
+        self.declare_parameter('door_search_step_m', Parameter.Type.DOUBLE)
+        require_params(self, self._tunnel_names + ['door_search_step_m'])
 
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.sub_control_mode = self.create_subscription(
@@ -156,8 +181,14 @@ class tunnel_explorer_node(Node):
         self.plan_client = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
         self.controller_params = self.create_client(SetParameters, '/controller_server/set_parameters')
         self.controller_get = self.create_client(GetParameters, '/controller_server/get_parameters')
+        self.clear_clients = [
+            self.create_client(ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap'),
+            self.create_client(ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap'),
+        ]
 
         self.timer = self.create_timer(TICK_S, self.cb_timer)
+        self.clear_timer = self.create_timer(COSTMAP_CLEAR_DELAY_S, self.cb_clear_timer)
+        self.clear_timer.cancel()
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -181,6 +212,7 @@ class tunnel_explorer_node(Node):
             self._reset()
             self.latest_costmap = None
             self._tunnel_since = time.monotonic()
+            self._maps_from = self._tunnel_since + MAP_SETTLE_S
             # Immer zuerst die Tuer suchen, wie nach Taste L (16.11.: frueher ohne gesehene
             # Spurlinie "schon drin" -> Kasten um die Startpose VOR dem Tunnel, nie gefunden).
             self._phase = ENTERING
@@ -204,14 +236,23 @@ class tunnel_explorer_node(Node):
         self._reset()
         self.latest_costmap = None
         self._tunnel_since = time.monotonic()
+        self._maps_from = self._tunnel_since + MAP_SETTLE_S
         self._phase = ENTERING
         self._event('taste_l')
         self.get_logger().info('Taste L: Tunnelmodus zurueckgesetzt -- Einfahrt neu.')
 
     def cb_costmap(self, grid):
-        if self._tunnel_since is not None \
-                and time.monotonic() - self._tunnel_since >= MAP_SETTLE_S:
+        if self._maps_from is not None and time.monotonic() >= self._maps_from:
             self.latest_costmap = grid
+
+    def cb_clear_timer(self):
+        self.clear_timer.cancel()
+        for client in self.clear_clients:
+            if client.service_is_ready():
+                client.call_async(ClearEntireCostmap.Request())
+            else:
+                self.get_logger().error(f'{client.srv_name} nicht erreichbar -- abgelaufene Sperre '
+                                        'bleibt in der Karte.')
 
     def cb_scan(self, scan):
         self.latest_scan = scan
@@ -254,13 +295,13 @@ class tunnel_explorer_node(Node):
                     and not self._near(passage[2], self._retry_gaps):
                 # Waechter hat beim Ausrichten angehalten (zu knapp an der Wand): nicht gleich
                 # sperren, einmal mit Start weiter vor der Engstelle neu versuchen.
-                self._retry_gaps.append(passage[2])
+                self._retry_gaps.append((*passage[2][:2], time.monotonic()))
                 self.get_logger().warn(
                     f'Engstelle bei x={passage[2][0]:.2f} y={passage[2][1]:.2f}: Waechter hat '
                     f'angehalten ({msg.reason}) -- 2. Versuch mit '
                     f'{(pg.ROTATE_CLEAR_M + pg.RETRY_EXTRA_CLEAR_M) * 100:.0f} cm Drehplatz.')
             elif passage is not None:
-                self._failed_gaps.append(passage[2])
+                self._failed_gaps.append((*passage[2][:2], time.monotonic()))
                 self._block(passage[2], passage[3], passage[4],
                             f'Durchfahrt gescheitert ({msg.reason})')
         elif not msg.success:
@@ -278,6 +319,9 @@ class tunnel_explorer_node(Node):
             return
         if self._log is not None:
             self._log.write('poses', {'t': time.monotonic(), 'pose': list(pose)})
+        self._update_door_block(pose)
+        if self._expire_exit_blocks():
+            return
         grid, res, origin = self._grid()
         self._update_walls(grid, res, origin, pose)
         # Rechteck des Kastens statt der konvexen Huelle, sobald alle vier Waende gefunden
@@ -345,9 +389,19 @@ class tunnel_explorer_node(Node):
             return
         door = self._find_door(pose)
         if door is None:
-            self.get_logger().warn('Keine Tunneloeffnung im Scan gefunden -- Bot wartet.',
-                                   throttle_duration_sec=2.0)
+            now = time.monotonic()
+            if self._door_missing_since is None:
+                self._door_missing_since = now
+            elif now - self._door_missing_since >= DOOR_WAIT_S:
+                # Der Bot faehrt vorwaerts ein: ein Stueck geradeaus ist Richtung innen.
+                self._door_missing_since = None
+                step = self.get_parameter('door_search_step_m').value
+                ahead = np.array(pose[:2]) + step * np.array([math.cos(pose[2]), math.sin(pose[2])])
+                self.get_logger().warn(f'Keine Tunneloeffnung im Scan -- {step * 100:.0f} cm '
+                                       'geradeaus, dann neu suchen.')
+                self._request(ManeuverRequest.FOLLOW, self._path_msg([pose[:2], ahead]))
             return
+        self._door_missing_since = None
         a, b, center, width, normal = door
         self._door = (a, b, center, normal, width)
         self._seeds = np.vstack([self._seeds, a, b])
@@ -653,6 +707,16 @@ class tunnel_explorer_node(Node):
             self._phase = EXPLORING
         else:
             self._done.append((self._target, time.monotonic() + AVOID_S))
+        if failed and self._kind == OPENING and self._exit is not None:
+            self._exit_fails += 1
+            if self._exit_fails >= EXIT_MAX_FAILS:
+                self.get_logger().warn(f'Ziel hinter dem Ausgang {self._exit_fails}x gescheitert -- '
+                                       'Ausgang und Kasten verworfen, neu erkennen.')
+                self._event('exit_dropped')
+                self._exit = self._box = self._exit_candidate = None
+                self._exit_fails = 0
+                self._publish_polygon(self.pub_box, [])
+                self._publish_polygon(self.pub_exits, [])
         if failed:
             self.get_logger().warn(f'{self._kind} gilt als unerreichbar.', throttle_duration_sec=2.0)
         self._event('target_done', what=self._kind, failed=failed)
@@ -696,10 +760,12 @@ class tunnel_explorer_node(Node):
         self._path = path
         self.pub_explore_path.publish(path)
 
-    def _request(self, kind):
+    def _request(self, kind, path=None):
         """Grundbewegungen bei switch_control anfordern; weiter geht es in cb_sequence."""
         msg = ManeuverRequest(type=kind)
-        if kind == ManeuverRequest.PASSAGE:
+        if path is not None:
+            msg.path = path
+        elif kind == ManeuverRequest.PASSAGE:
             msg.path = self._path_msg(self._pending_passage[:2])
         elif kind == ManeuverRequest.UNWEDGE and self._path is not None:
             # Wie in Obstacle: zuerst auf der Stelle zum Weg drehen, wenn das frei ist.
@@ -708,19 +774,58 @@ class tunnel_explorer_node(Node):
         self._event('maneuver', maneuver=int(kind))
         self.pub_request.publish(msg)
 
-    def _block(self, center, axis, width, why):
-        if self._near(center, [line.mean(axis=0) for line in self._blocked]):
+    def _block(self, center, axis, width, why, permanent=False):
+        if self._near(center, [c for _, c, _ in self._blocked]):
             return
-        self._blocked.append(pg.block_points(center, axis, width))
+        since = None if permanent else time.monotonic()
+        self._blocked.append((pg.block_points(center, axis, width), tuple(center[:2]), since))
         self._event('block', center=[float(c) for c in center], width=float(width), why=why)
         self.get_logger().warn(f'Engstelle {width:.2f} m bei x={center[0]:.2f} y={center[1]:.2f}: '
                                f'{why} -- gesperrt, suche andere Route.')
+
+    def _update_door_block(self, pose):
+        """Tuersperre: die Tuerlinie a-b (DOOR_BLOCK_EXTRA_M verlaengert), dauerhaft, sobald die
+        Radachse DOOR_BLOCK_DELAY_M hinter ihr steht -- der Bot faehrt nicht wieder hinaus."""
+        if self._door is None or self._door_blocked:
+            return
+        a, b, center, normal, width = self._door
+        if (np.array(pose[:2]) - center) @ normal < DOOR_BLOCK_DELAY_M:
+            return
+        self._door_blocked = True
+        self._block(center, normal, width + 2 * DOOR_BLOCK_EXTRA_M, 'Eingang', permanent=True)
+
+    def _expire_exit_blocks(self):
+        """Sperren am bestaetigten Ausgang laufen nach AVOID_S ab (samt gescheiterten Versuchen
+        dort). True, wenn etwas ablief: Costmaps werden geleert, der Takt wartet auf neue Karten."""
+        if self._exit is None or self._waiting_for is not None:
+            return False
+        now = time.monotonic()
+        center, half_width = self._exit[0], self._exit[1]
+
+        def expired(xy, since):
+            return since is not None and now - since >= AVOID_S \
+                and math.hypot(xy[0] - center[0], xy[1] - center[1]) <= half_width + EXIT_BLOCK_NEAR_M
+
+        old = len(self._blocked)
+        self._blocked = [b for b in self._blocked if not expired(b[1], b[2])]
+        self._failed_gaps = [g for g in self._failed_gaps if not expired(g, g[2])]
+        self._retry_gaps = [g for g in self._retry_gaps if not expired(g, g[2])]
+        if len(self._blocked) == old:
+            return False
+        self.get_logger().info(f'Sperre am Ausgang nach {AVOID_S:.0f} s aufgehoben -- neu pruefen.')
+        self._event('block_expired')
+        self._publish_blocked()
+        self.clear_timer.reset()
+        self.latest_costmap = None
+        self._maps_from = now + MAP_SETTLE_S
+        self._path = None
+        return True
 
     def _publish_blocked(self):
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = ODOM_FRAME
-        points = [(float(x), float(y), 0.0) for line in self._blocked for x, y in line]
+        points = [(float(x), float(y), 0.0) for line, _, _ in self._blocked for x, y in line]
         self.pub_blocked.publish(point_cloud2.create_cloud_xyz32(header, points))
 
     def _is_done(self, point):
@@ -837,8 +942,12 @@ class tunnel_explorer_node(Node):
 
     def _reset(self):
         self._tunnel_since = None
+        self._maps_from = None          # Karten erst ab diesem monotonic lesen (nach dem Leeren)
         self._phase = EXPLORING
         self._door = None               # (a, b, mitte, normale nach innen, breite) in odom
+        self._door_blocked = False      # Tuersperre schon gesetzt
+        self._door_missing_since = None
+        self._exit_fails = 0            # gescheiterte Ziele hinter dem bestaetigten Ausgang
         self._seeds = np.empty((0, 2))
         self._walls = set()             # (x, y) der Wandzellen in odom
         self._was_inside = False
@@ -858,10 +967,10 @@ class tunnel_explorer_node(Node):
         self._path = None
         self._done = []                 # (Ziel, gemieden bis monotonic)
         # Leere Wolke: entrance_layer traegt sonst alte Sperren aus dem Puffer wieder ein.
-        self._blocked = []              # Sperrlinien (N, 2) in odom
+        self._blocked = []              # (Sperrlinie (N, 2), Mitte, seit; None = dauerhaft), odom
         self._publish_blocked()
-        self._failed_gaps = []          # Mitten gescheiterter Durchfahrten (odom)
-        self._retry_gaps = []           # nach Waechter-Abbruch schon einmal neu versucht (odom)
+        self._failed_gaps = []          # (x, y, seit) gescheiterter Durchfahrten (odom)
+        self._retry_gaps = []           # (x, y, seit) nach Waechter-Abbruch schon neu versucht
         self._pending_passage = None    # Engstelle, zu deren Start RPP gerade faehrt
         self._waiting_for = None        # laufende Grundbewegungen (ManeuverRequest-Typ)
         self._planning_since = None
@@ -957,7 +1066,7 @@ class tunnel_explorer_node(Node):
         if self._box is not None:
             cv2.polylines(img, [np.array([px(p) for p in self._box.reshape(-1, 2)], np.int32)],
                           True, (200, 0, 200), 2)
-        for line in self._blocked:
+        for line, _, _ in self._blocked:
             cv2.line(img, px(line[0]), px(line[-1]), (0, 0, 255), 2)
         if self._door is not None:
             cv2.line(img, px(self._door[0]), px(self._door[1]), (0, 160, 0), 2)

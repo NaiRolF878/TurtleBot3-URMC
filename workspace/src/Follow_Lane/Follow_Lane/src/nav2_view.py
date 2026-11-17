@@ -1,7 +1,7 @@
 """Draufsicht fuer den Nav2-Zweig: was Nav2 sieht und plant, als Bild.
 
 Ein:  /local_costmap/costmap bzw. im Tunnel /global_costmap/costmap, Footprint, Pfade,
-      Eingangssperre, /scan_corrected, /detect/lane_mask, /control/mode, /nav2/status, /rosout,
+      Sperren (Startsperre, Tunnel-Eingang, Engstellen), /scan_corrected, /detect/lane_mask, /control/mode, /nav2/status, /rosout,
       Klicks aus rqt_image_view (/nav2/view_mouse_left)
 Aus:  /nav2/view (sensor_msgs/Image, z.B. in rqt_image_view), /control/tunnel_request (Bool, Button)
 """
@@ -142,6 +142,7 @@ class nav2_view(Node):
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(PointCloud2, '/detect/tunnel_entrance_obstacle',
                                  self.cb_entrance, 1)
+        self.create_subscription(PointCloud2, '/nav2/blocked', self.cb_blocked, 1)
         self.create_subscription(PolygonStamped, '/tunnel/exits', self.cb_exits, latched)
         self.create_subscription(PolygonStamped, '/tunnel/box', self.cb_box, latched)
         self.create_subscription(LaserScan, '/scan_corrected', self.cb_scan, qos_profile_sensor_data)
@@ -169,6 +170,7 @@ class nav2_view(Node):
         self.footprint = None
         self.active_path = None
         self.entrance = None
+        self.blocked = None
         self.exits = []             # [((ax, ay), (bx, by))] Tuerlinien in odom
         self.box = []               # Ecken des Tunnelkastens in odom
         self.scan = None
@@ -209,9 +211,15 @@ class nav2_view(Node):
         self.active_path = msg
 
     def cb_entrance(self, cloud):
-        pts = [(p[0], p[1]) for p in point_cloud2.read_points(
+        self.entrance = (cloud.header.frame_id, self._cloud_points(cloud))
+
+    def cb_blocked(self, cloud):
+        self.blocked = (cloud.header.frame_id, self._cloud_points(cloud))
+
+    @staticmethod
+    def _cloud_points(cloud):
+        return [(p[0], p[1]) for p in point_cloud2.read_points(
             cloud, field_names=('x', 'y'), skip_nans=True)]
-        self.entrance = (cloud.header.frame_id, pts)
 
     def cb_exits(self, msg):
         if msg.header.frame_id != ODOM_FRAME:
@@ -381,13 +389,15 @@ class nav2_view(Node):
                     cv2.circle(body, (u, v), 2, col, -1)
 
     def draw_entrance(self, body, px):
-        if self.control_mode != ControlType.Tunnel or not self.entrance:
+        """Sperren in Obstacle und Tunnel: Startsperre (keepout_zone_node), Tunnel-Eingang und
+        gesperrte Engstellen (/nav2/blocked). Als Punkte, die Wolke enthaelt mehrere Linien."""
+        if self.control_mode not in (ControlType.Obstacle, ControlType.Tunnel):
             return
-        frame, pts = self.entrance
-        if len(pts) < 2 or frame != ODOM_FRAME:
-            return
-        line = np.array([px(x, y) for x, y in pts], np.int32)
-        cv2.polylines(body, [line], False, WALL, 3, cv2.LINE_AA)
+        for cloud in (self.entrance, self.blocked):
+            if not cloud or cloud[0] != ODOM_FRAME:
+                continue
+            for x, y in cloud[1]:
+                cv2.circle(body, px(x, y), 2, WALL, -1, cv2.LINE_AA)
 
     def draw_box(self, body, px):
         """Rechteck des Tunnelkastens; bleibt nach dem Tunnel stehen wie der Ausgang."""

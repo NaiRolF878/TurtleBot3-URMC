@@ -1,9 +1,9 @@
-"""Sperrt im Tunnel den Eingang, damit der Bot dort nicht wieder hinausfaehrt, und im
-Obstacle-Modus die Strasse hinter dem Startpunkt, damit NavFn nicht rueckwaerts plant.
+"""Sperrt im Obstacle-Modus die Strasse hinter dem Startpunkt, damit NavFn nicht rueckwaerts
+plant, und leert beim Verlassen von Obstacle und Tunnel beide Costmaps (Sperren raeumen sich
+nicht selbst). Den Tunnel-Eingang sperrt tunnel_explorer_node (/nav2/blocked).
 
-Ein:  /control/mode, /control/clear_maps (Taste L: Sperre neu an der aktuellen Pose),
-      /detect/lane_obstacles (Spurgedaechtnis: Breite der Startsperre), TF
-Aus:  /detect/tunnel_entrance_obstacle (PointCloud2, odom; beide Sperren, entrance_layer)
+Ein:  /control/mode, /detect/lane_obstacles (Spurgedaechtnis: Breite der Startsperre), TF
+Aus:  /detect/tunnel_entrance_obstacle (PointCloud2, odom; Startsperre, entrance_layer)
 """
 import math
 import time
@@ -15,7 +15,7 @@ from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Empty, Header, UInt8
+from std_msgs.msg import Header, UInt8
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 
@@ -25,12 +25,6 @@ from Follow_Lane.src.common import (
 ODOM_FRAME = 'odom'
 ROBOT_FRAME = 'base_footprint'
 PUBLISH_PERIOD_S = 0.2
-# Heck 0.101 + footprint_padding 0.01 + 0.05 Reserve: erst dann liegt keine Wandzelle
-# mehr unter dem Bot.
-WALL_DELAY_M = 0.16
-# Laenge der Sperre (m), mittig quer zur Fahrtrichtung: Eingang max. 30 cm + je 5 cm, weil der
-# Bot nicht genau mittig steht. Der Ueberstand liegt auf der Tunnelwand.
-WALL_WIDTH_M = 0.4
 # Abstand der Wandpunkte (m): = kleinste resolution der Costmaps (global und local 0.01),
 # sonst bleiben Luecken.
 WALL_POINT_STEP_M = 0.01
@@ -38,7 +32,7 @@ WALL_POINT_STEP_M = 0.01
 # Startsperre im Obstacle-Modus (12.11.: NavFn plante wieder rueckwaerts durch den Startpunkt;
 # max_path_backward in nav2_goal_publisher verwirft solche Plaene nur, verhindert sie nicht).
 # Quer zur Fahrtrichtung beim Wechsel Lane -> Obstacle, so weit hinter der Radachse, dass sie
-# sofort frei hinter dem Heck liegt (>= WALL_DELAY_M). Je Seite reicht sie bis zur naechsten
+# sofort frei hinter dem Heck liegt (Heck 0.101 + Reserve). Je Seite reicht sie bis zur naechsten
 # gemerkten Spurlinie (Punkte bis OBSTACLE_WALL_BAND_M neben der Wandlinie) plus
 # OBSTACLE_WALL_OVERLAP_M; ohne Linie auf einer Seite (oder ohne frisches Spurgedaechtnis,
 # LANE_MAX_AGE_S) bis OBSTACLE_WALL_SEARCH_M. Keine feste Spurbreite.
@@ -53,14 +47,10 @@ COSTMAP_CLEAR_DELAY_S = 0.3
 
 
 class keepout_zone_node(Node):
-    """Sendet eine virtuelle Wand an der Stelle, an der switch_control von TunnelEntry nach
-    Tunnel wechselt (Spurlinien enden = Eingang): quer zur Fahrtrichtung durch die Radachse,
-    WALL_WIDTH_M lang, im odom-Frame, damit sie ortsfest bleibt.
-
-    Gesendet wird sie erst, wenn der Bot WALL_DELAY_M hinter der Tuer ist. Sonst stuende er
-    in ihr und Regler und Waechter saehen jede Bewegung als Kollision. Beim Verlassen des Tunnels
-    geht eine leere Wolke hinaus, sonst traegt die entrance_layer die Sperre weiter ein, und
-    COSTMAP_CLEAR_DELAY_S spaeter werden beide Costmaps geleert.
+    """Obstacle: Startsperre beim Eintritt (siehe OBSTACLE_WALL_*), im odom-Frame ortsfest.
+    Beim Verlassen von Obstacle eine leere Wolke, beim Verlassen von Obstacle und Tunnel
+    COSTMAP_CLEAR_DELAY_S spaeter beide Costmaps leeren: die entrance_layer raeumen nicht selbst
+    (clearing: false), Startsperre, Tunnel-Eingang und gesperrte Engstellen blieben sonst stehen.
     """
 
     def __init__(self):
@@ -68,8 +58,6 @@ class keepout_zone_node(Node):
 
         self.sub_control_mode = self.create_subscription(
             UInt8, '/control/mode', self.cb_control_mode, 1)
-        self.sub_clear_maps = self.create_subscription(
-            Empty, '/control/clear_maps', self.cb_clear_maps, 1)
         self.sub_lane = self.create_subscription(
             PointCloud2, '/detect/lane_obstacles', self.cb_lane_obstacles, 1)
         self.pub_entrance = self.create_publisher(PointCloud2, '/detect/tunnel_entrance_obstacle', 1)
@@ -78,8 +66,6 @@ class keepout_zone_node(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.control_mode = None
-        self._door = None               # (kante a, kante b, mitte, normale nach innen)
-        self._wall_active = False
         self._start_wall = None         # Obstacle: (kante a, kante b) in odom
         self._lane = None               # (monotonic, frame, (N, 2)) Spurgedaechtnis
 
@@ -100,47 +86,15 @@ class keepout_zone_node(Node):
         new_mode = control_mode_from_msg(self, msg)
         if new_mode is None:
             return
-        if (self.control_mode == ControlType.Tunnel) != (new_mode == ControlType.Tunnel):
-            if self._wall_active:
-                self._publish_empty()
-            self._door = None
-            self._wall_active = False
-            if self.control_mode == ControlType.Tunnel:
-                # Eingangssperre und gesperrte Engstellen stehen sonst weiter in den Karten.
-                self.clear_timer.reset()
-        if new_mode == ControlType.Tunnel and self.control_mode == ControlType.TunnelEntry:
-            self._door = self._door_at_robot('Wechsel TunnelEntry -> Tunnel')
+        if self.control_mode == ControlType.Tunnel and new_mode != ControlType.Tunnel:
+            # Tunnel-Eingang und gesperrte Engstellen (/nav2/blocked, tunnel_explorer_node sendet
+            # beim Verlassen eine leere Wolke) stehen sonst weiter in den Karten.
+            self.clear_timer.reset()
         if new_mode == ControlType.Obstacle and self.control_mode != ControlType.Obstacle:
             self._start_wall = self._start_wall_at_robot()
         elif self.control_mode == ControlType.Obstacle and new_mode != ControlType.Obstacle:
             self._remove_start_wall()
         self.control_mode = new_mode
-
-    def cb_clear_maps(self, _msg):
-        """Taste L im Tunnel: Neustart vor dem Tunnel. Die alte Sperre verschwindet, die neue
-        liegt an der Pose beim Druck auf L (Bot also erst vor den Eingang stellen) und wird wie
-        beim Moduswechsel erst WALL_DELAY_M hinter ihr aktiv."""
-        if self.control_mode != ControlType.Tunnel:
-            return
-        # Leere Wolke zuerst: entrance_layer behaelt sonst die alte Wand im Puffer und traegt sie
-        # nach dem Leeren der Costmaps (lane_costmap_node, 0,3 s spaeter) wieder ein.
-        self._publish_empty()
-        self._wall_active = False
-        self._door = self._door_at_robot('Taste L')
-
-    def _door_at_robot(self, reason):
-        """Eingang an der aktuellen Pose: Linie quer zur Fahrtrichtung durch die Radachse,
-        Normale = Fahrtrichtung (nach innen). None ohne Pose."""
-        pose = self._robot_pose()
-        if pose is None:
-            self.get_logger().warn('Keine Pose beim Wechsel in den Tunnel -- keine Eingangssperre.')
-            return None
-        x, y, yaw = pose
-        center = np.array([x, y])
-        normal = np.array([math.cos(yaw), math.sin(yaw)])
-        side = np.array([-normal[1], normal[0]]) * WALL_WIDTH_M / 2.0
-        self.get_logger().info(f'Tunnel-Eingang bei x={x:.2f} y={y:.2f} (odom, {reason}).')
-        return (center - side, center + side, center, normal)
 
     def cb_clear_timer(self):
         self.clear_timer.cancel()
@@ -207,18 +161,6 @@ class keepout_zone_node(Node):
             header.frame_id = ODOM_FRAME
             self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(
                 header, self._line_points(*self._start_wall)))
-            return
-        if self.control_mode != ControlType.Tunnel or self._door is None:
-            return
-        if not self._wall_active:
-            if self._distance_past_door() < WALL_DELAY_M:
-                return
-            self._wall_active = True
-            self.get_logger().info('Bot ist vom Eingang weg -- Eingangssperre aktiv.')
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = ODOM_FRAME
-        self.pub_entrance.publish(point_cloud2.create_cloud_xyz32(header, self._wall_points()))
 
     # --- Hilfsmethoden ---
 
@@ -237,18 +179,6 @@ class keepout_zone_node(Node):
                 f'TF-Lookup fuer Roboterpose fehlgeschlagen: {e}', throttle_duration_sec=2.0)
             return None
         return pose2d_from_transform(tf)
-
-    def _distance_past_door(self):
-        """Wie weit die Radachse hinter der Tuerlinie steht (m); 0 ohne Pose."""
-        pose = self._robot_pose()
-        if pose is None:
-            return 0.0
-        _, _, center, normal = self._door
-        return float((np.array(pose[:2]) - center) @ normal)
-
-    def _wall_points(self):
-        a, b, _, _ = self._door
-        return self._line_points(a, b)
 
     @staticmethod
     def _line_points(a, b):
